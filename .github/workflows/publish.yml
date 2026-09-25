@@ -64,19 +64,30 @@ jobs:
       - name: Decide what this run does
         id: plan
         working-directory: dango
+        # The registry is asked directly, with a query string that no cache has
+        # seen. The registry's CDN keeps an answer for up to five minutes, a
+        # 404 included, so asking the ordinary way right after a first publish
+        # can be told the package does not exist. Anything but a 200 or a 404
+        # stops the run rather than being read as either.
         run: |
           name=$(node -p "require('./package.json').name")
           version=$(node -p "require('./package.json').version")
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          if [ -z "$(npm view "$name" name 2>/dev/null)" ]; then
+          url="https://registry.npmjs.org/$(node -p "encodeURIComponent('$name')")?fresh=$(date +%s%N)"
+          code=$(curl -sS -o packument.json -w '%{http_code}' "$url")
+          if [ "$code" = "404" ]; then
             echo "action=first" >> "$GITHUB_OUTPUT"
             echo "::warning::$name has never been published. npm attaches a trusted publisher only to a package that exists, so publish $version by hand once (npm login; npm publish), register this workflow as its trusted publisher, and run this workflow again to tag it and build its image."
-          elif [ "$(npm view "$name@$version" version 2>/dev/null)" = "$version" ]; then
+          elif [ "$code" != "200" ]; then
+            echo "::error::the registry answered HTTP $code for $name, so whether $version is published is unknown"
+            exit 1
+          elif node -e "process.exit(require('./packument.json').versions?.['$version'] ? 0 : 1)"; then
             echo "action=tag" >> "$GITHUB_OUTPUT"
             echo "$name@$version is already on npm; tagging and building its image only."
           else
             echo "action=publish" >> "$GITHUB_OUTPUT"
           fi
+          rm -f packument.json
 
       - name: Install
         if: steps.plan.outputs.action != 'first'
