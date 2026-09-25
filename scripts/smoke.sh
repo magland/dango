@@ -60,6 +60,9 @@ trap cleanup EXIT
 # dies writing to a closed pipe, and under pipefail the pipeline fails even
 # though the match was found: on a long page, only when the match comes early.
 grep_all() { local text; text="$(cat)"; grep "$@" <<< "$text"; }
+# The form token on a page, read from all of it: the same trouble as above
+# makes `curl | grep -m1` fail whenever curl is still writing when grep stops.
+csrf_in() { local page; page="$(cat)"; grep -o 'name="csrf" value="[^"]*"' <<< "$page" | sed -n '1s/.*value="//;1s/"//;1p'; }
 
 CHECKS=0
 ok() { CHECKS=$((CHECKS + 1)); echo "ok: $1"; }
@@ -184,7 +187,7 @@ JAR="$TMP/alice.jar"
 PAGE="$(curl -s -b "$JAR" "$BASE/c/general")"
 echo "$PAGE" | grep_all -q "hello from the CLI" || fail "the channel page does not show messages"
 ok "signing in on the web, and a channel page"
-CSRF="$(echo "$PAGE" | grep -o -m1 'name="csrf" value="[^"]*"' | sed 's/.*value="//;s/"//' | sed -n 1p)"
+CSRF="$(csrf_in <<< "$PAGE")"
 [ "$(curl -s -b "$JAR" -o /dev/null -w '%{http_code}' -F "body=no token" "$BASE/c/general/messages")" = "403" ] || fail "a form without its CSRF token was accepted"
 ok "a form without its CSRF token is refused"
 
@@ -277,7 +280,7 @@ ok "the token an invite carries signs its person in"
 ok "'invite' cannot be a username"
 ADMIN_JAR="$TMP/owner.jar"
 curl -s -c "$ADMIN_JAR" -o /dev/null -d "token=$OWNER&next=/admin" "$BASE/login"
-ADMIN_CSRF="$(curl -s -b "$ADMIN_JAR" "$BASE/admin" | grep -o -m1 'name="csrf" value="[^"]*"' | sed 's/.*value="//;s/"//' | sed -n 1p)"
+ADMIN_CSRF="$(curl -s -b "$ADMIN_JAR" "$BASE/admin" | csrf_in)"
 curl -s -b "$ADMIN_JAR" -d "csrf=$ADMIN_CSRF&username=dave" "$BASE/admin/users/add" | grep_all -q "value=\"$BASE/invite#token=dango_" \
   || fail "the admin page's new-user result has no invite link"
 ok "adding someone on the admin page shows their invite link"
@@ -322,7 +325,7 @@ ok "one person sending faster than 20 a minute is refused, with how long to wait
 # From here on the checks send as carol: alice has sent more than twenty
 # messages in the last minute, and the limit just tested would refuse her.
 CJAR="$TMP/carol.jar"
-CCSRF="$(curl -s -b "$CJAR" "$BASE/c/general" | grep -o -m1 'name="csrf" value="[^"]*"' | sed 's/.*value="//;s/"//' | sed -n 1p)"
+CCSRF="$(curl -s -b "$CJAR" "$BASE/c/general" | csrf_in)"
 DEL="$(api "$CAROL" POST /channels/general/messages '{"body":"about to go"}' | jget id)"
 [ -n "$DEL" ] || fail "carol could not send a message to delete"
 PAGE="$(curl -s -b "$CJAR" "$BASE/c/general/m/$DEL/delete")"
