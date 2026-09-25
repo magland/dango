@@ -16,8 +16,11 @@ const CHAT_CSS = `
    A chat is one screen, not a scrolling document: the sidebar and the room
    header stay put and the message list is the only thing that moves. So the
    frame is a grid pinned to the viewport, and the column that scrolls is
-   inside it. */
-.app { display: grid; grid-template-columns: 250px minmax(0, 1fr); height: 100vh; height: 100dvh; }
+   inside it. The one row is held to the frame's height, so nothing in it can
+   make the frame taller than the screen and push the composer off the
+   bottom. The page script sets the height from what is actually visible,
+   which not every phone browser agrees 100dvh is. */
+.app { display: grid; grid-template-columns: 250px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); height: 100vh; height: 100dvh; }
 .app-side {
   display: flex; flex-direction: column; min-height: 0;
   background: var(--surface); border-right: 1px solid var(--border);

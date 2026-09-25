@@ -114,6 +114,27 @@ function scrollToBottom() {
   var pane = scrollPane();
   if (pane) pane.scrollTop = pane.scrollHeight;
 }
+// ---- the frame ----
+// The frame is one screen high, the composer at its foot. 100dvh says so in
+// the sheet, and is what a page gets without script, but phone browsers do
+// not all agree on it (an address bar at the bottom, a screen drawn under
+// the system's navigation bar), and iOS leaves the keyboard out of it. The
+// visual viewport is what is on screen, so the frame is sized to it; the
+// scale puts back what a pinch zoom takes, so zooming does not shrink the
+// frame. A browser that moved the page to show a focused field is moved
+// back, since the frame now fits above the keyboard by itself.
+function fitFrame() {
+  var app = document.querySelector('.app');
+  var vv = window.visualViewport;
+  if (!app || !vv) return;
+  app.style.height = Math.round(vv.height * vv.scale) + 'px';
+  if (window.scrollY) window.scrollTo(0, 0);
+}
+document.addEventListener('DOMContentLoaded', function () {
+  fitFrame();
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', fitFrame);
+});
+
 // Rooms open at the newest message, which is where the conversation is, and
 // the view stays there while the reader does, whatever changes its height:
 // an image arriving after the page, a message repainted, the composer
@@ -130,6 +151,14 @@ document.addEventListener('DOMContentLoaded', function () {
     watch.observe(pane);
     watch.observe(list);
   }
+});
+// A room brought back from the browser's back-forward cache is where it was
+// left, which is not where the conversation is now.
+window.addEventListener('pageshow', function (e) {
+  if (!e.persisted || !msgList()) return;
+  fitFrame();
+  scrollToBottom();
+  stuckToBottom = true;
 });
 
 // One EventSource per open room page. The stream sends {type, id, html};
