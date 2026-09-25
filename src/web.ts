@@ -30,18 +30,20 @@ import {
 } from './channels';
 import { updateConfig } from './config';
 import { openDm } from './dms';
-import { RoomEvent, publish, serveEvents } from './events';
+import { RoomEvent, publish, serveEvents, serveUserEvents } from './events';
 import {
   Attachment,
-  addMessage,
+  Message,
   deleteMessage,
   editMessage,
   filesDir,
+  lastMessageId,
   readMessage,
   readMessages,
   toggleReaction,
 } from './messages';
 import { canDeleteMessage, canEditMessage, isSiteAdmin } from './perms';
+import { noteRead, postMessage } from './post';
 import { Room, channelRoom, dmRoom, threadRoom } from './rooms';
 import { searchMessages } from './search';
 import * as views from './views';
@@ -413,15 +415,25 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
   const BASES = ['/c/:channel', '/d/:dm'];
   const ROOM_PATHS = (suffix: string) => BASES.flatMap((b) => [`${b}${suffix}`, `${b}/t/:tid${suffix}`]);
 
+  // Rendering a room is reading it: the viewer's marker moves to the newest
+  // message shown, and their other pages hear that the count is now zero.
+  const seen = (viewer: Viewer, room: Room, messages: Message[]) => {
+    if (messages.length) noteRead(root, viewer.auth.username, room, messages[messages.length - 1].id);
+  };
+
   // The room pages themselves.
   app.get('/c/:channel', (req, res) =>
     withRoom(req, res, (viewer, room) => {
-      res.type('html').send(views.channelPage(root, room, readMessages(room.dir, { limit: 100 }), viewer));
+      const messages = readMessages(room.dir, { limit: 100 });
+      seen(viewer, room, messages);
+      res.type('html').send(views.channelPage(root, room, messages, viewer));
     })
   );
   app.get('/d/:dm', (req, res) =>
     withRoom(req, res, (viewer, room) => {
-      res.type('html').send(views.dmPage(root, room, readMessages(room.dir, { limit: 100 }), viewer));
+      const messages = readMessages(room.dir, { limit: 100 });
+      seen(viewer, room, messages);
+      res.type('html').send(views.dmPage(root, room, messages, viewer));
     })
   );
   app.get(['/c/:channel/t/:tid', '/d/:dm/t/:tid'], (req, res) =>
@@ -431,9 +443,52 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         fail(res, viewer, 404, 'Page not found');
         return;
       }
-      res.type('html').send(views.threadPage(root, room, anchor, readMessages(room.dir, { limit: 200 }), viewer));
+      const replies = readMessages(room.dir, { limit: 200 });
+      seen(viewer, room, replies);
+      res.type('html').send(views.threadPage(root, room, anchor, replies, viewer));
     })
   );
+
+  // A page that is open and visible when a message arrives has read it, and
+  // says so here, so the count does not sit at one on every other device.
+  app.post(ROOM_PATHS('/read'), formBody, (req, res) =>
+    withRoom(
+      req,
+      res,
+      (viewer, room) => {
+        const id = parseInt(String((req.body as Record<string, unknown>).id ?? ''), 10);
+        if (Number.isInteger(id) && id > 0) noteRead(root, viewer.auth.username, room, Math.min(id, lastMessageId(room.dir)));
+        res.status(204).end();
+      },
+      { form: true }
+    )
+  );
+
+  // One stream per person, whichever page is open: their rooms' counts as
+  // they change. What it says is only what the sidebar already shows.
+  app.get('/events', (req, res) => {
+    const viewer = requireViewer(req, res);
+    if (!viewer) return;
+    serveUserEvents(res, viewer.auth.username);
+  });
+
+  // Every member, as names, for the composer to complete an @ against
+  // without a round trip per keystroke. It says no more than the new
+  // conversation page already lists to the same eyes.
+  app.get('/assets/users.json', (req, res) => {
+    const viewer = getViewer(req, root);
+    if (!viewer) {
+      res.status(401).json([]);
+      return;
+    }
+    const state = loadVault(root);
+    const users = state.status === 'ok' ? Object.entries(state.vault.users) : [];
+    res.set('Cache-Control', 'private, no-cache').json(
+      users
+        .map(([name, u]) => (u.profile?.name ? { name, display: u.profile.name } : { name }))
+        .sort((a, b) => a.name.localeCompare(b.name))
+    );
+  });
 
   // The event stream: catch up from ?after, then live.
   app.get(ROOM_PATHS('/events'), (req, res) =>
@@ -472,17 +527,14 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
           names.add(unique);
           files.push({ name: unique, size: p.data.length });
         }
-        const m = addMessage(room.dir, { author: viewer.auth.username, body, files });
-        if (files.length) {
-          const dir = filesDir(room.dir, m.id);
+        // The files are written before anyone is told about the message, so
+        // a page that renders it on the event finds them there.
+        postMessage(root, room, { author: viewer.auth.username, body, files }, (id) => {
+          if (!files.length) return;
+          const dir = filesDir(room.dir, id);
           fs.mkdirSync(dir, { recursive: true });
           parts.forEach((p, i) => fs.writeFileSync(path.join(dir, files[i].name), p.data, { mode: 0o600 }));
-        }
-        publish(room.url, { type: 'message', message: m });
-        if (room.kind === 'thread') {
-          const parent = readMessage(room.parent!.dir, room.threadOf!);
-          if (parent) publish(room.parent!.url, { type: 'update', message: parent });
-        }
+        });
         res.redirect(303, room.url);
       },
       { form: true }
@@ -573,9 +625,13 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       }
       res.setHeader('Content-Security-Policy', 'sandbox');
       res.setHeader('X-Content-Type-Options', 'nosniff');
-      if (!/\.(png|jpe?g|gif|webp|avif|svg|txt|pdf)$/i.test(name)) {
+      // Shown or played in place where the browser can; everything else is a
+      // download. A PDF is a download: the sandbox above stops the PDF viewer,
+      // which is a plugin, so inline it would be a blank page.
+      if (!/\.(png|jpe?g|gif|webp|avif|svg|txt|wav|mp3|ogg|oga|opus|flac|m4a|aac|weba|mp4|m4v|webm|ogv|mov)$/i.test(name)) {
         res.setHeader('Content-Disposition', 'attachment');
       }
+      // sendFile answers range requests, which is what lets a player seek.
       res.sendFile(file);
     })
   );

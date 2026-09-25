@@ -53,10 +53,35 @@ const CHAT_CSS = `
 .side-rooms .room-glyph { color: var(--fg-subtle); flex: none; width: 1em; text-align: center; }
 .side-foot {
   flex: none; display: flex; align-items: center; gap: var(--s2);
-  padding: var(--s2) var(--s4); border-top: 1px solid var(--border-soft);
+  padding: var(--s2) var(--s3) var(--s2) var(--s2); border-top: 1px solid var(--border-soft);
   font-size: var(--t-sm);
 }
-.side-foot .whoami { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--fg); }
+/* The account menu's button is the viewer's face and name, the width of the
+   foot, and the menu opens upward from it: the foot is the bottom of the
+   viewport, and a menu opening downward from there is a menu nobody sees. */
+.side-foot .user-menu { flex: 1; min-width: 0; }
+.side-user {
+  display: flex; align-items: center; gap: var(--s2);
+  padding: 4px var(--s2); border-radius: var(--radius); min-height: var(--touch);
+}
+.side-user:hover { background: var(--surface-hover); }
+.side-user .whoami { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--fg); }
+.side-user > svg:last-child { color: var(--fg-subtle); flex: none; }
+.dropdown-menu.dd-up { top: auto; bottom: calc(100% + 6px); margin-top: 0; width: 240px; }
+
+/* Unread counts: a filled rectangle at the end of the room's row, in the
+   sheet's own corner radius, and stronger when a mention is waiting. A room
+   with news is set in the text colour and bold, so it reads even without
+   the number. */
+.badge {
+  margin-left: auto; flex: none; min-width: 20px; padding: 0 6px; text-align: center;
+  border-radius: var(--radius); font-size: var(--t-xs); font-weight: 700; line-height: 18px;
+  background: var(--fg-muted); color: var(--bg);
+}
+.badge.mention { background: var(--danger); color: var(--on-danger); }
+.side-rooms li a.unread { color: var(--fg); font-weight: 600; }
+.side-rooms li a .room-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.doc a .badge { display: inline-block; vertical-align: middle; margin-left: 4px; }
 
 /* --- the room --- */
 .room-head {
@@ -132,6 +157,14 @@ const CHAT_CSS = `
 }
 .msg-files a:hover { border-color: var(--accent-soft); color: var(--fg); text-decoration: none; }
 .msg-img { max-width: min(420px, 100%); max-height: 320px; border-radius: var(--radius); border: 1px solid var(--border-soft); display: block; margin-top: 6px; }
+/* A playable attachment: its name above, the browser's own controls below. */
+.msg-media { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.msg-media audio { width: min(420px, 100%); display: block; }
+.msg-video { max-width: min(560px, 100%); max-height: 400px; border-radius: var(--radius); border: 1px solid var(--border-soft); display: block; background: #000; }
+
+/* A message naming the viewer carries a rule down its left side, the way a
+   flagged line does everywhere else in this vocabulary. */
+.msg.mentions-me { border-left: 3px solid var(--danger); padding-left: calc(var(--s2) - 3px); background: var(--err-bg); }
 
 /* The day rule: a line with the date resting on it, dividing one day's
    messages from the next the way a section rule divides a page. */
@@ -149,6 +182,20 @@ const CHAT_CSS = `
   border: 1px solid var(--border); border-radius: var(--radius); background: var(--input-bg);
 }
 .composer-box:focus-within { border-color: var(--accent); }
+/* Completing an @: a list above the text, in the dropdown's clothes, with
+   the chosen row filled as a hovered one would be. */
+.composer-box { position: relative; }
+.mention-list {
+  position: absolute; left: 8px; bottom: calc(100% + 4px); z-index: 20; width: 280px; max-height: 240px; overflow-y: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 8px 24px var(--shadow);
+}
+.mention-list button {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 12px; text-align: left;
+  border: none; border-top: 1px solid var(--border-soft); background: none; font: inherit; font-size: var(--t-sm); color: var(--fg); cursor: pointer;
+}
+.mention-list button:first-child { border-top: none; }
+.mention-list button:hover, .mention-list button.picked { background: var(--surface); }
+.mention-list .muted { margin-left: auto; font-size: var(--t-xs); }
 .composer textarea {
   border: none; background: none; resize: none; min-height: 42px; max-height: 40vh;
   padding: 10px 12px; font: inherit; font-size: var(--t-base); color: var(--fg); width: 100%;

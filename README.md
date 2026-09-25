@@ -37,10 +37,12 @@ The same command deploys updates, and `dango backup ~/backups/chat --snapshot` k
 
 ## What it does
 
-- **Channels,** public to every member or private to a member list. Messages are markdown with KaTeX, @mentions, and emoji.
+- **Channels,** public to every member or private to a member list. Messages are markdown with KaTeX and emoji.
+- **@mentions,** completed as you type; a message naming you is marked in the room and counted in the sidebar.
+- **Unread counts** in the sidebar and the tab title, kept on the server per person, so reading a room on one device clears it on the others.
 - **Threads** hung off any message, **reactions** toggled per person, **editing and deleting** your own messages (a deletion leaves a tombstone, so a thread keeps its anchor).
 - **Direct messages,** one conversation per set of up to nine people.
-- **File attachments,** stored in the workspace and served only to who could read the message, with a sandbox policy so an uploaded page is never a page of ours.
+- **File attachments,** stored in the workspace and served only to who could read the message. Images, audio, and video show or play in place; everything else is a download, under a sandbox policy so an uploaded page is never a page of ours.
 - **Live delivery** over server-sent events. Every form also works with no script at all; the page script only makes things quieter.
 - **Search** across everything you can read, walked from the files when asked.
 - **CLI and JSON API** covering the same operations, bearer-token only, with `--json` everywhere and the exit codes scripts want.
@@ -63,6 +65,9 @@ A workspace is one directory. No database, no state outside it; backup is `cp -a
   dms/
     1/
       conversation.json   participants, and the same layout as a channel
+  users/
+    alice/
+      read.json           the newest message she has seen in each room
 ```
 
 Every message is a markdown file a person can read, grep, and edit with ordinary tools, the way mochi stores issues. Message numbers are allocated by exclusive create, so concurrent writers cannot collide.
@@ -90,7 +95,7 @@ The example workspace has site admin `dev` with token `dango_example_dev_token_0
 ## Limitations and roadmap
 
 - One process serves the workspace. Events are delivered in-process, so a second server on the same directory would render correct pages but not push the other's messages.
-- No unread markers or notifications yet; a room is current when you are looking at it.
+- Unread counts cover what arrives in a room, not replies inside its threads; a thread is read from its message. Nothing reaches you outside the app: no email, no push.
 - Signing in takes the token each time on a new browser. Passkeys and GitHub sign-in exist in the shared modules and are the natural next step.
 - Search walks the files on every query, which is fine well past the point where a workspace is large; an index can come later without changing what is stored.
 

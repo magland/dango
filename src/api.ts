@@ -24,14 +24,16 @@ import { DmInfo, listDmsFor, openDm } from './dms';
 import { publish } from './events';
 import {
   Message,
-  addMessage,
   deleteMessage,
   editMessage,
+  lastMessageId,
   readMessage,
   readMessages,
   toggleReaction,
 } from './messages';
 import { canDeleteMessage, canEditMessage, canSeeChannel, isSiteAdmin } from './perms';
+import { noteRead, postMessage } from './post';
+import { unreadRooms } from './reads';
 import { Room, channelRoom, dmRoom, threadRoom } from './rooms';
 import { searchMessages } from './search';
 import { isValidWorkspaceUserName } from './workspace';
@@ -255,12 +257,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         apiError(res, 400, 'send {"body": "..."}');
         return;
       }
-      const m = addMessage(room.dir, { author: auth.username, body: text });
-      publish(room.url, { type: 'message', message: m });
-      if (room.kind === 'thread') {
-        const parent = readMessage(room.parent!.dir, room.threadOf!);
-        if (parent) publish(room.parent!.url, { type: 'update', message: parent });
-      }
+      const m = postMessage(root, room, { author: auth.username, body: text });
       res.status(201).json(messageJson(m));
     })
   );
@@ -316,6 +313,23 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
       const m = toggleReaction(room.dir, intParam(req.params.mid), emoji, auth.username);
       publish(room.url, { type: 'update', message: m });
       res.json(messageJson(m));
+    })
+  );
+
+  // ---- what is unread ----
+
+  app.get('/api/unread', (req, res) =>
+    withAuth(req, res, (auth) => {
+      res.json({ rooms: unreadRooms(root, auth).filter((r) => r.count > 0) });
+    })
+  );
+
+  app.post(ROOM_PATHS('/read'), json, (req, res) =>
+    withRoom(req, res, (auth, room) => {
+      const id = body(req).id;
+      const upTo = typeof id === 'number' && Number.isInteger(id) && id > 0 ? Math.min(id, lastMessageId(room.dir)) : lastMessageId(room.dir);
+      noteRead(root, auth.username, room, upTo);
+      res.json({ read: upTo });
     })
   );
 

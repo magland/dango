@@ -47,10 +47,71 @@ export function subscribe(roomUrl: string, fn: Listener): () => void {
 }
 
 /**
- * Serve one event stream. The caller has already resolved the room and the
- * viewer, and hands in the render that personalizes a message for them; what
- * remains is the SSE mechanics: headers, a comment heartbeat so proxies do
- * not reap the idle connection, and cleanup when the client goes.
+ * What every page of one person's is told, whichever room it shows: a room's
+ * unread count changed, because somebody wrote there or because a page of
+ * theirs elsewhere read it. Keyed by username, so a person with three tabs
+ * and two devices open holds several listeners under one key.
+ */
+export interface UserEvent {
+  type: 'unread';
+  url: string;
+  title: string;
+  count: number;
+  mentions: number;
+}
+
+type UserListener = (event: UserEvent) => void;
+
+const userListeners = new Map<string, Set<UserListener>>();
+
+export function publishToUser(username: string, event: UserEvent): void {
+  const set = userListeners.get(username);
+  if (!set) return;
+  for (const fn of set) fn(event);
+}
+
+/** Who has a page open right now, which is who a change of counts can reach. */
+export function listeningUsers(): string[] {
+  return [...userListeners.keys()];
+}
+
+export function subscribeUser(username: string, fn: UserListener): () => void {
+  let set = userListeners.get(username);
+  if (!set) {
+    set = new Set();
+    userListeners.set(username, set);
+  }
+  set.add(fn);
+  return () => {
+    set!.delete(fn);
+    if (set!.size === 0) userListeners.delete(username);
+  };
+}
+
+function openStream(res: Response): { write: (id: string, payload: unknown) => void; close: (fn: () => void) => void } {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'X-Accel-Buffering': 'no',
+    Connection: 'keep-alive',
+  });
+  // A comment heartbeat, so a proxy does not reap the idle connection.
+  const heartbeat = setInterval(() => res.write(': ping\n\n'), 25000);
+  return {
+    write: (id, payload) => res.write(`id: ${id}\ndata: ${JSON.stringify(payload)}\n\n`),
+    close: (fn) => {
+      res.on('close', () => {
+        clearInterval(heartbeat);
+        fn();
+      });
+    },
+  };
+}
+
+/**
+ * Serve one room's event stream. The caller has already resolved the room
+ * and the viewer, and hands in the render that personalizes a message for
+ * them; what remains is the SSE mechanics.
  */
 export function serveEvents(
   res: Response,
@@ -58,24 +119,19 @@ export function serveEvents(
   catchUp: RoomEvent[],
   render: (event: RoomEvent) => string
 ): void {
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'X-Accel-Buffering': 'no',
-    Connection: 'keep-alive',
-  });
+  const stream = openStream(res);
   const send = (event: RoomEvent) => {
-    const payload = { type: event.type, id: event.message.id, html: render(event) };
-    res.write(`id: ${event.message.id}\ndata: ${JSON.stringify(payload)}\n\n`);
+    stream.write(String(event.message.id), { type: event.type, id: event.message.id, html: render(event) });
   };
   // Catch-up first: messages that arrived between the page render and this
   // stream opening. The client replaces any element it already has, so a
   // message seen both ways renders once.
   for (const event of catchUp) send(event);
-  const unsubscribe = subscribe(roomUrl, send);
-  const heartbeat = setInterval(() => res.write(': ping\n\n'), 25000);
-  res.on('close', () => {
-    clearInterval(heartbeat);
-    unsubscribe();
-  });
+  stream.close(subscribe(roomUrl, send));
+}
+
+/** Serve one person's stream of count changes, for the sidebar on every page. */
+export function serveUserEvents(res: Response, username: string): void {
+  const stream = openStream(res);
+  stream.close(subscribeUser(username, (event) => stream.write('0', event)));
 }

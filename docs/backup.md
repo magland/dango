@@ -29,7 +29,7 @@ The copy includes `workspace.json`, so everyone's tokens work against it exactly
 
 The server offers two routes, both for site admins only: a manifest listing every file in the workspace with its size and modification time, and a bulk fetch of named files. The client compares the manifest against what it already holds and fetches only what differs, so after the first run a nightly backup moves that day's messages and uploads and little else. A workspace has no git repositories, so unlike a vault backup there are no mirrors; every part of it is an ordinary file.
 
-What the manifest covers: `workspace.json`, `config.json`, and `.secret` at the root, and every file under `channels/` and `dms/`, which is every message, thread, conversation, and upload.
+What the manifest covers: `workspace.json`, `config.json`, and `.secret` at the root, every file under `channels/` and `dms/`, which is every message, thread, conversation, and upload, and `users/`, which holds what each person has read.
 
 ## Options
 

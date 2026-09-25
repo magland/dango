@@ -8,11 +8,12 @@ import { THEMES, activeTheme, darkFor } from '../../mochiforge/src/themes';
 import { UserProfile, Vault, loadVault, userExists } from '../../mochiforge/src/vault';
 import { ChannelInfo, listChannels } from './channels';
 import { loadConfig } from './config';
-import { DmInfo, dmTitle, listDmsFor } from './dms';
+import { DmInfo, dmTitle } from './dms';
 import { MARK } from './logo';
 import { Attachment, Message } from './messages';
 import { pageScript } from './pagescript';
 import { canDeleteMessage, canEditMessage, canSeeChannel, isSiteAdmin } from './perms';
+import { RoomUnread, UNREAD_CAP, mentionsUser, unreadRooms } from './reads';
 import { Room } from './rooms';
 import { styleSheet } from './style';
 
@@ -49,45 +50,55 @@ function themeMenu(): Html {
   return joinHtml(items);
 }
 
+/**
+ * The account menu. Its button is the viewer's own name and face at the foot
+ * of the sidebar, and it opens upward: the foot sits at the bottom of the
+ * viewport, so a menu opening downward from it would be off the screen.
+ */
 function userMenu(opts: PageOpts): Html {
   const viewer = opts.viewer!;
   const admin = isSiteAdmin(viewer.auth);
-  return html`<details class="dropdown user-menu"><summary class="topbar-icon" aria-label="Account">${icon('kebab')}</summary><div class="dropdown-menu dd-right" role="menu">
+  return html`<details class="dropdown user-menu"><summary class="side-user" aria-label="Account menu">${avatar(viewer.auth.username, 24)}<span class="whoami">${viewer.auth.username}</span>${icon('kebab')}</summary><div class="dropdown-menu dd-up" role="menu">
 <a class="dd-item" href="/${encodeURIComponent(viewer.auth.username)}">${icon('person')} Profile</a>
 <a class="dd-item" href="/account">${icon('sliders')} Account</a>
 ${admin ? html`<a class="dd-item" href="/admin">${icon('server')} Admin</a>` : ''}
-<div class="dd-sep"></div>
+<div class="dd-section">Appearance</div>
 ${themeMenu()}
-<div class="dd-sep"></div>
 <form method="post" action="/logout">${csrfField(viewer)}<button class="dd-item" type="submit">Sign out</button></form>
 </div></details>`;
 }
 
-function roomLink(url: string, glyph: Html | string, label: string, active?: string): Html {
-  const cls = url === active ? 'current' : '';
-  return html`<li><a class="${cls}" href="${url}"><span class="room-glyph">${glyph}</span><span>${label}</span></a></li>`;
+/** The count beside a room, or nothing; marked when a mention is among what is unread. */
+export function badge(u: { count: number; mentions: number }): Html {
+  if (u.count === 0) return html`<span class="badge" data-room-badge hidden></span>`;
+  const text = u.count > UNREAD_CAP ? `${UNREAD_CAP}+` : String(u.count);
+  return html`<span class="badge ${u.mentions ? 'mention' : ''}" data-room-badge title="${u.count} unread${u.mentions ? `, ${u.mentions} mentioning you` : ''}">${text}</span>`;
+}
+
+function roomLink(u: RoomUnread, glyph: Html | string, active?: string): Html {
+  const cls = [u.url === active ? 'current' : '', u.count ? 'unread' : ''].join(' ');
+  const label = u.kind === 'channel' ? u.title.slice(1) : u.title;
+  return html`<li><a class="${cls}" href="${u.url}" data-room="${u.url}"><span class="room-glyph">${glyph}</span><span class="room-name">${label}</span>${badge(u)}</a></li>`;
 }
 
 function sidebar(opts: PageOpts): Html {
   const viewer = opts.viewer!;
   const root = opts.root;
   const auth = viewer.auth;
-  const channels = listChannels(root).filter((c) => canSeeChannel(auth, c));
-  const dms = listDmsFor(root, auth.username);
+  const rooms = unreadRooms(root, auth);
+  const privateNames = new Set(listChannels(root).filter((c) => c.private).map((c) => `/c/${encodeURIComponent(c.name)}`));
   const wsName = loadConfig(root).name;
   return html`<nav class="app-side">
 <div class="side-head"><a class="brand" href="/">${raw(MARK)}<span>${wsName}</span></a></div>
 <div class="side-rooms">
 <div class="side-cap"><span>Channels</span><a href="/new" title="New channel">${icon('plus')}</a></div>
 <ul>${joinHtml(
-    channels.map((c) =>
-      roomLink(`/c/${encodeURIComponent(c.name)}`, c.private ? icon('lock') : '#', c.name, opts.active)
-    )
+    rooms.filter((r) => r.kind === 'channel').map((r) => roomLink(r, privateNames.has(r.url) ? icon('lock') : '#', opts.active))
   )}</ul>
 <div class="side-cap"><span>Direct messages</span><a href="/d/new" title="New conversation">${icon('plus')}</a></div>
-<ul>${joinHtml(dms.map((d) => roomLink(`/d/${d.id}`, icon('comment'), dmTitle(d, auth.username), opts.active)))}</ul>
+<ul>${joinHtml(rooms.filter((r) => r.kind === 'dm').map((r) => roomLink(r, icon('comment'), opts.active)))}</ul>
 </div>
-<div class="side-foot">${avatar(auth.username, 24)}<span class="whoami">${auth.username}</span><a class="topbar-icon" href="/search" aria-label="Search">${icon('search')}</a>${userMenu(opts)}</div>
+<div class="side-foot">${userMenu(opts)}<a class="topbar-icon" href="/search" aria-label="Search">${icon('search')}</a></div>
 </nav>`;
 }
 
@@ -95,15 +106,18 @@ export function layout(title: string, main: Html, opts: PageOpts): string {
   const theme = activeTheme().name;
   const sheet = styleSheet(activeTheme()).tag;
   const script = pageScript().tag;
+  // The frame says which room it shows and who is looking, for the page
+  // script: the count stream marks the current room read as messages arrive,
+  // and the composer's @-completion needs to know whom not to suggest.
   const body = opts.viewer
-    ? html`<div class="app ${opts.roomsPage ? 'rooms-page' : ''}">${sidebar(opts)}<div class="app-main">${main}</div></div>`
+    ? html`<div class="app ${opts.roomsPage ? 'rooms-page' : ''}" data-viewer="${opts.viewer.auth.username}" data-current-room="${opts.active ?? ''}" data-csrf="${opts.viewer.csrf}">${sidebar(opts)}<div class="app-main">${main}</div></div>`
     : html`<main class="container" style="padding-top: 48px">${main}</main>`;
   return html`<!doctype html>
 <html lang="en" data-theme-vault="${theme}" data-theme-dark="${darkFor(activeTheme())}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${title}</title>
+<title data-title="${title}">${title}</title>
 <link rel="stylesheet" href="/assets/style.css?t=${encodeURIComponent(theme)}&amp;v=${sheet}">
 <link rel="stylesheet" href="/assets/katex/katex.css">
 <link rel="icon" href="/favicon.svg?t=${encodeURIComponent(theme)}" type="image/svg+xml">
@@ -122,7 +136,13 @@ function doc(title: string, content: Html, opts: PageOpts): string {
 
 // ---- messages ----
 
+// What the browser can show or play by itself. Anything else is a link, and
+// a PDF is one too: attachments are served under a sandbox policy, and a
+// sandboxed document cannot run the PDF viewer, so opening one inline would
+// show a blank page rather than the document.
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|svg|avif)$/i;
+const AUDIO_RE = /\.(wav|mp3|ogg|oga|opus|flac|m4a|aac|weba)$/i;
+const VIDEO_RE = /\.(mp4|m4v|webm|ogv|mov)$/i;
 
 function bodyHtml(root: string, body: string): Html {
   return raw(
@@ -140,6 +160,14 @@ function fileRows(roomUrl: string, id: number, files: Attachment[]): Html | '' {
     const href = `${roomUrl}/files/${id}/${encodeURIComponent(f.name)}`;
     if (IMAGE_RE.test(f.name)) {
       return html`<li><a href="${href}"><img class="msg-img" src="${href}" alt="${f.name}"></a></li>`;
+    }
+    // The name links to the file above its player, so it can still be saved.
+    // Audio is not fetched until played; a video fetches enough for a poster.
+    if (AUDIO_RE.test(f.name)) {
+      return html`<li class="msg-media"><a href="${href}">${icon('file')} ${f.name}</a><audio controls preload="none" src="${href}"></audio></li>`;
+    }
+    if (VIDEO_RE.test(f.name)) {
+      return html`<li class="msg-media"><a href="${href}">${icon('file')} ${f.name}</a><video class="msg-video" controls preload="metadata" src="${href}"></video></li>`;
     }
     return html`<li><a href="${href}">${icon('file')} ${f.name}</a></li>`;
   });
@@ -193,7 +221,10 @@ export function messageHtml(root: string, room: Room, m: Message, viewer: Viewer
       ? html`<a class="thread-link" href="${room.url}/t/${m.id}">${icon('comment')} ${m.replyCount} ${m.replyCount === 1 ? 'reply' : 'replies'}</a>`
       : '';
   const below = reactions.length || thread ? html`<div class="msg-below">${joinHtml(reactions)}${thread}</div>` : '';
-  return html`<li class="msg" id="msg-${m.id}" data-mid="${m.id}">${avatar(m.author, 32)}<div class="msg-main">
+  // A message that names the viewer is marked down its left side, so it can be
+  // found in a scroll the way a flagged line can be found on a page.
+  const mine = mentionsUser(m.body, viewer.auth.username) ? 'mentions-me' : '';
+  return html`<li class="msg ${mine}" id="msg-${m.id}" data-mid="${m.id}">${avatar(m.author, 32)}<div class="msg-main">
 <div class="msg-head"><a class="author" href="/${encodeURIComponent(m.author)}">${m.author}</a>${timeTag(m.created)}${m.edited ? html`<span class="msg-edited">(edited)</span>` : ''}</div>
 <div class="msg-body markdown-body">${bodyHtml(root, m.body)}</div>
 ${fileRows(room.url, m.id, m.files)}${below}
@@ -221,6 +252,7 @@ function messageList(root: string, room: Room, messages: Message[], viewer: View
 
 function composer(room: Room, viewer: Viewer, placeholder: string): Html {
   return html`<div class="composer"><form data-composer method="post" action="${room.url}/messages" enctype="multipart/form-data">${csrfField(viewer)}<div class="composer-box">
+<div class="mention-list" data-mention-list hidden role="listbox"></div>
 <textarea name="body" rows="1" placeholder="${placeholder}" aria-label="${placeholder}"></textarea>
 <div class="composer-row"><input type="file" name="files" multiple aria-label="Attach files"><span class="hint">Enter sends, Shift+Enter is a new line, markdown works</span><button class="btn btn-primary" type="submit">Send</button></div>
 </div></form></div>`;
@@ -261,14 +293,26 @@ export function threadPage(root: string, room: Room, anchor: Message, replies: M
 
 export function homePage(root: string, viewer: Viewer): string {
   const channels = listChannels(root).filter((c) => canSeeChannel(viewer.auth, c));
+  const unread = new Map(unreadRooms(root, viewer.auth).map((r) => [r.url, r]));
   const wsName = loadConfig(root).name;
-  const rows = channels.map(
-    (c) => html`<li style="margin-bottom:6px"><a href="/c/${encodeURIComponent(c.name)}">${c.private ? icon('lock') : '#'} ${c.name}</a>${
+  const rows = channels.map((c) => {
+    const url = `/c/${encodeURIComponent(c.name)}`;
+    const u = unread.get(url) ?? { count: 0, mentions: 0 };
+    return html`<li style="margin-bottom:6px"><a href="${url}" data-room="${url}">${c.private ? icon('lock') : '#'} ${c.name} ${badge(u)}</a>${
       c.topic ? html` <span class="muted">- ${c.topic}</span>` : ''
-    }</li>`
-  );
+    }</li>`;
+  });
+  const waiting = [...unread.values()].filter((r) => r.count > 0);
   const content = html`<h1>${wsName}</h1>
 <p class="muted">Pick a channel, or start a <a href="/d/new">direct conversation</a>.</p>
+${
+    waiting.length
+      ? html`<p>Unread: ${joinHtml(
+          waiting.map((r) => html`<a href="${r.url}" data-room="${r.url}">${r.title} ${badge(r)}</a>`),
+          ', '
+        )}</p>`
+      : ''
+  }
 <ul style="list-style:none;padding:0">${joinHtml(rows)}</ul>
 <p><a class="btn" href="/new">${icon('plus')} New channel</a></p>`;
   return doc(wsName, content, { viewer, root, roomsPage: true });

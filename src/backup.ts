@@ -3,7 +3,7 @@ import * as path from 'path';
 import { BackupLayout } from '../../mochiforge/src/api/backup';
 import { BackupProfile } from '../../mochiforge/src/cli/backup-cmd';
 import { CONFIG_FILE } from './config';
-import { channelsDir, dmsDir } from './workspace';
+import { channelsDir, dmsDir, usersDir } from './workspace';
 
 // Backing up a workspace, with mochi's protocol and mochi's client. A
 // workspace is a directory, and every part of it is ordinary files, so it
@@ -40,7 +40,8 @@ export function workspaceLayout(root: string): BackupLayout {
     async walk(w, exclude) {
       const skip = exclude.has('files') ? isUploadsDir : undefined;
       if (!(await w.tree(channelsDir(root), skip))) return false;
-      return w.tree(dmsDir(root), skip);
+      if (!(await w.tree(dmsDir(root), skip))) return false;
+      return w.tree(usersDir(root));
     },
   };
 }

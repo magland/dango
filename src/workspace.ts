@@ -24,6 +24,9 @@ import { isValidUserName } from '../../mochiforge/src/scan';
  *     1/
  *       conversation.json   participants
  *       messages/ threads/ files/   exactly as a channel holds them
+ *   users/
+ *     alice/
+ *       read.json           the newest message she has seen in each room
  * ```
  *
  * Channels and conversations sit one level down in fixed directories for the
@@ -33,6 +36,16 @@ import { isValidUserName } from '../../mochiforge/src/scan';
  */
 export const CHANNELS_DIR = 'channels';
 export const DMS_DIR = 'dms';
+/** Per-user state that is not identity: today, what each person has read. */
+export const USERS_DIR = 'users';
+
+export function usersDir(root: string): string {
+  return path.join(root, USERS_DIR);
+}
+
+export function userDir(root: string, username: string): string {
+  return path.join(root, USERS_DIR, username);
+}
 
 export function channelsDir(root: string): string {
   return path.join(root, CHANNELS_DIR);

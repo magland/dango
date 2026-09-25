@@ -216,12 +216,61 @@ ok "a new message reaches an open event stream, with gzip offered"
 grep -q "hello from the CLI" "$TMP/catchup.txt" || fail "a stream opened late did not catch up"
 ok "a stream catches up from ?after="
 
+# ---- unread counts, kept on the server ----
+
+api "$BOB" POST /channels/general/messages '{"body":"news for @alice"}' >/dev/null
+UNREAD="$(api "$ALICE" GET /unread)"
+echo "$UNREAD" | grep -q '"url":"/c/general"' || fail "the API does not report #general unread for alice: $UNREAD"
+[ "$(echo "$UNREAD" | jget rooms.0.mentions)" = "1" ] || fail "the mention was not counted: $UNREAD"
+api "$BOB" POST /channels/general/read '{}' >/dev/null
+api "$BOB" POST /channels/general/messages '{"body":"bob again"}' >/dev/null
+api "$BOB" GET /unread | grep -q '"url":"/c/general"' && fail "bob's own message counts as unread for bob"
+ok "unread counts and mentions, and your own messages do not count"
+PAGE="$(curl -s -b "$JAR" "$BASE/")"
+echo "$PAGE" | grep -q 'data-room="/c/general"' || fail "the home page has no room links"
+echo "$PAGE" | grep -qE 'class="badge mention"[^>]*>[0-9]+<' || fail "the page shows no mention badge for #general"
+ok "the sidebar shows the count, marked for the mention"
+curl -s -b "$JAR" -o /dev/null "$BASE/c/general"
+[ "$(api "$ALICE" GET /unread | jget rooms.length)" = "0" ] || fail "viewing the room did not mark it read"
+[ -f "$WS/users/alice/read.json" ] || fail "the marker is not in users/alice/read.json"
+ok "viewing a room marks it read, in a file on the server"
+( curl -s -N -b "$JAR" --max-time 4 "$BASE/events" > "$TMP/user-events.txt" || true ) &
+STREAM=$!
+sleep 1
+api "$BOB" POST /channels/general/messages '{"body":"one more"}' >/dev/null
+wait "$STREAM"
+grep -q '"type":"unread"' "$TMP/user-events.txt" && grep -q '"url":"/c/general"' "$TMP/user-events.txt" || fail "the count change did not reach alice's stream"
+grep -q '"count":1' "$TMP/user-events.txt" || fail "the stream carried the wrong count: $(cat "$TMP/user-events.txt")"
+ok "a new message pushes the room's count to the reader's other pages"
+LAST="$(api "$ALICE" GET '/channels/general/messages?limit=1' | jget messages.0.id)"
+[ "$(curl -s -b "$JAR" -o /dev/null -w '%{http_code}' -F "csrf=$CSRF" -F "id=$LAST" "$BASE/c/general/read")" = "204" ] || fail "the read endpoint refused"
+[ "$(api "$ALICE" GET /unread | jget rooms.length)" = "0" ] || fail "reporting a message read did not clear the count"
+ok "an open page reports what it has seen"
+curl -s -b "$JAR" "$BASE/assets/users.json" | grep -q '"name":"bob"' || fail "users.json does not list bob"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/assets/users.json")" = "401" ] || fail "users.json answered an anonymous request"
+ok "the member list for @-completion, signed-in only"
+
+# ---- the account menu and inline media ----
+
+echo "$PAGE" | grep -q 'class="side-user"' || fail "the account menu is not the viewer's own name"
+echo "$PAGE" | grep -q 'dropdown-menu dd-up' || fail "the account menu does not open upward"
+ok "the account menu opens upward from the viewer's name"
+printf 'RIFF\0\0\0\0WAVEfmt ' > "$TMP/clip.wav"
+curl -s -b "$JAR" -o /dev/null -F "csrf=$CSRF" -F "body=a clip" -F "files=@$TMP/clip.wav" "$BASE/c/general/messages"
+PAGE="$(curl -s -b "$JAR" "$BASE/c/general")"
+echo "$PAGE" | grep -q '<audio controls' || fail "a .wav attachment has no player"
+CLIP="$(api "$ALICE" GET '/channels/general/messages?limit=1' | jget messages.0.id)"
+curl -s -b "$JAR" -D - -o /dev/null "$BASE/c/general/files/$CLIP/clip.wav" | grep -qi '^content-disposition: attachment' && fail "a .wav is served as a download, which a player cannot use"
+curl -s -b "$JAR" -D - -o /dev/null -H 'range: bytes=0-3' "$BASE/c/general/files/$CLIP/clip.wav" | grep -q '^HTTP/1.1 206' || fail "a range request on a .wav was not answered, so a player cannot seek"
+ok "a .wav plays in place, and can be seeked"
+
 # ---- backup ----
 
 BK="$TMP/backup"
 "${DANGO[@]}" backup "$BK" --snapshot --quiet || fail "the backup failed"
 [ -f "$BK/current/workspace.json" ] || fail "the backup has no workspace.json"
-ok "dango backup copies the workspace"
+[ -f "$BK/current/users/alice/read.json" ] || fail "the backup left out users/ (read markers)"
+ok "dango backup copies the workspace, read markers included"
 AGAIN="$("${DANGO[@]}" backup "$BK" --json)"
 [ "$(echo "$AGAIN" | jget files.fetched)" = "0" ] || fail "an unchanged workspace was fetched again: $AGAIN"
 ok "a second backup fetches nothing"
