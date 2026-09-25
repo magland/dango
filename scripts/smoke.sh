@@ -250,8 +250,35 @@ curl -s -b "$JAR" "$BASE/assets/users.json" | grep -q '"name":"bob"' || fail "us
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/assets/users.json")" = "401" ] || fail "users.json answered an anonymous request"
 ok "the member list for @-completion, signed-in only"
 
+# ---- invite links ----
+
+INVITE="$("${DANGO[@]}" user add carol --json | jget invite)"
+case "$INVITE" in
+  "$BASE/invite#token=dango_"*) ;;
+  *) fail "user add did not return an invite link with the token in its fragment: $INVITE" ;;
+esac
+ok "user add returns an invite link, the token in its fragment"
+PAGE="$(curl -s -D "$TMP/invite.h" "$BASE/invite")"
+echo "$PAGE" | grep -q 'data-invite' || fail "the invite page did not render for an anonymous visitor"
+grep -qi '^cache-control: no-store' "$TMP/invite.h" || fail "the invite page may be cached"
+curl -s -b "$JAR" "$BASE/invite" | grep -q 'signed in as <strong>alice</strong>' || fail "the invite page does not warn a signed-in visitor"
+ok "the invite page opens for anyone, and warns a signed-in visitor"
+CAROL="${INVITE#*#token=}"
+[ "$(curl -s -c "$TMP/carol.jar" -o /dev/null -w '%{http_code}' -d "token=$CAROL&next=/" "$BASE/login")" = "303" ] || fail "the invite's token did not sign carol in"
+curl -s -b "$TMP/carol.jar" "$BASE/" | grep -q 'class="whoami">carol<' || fail "carol is not the one signed in"
+ok "the token an invite carries signs its person in"
+[ "$(status "$OWNER" POST /users '{"username":"invite"}')" = "400" ] || fail "'invite' was accepted as a username"
+ok "'invite' cannot be a username"
+ADMIN_JAR="$TMP/owner.jar"
+curl -s -c "$ADMIN_JAR" -o /dev/null -d "token=$OWNER&next=/admin" "$BASE/login"
+ADMIN_CSRF="$(curl -s -b "$ADMIN_JAR" "$BASE/admin" | grep -o 'name="csrf" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//')"
+curl -s -b "$ADMIN_JAR" -d "csrf=$ADMIN_CSRF&username=dave" "$BASE/admin/users/add" | grep -q "value=\"$BASE/invite#token=dango_" \
+  || fail "the admin page's new-user result has no invite link"
+ok "adding someone on the admin page shows their invite link"
+
 # ---- the account menu and inline media ----
 
+PAGE="$(curl -s -b "$JAR" "$BASE/")"
 echo "$PAGE" | grep -q 'class="side-user"' || fail "the account menu is not the viewer's own name"
 echo "$PAGE" | grep -q 'dropdown-menu dd-up' || fail "the account menu does not open upward"
 ok "the account menu opens upward from the viewer's name"

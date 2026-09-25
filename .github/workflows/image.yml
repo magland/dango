@@ -40,6 +40,11 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # The one tag the deploy job below pulls, so that what reaches a workspace
+    # is the image this run built rather than whatever `main` or `latest`
+    # points at by the time the deploy starts.
+    outputs:
+      image: ${{ steps.tags.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -130,3 +135,77 @@ jobs:
             echo "the server echoed the supplied owner token into its log"
             exit 1
           fi
+
+  # The workspaces that follow the published image, redeployed as soon as one
+  # is built, the way mochiforge's image workflow redeploys vault1. Each app is
+  # one entry in this list; adding a workspace is adding a line, and the matrix
+  # keeps one failing app from stopping the others.
+  #
+  # Deploying the exact tag this run built, rather than letting the CLI pick
+  # its own version, is what makes a main build reach a workspace at all: on
+  # main the image is tagged `main`, and no released version answers to it.
+  #
+  # This runs only for images built from this repository's own commits, and
+  # not for a dispatched build: publish.yml dispatches the build of each
+  # release tag, and a workspace following main has had that code since the
+  # main build before it.
+  #
+  # Every deploy is a restart, so open pages drop their event streams for a
+  # few seconds and reconnect; see docs/deploying.md.
+  deploy:
+    needs: image
+    if: github.repository == 'magland/dango' && github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # workspace1.magland.org, redeployed in place. Needs nothing but a
+          # Fly credential scoped to the app.
+          - app: workspace1
+            token: FLY_API_TOKEN
+    steps:
+      # The CLI that drives the deploy is this commit's, so it stays in step
+      # with the image it is deploying, and it is built against the same
+      # mochiforge the image was.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          path: dango
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magland/mochiforge
+          ref: main
+          path: mochiforge
+
+      # Pinned to a commit rather than to master, as mochiforge pins it: this
+      # step runs in the job that holds the Fly credential.
+      - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # 1.5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dango/package-lock.json
+
+      - run: npm ci
+        working-directory: dango
+
+      # The shared modules' packages, where their sources look for them; see ci.yml.
+      - run: ln -s dango/node_modules node_modules
+
+      - run: npm run build
+        working-directory: dango
+
+      # A workspace whose app already has a machine mints no owner token and
+      # prints nothing secret, so there is nothing here for a log to leak. The
+      # region, the volume size, and the machine's shape are read back off the
+      # live app, which is why no flag describing them appears.
+      - name: Deploy ${{ matrix.app }}
+        working-directory: dango
+        run: node dist/dango/src/index.js deploy fly ${{ matrix.app }} --image "$IMAGE"
+        env:
+          IMAGE: ${{ needs.image.outputs.image }}
+          FLY_API_TOKEN: ${{ secrets[matrix.token] }}

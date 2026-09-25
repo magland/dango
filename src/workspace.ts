@@ -90,6 +90,7 @@ const RESERVED_USER_NAMES = new Set([
   'events',
   'favicon.ico',
   'favicon.svg',
+  'invite',
   'login',
   'logout',
   'new',

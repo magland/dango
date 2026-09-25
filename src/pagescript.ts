@@ -57,6 +57,49 @@ function closestOf(el, selector) {
   return null;
 }
 
+// ---- invite links ----
+// An invite link is /invite#token=<token>. The fragment never reaches the
+// server; this moves it into the form and then out of the address bar and
+// the history, so the token is not left where the next person at the machine
+// could read it. Nothing is submitted: the person presses the button.
+document.addEventListener('DOMContentLoaded', function () {
+  var box = document.querySelector('[data-invite]');
+  if (!box) return;
+  var m = /(?:^#|&)token=([^&]+)/.exec(location.hash || '');
+  if (history.replaceState) history.replaceState(null, '', location.pathname + location.search);
+  var field = box.querySelector('#token');
+  if (m && field) {
+    var token = m[1];
+    try { token = decodeURIComponent(token); } catch (e) {}
+    field.value = token;
+    box.querySelector('[data-invite-ready]').hidden = false;
+    var button = box.querySelector('button[type="submit"]');
+    if (button) button.focus();
+  } else {
+    box.querySelector('[data-invite-missing]').hidden = false;
+    if (field) field.focus();
+  }
+});
+
+// ---- copying ----
+function copyText(btn, text) {
+  function done() {
+    var label = btn.textContent;
+    btn.textContent = 'Copied';
+    setTimeout(function () { btn.textContent = label; }, 1400);
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done, function () {});
+  } else {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); done(); } catch (e) {}
+    ta.remove();
+  }
+}
+
 // ---- the message list ----
 function msgList() { return document.getElementById('msg-list'); }
 function scrollPane() { return document.querySelector('.msgs'); }
@@ -349,6 +392,8 @@ document.addEventListener('click', function (e) {
   var t = e.target;
   var theme = closestOf(t, '[data-theme-name]');
   if (theme) { setTheme(theme.getAttribute('data-theme-name')); return; }
+  var copy = closestOf(t, '[data-copy]');
+  if (copy) { copyText(copy, copy.getAttribute('data-copy')); return; }
   var mention = closestOf(t, '[data-mention]');
   if (mention) {
     var ta = mention.closest('form').querySelector('textarea');

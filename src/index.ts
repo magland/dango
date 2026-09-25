@@ -421,7 +421,10 @@ token once. Options: -p/--port <n> (default 3000), --host <addr> (default
       }
       console.log(`Created user '${data.username}' on ${target.host}`);
       console.log('');
-      console.log('Token (copy it now; only its hash is stored):');
+      console.log('Invite link, which signs them in with one click (send it privately):');
+      console.log(`  ${data.invite}`);
+      console.log('');
+      console.log('The token alone, for dango login (copy it now; only its hash is stored):');
       console.log(`  ${data.token}`);
     },
   },
@@ -457,6 +460,9 @@ token once. Options: -p/--port <n> (default 3000), --host <addr> (default
       else {
         console.log(`New token for '${data.username}' (copy it now; only its hash is stored):`);
         console.log(`  ${data.token}`);
+        console.log('');
+        console.log('As an invite link, which signs them in with one click (send it privately):');
+        console.log(`  ${data.invite}`);
       }
     },
   },

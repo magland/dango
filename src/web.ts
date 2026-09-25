@@ -99,6 +99,15 @@ function formBody(req: FormRequest, res: Response, next: NextFunction): void {
   });
 }
 
+/**
+ * The origin the request arrived on, for a link to hand to someone else. The
+ * scheme is req.protocol, which honours X-Forwarded-Proto only where the
+ * workspace trusts its proxy, so behind Fly or Caddy it is https.
+ */
+function originOf(req: Request): string {
+  return `${req.protocol}://${req.get('host') ?? req.hostname}`;
+}
+
 function nextPath(raw: unknown): string {
   const n = typeof raw === 'string' ? raw : '';
   return n.startsWith('/') && !n.startsWith('//') ? n : '/';
@@ -170,6 +179,14 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     }
     setSessionCookie(req, res, root, auth);
     res.redirect(303, next);
+  });
+
+  // Open to anyone, like /login: it is the page an invite link lands on,
+  // and the token that makes it useful is in the fragment, which the server
+  // never sees.
+  app.get('/invite', (req, res) => {
+    const viewer = getViewer(req, root);
+    res.set('Cache-Control', 'no-store').type('html').send(views.invitePage(viewer ? viewer.auth.username : null));
   });
 
   app.post('/logout', urlenc, (_req, res) => {
@@ -307,7 +324,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       return;
     }
     const { token, created } = addUserToken(root, username, { siteAdmin: body.admin === '1' });
-    res.type('html').send(views.tokenPage(root, viewer, username, token, created));
+    res.type('html').send(views.tokenPage(root, viewer, username, token, created, originOf(req)));
   });
 
   app.post('/admin/users/token', urlenc, (req, res) => {
@@ -319,7 +336,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       return;
     }
     const { token } = addUserToken(root, username, {});
-    res.type('html').send(views.tokenPage(root, viewer, username, token, false));
+    res.type('html').send(views.tokenPage(root, viewer, username, token, false, originOf(req)));
   });
 
   app.post('/admin/users/admin', urlenc, (req, res) => {

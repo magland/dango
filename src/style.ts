@@ -83,6 +83,11 @@ const CHAT_CSS = `
 .side-rooms li a .room-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .doc a .badge { display: inline-block; vertical-align: middle; margin-left: 4px; }
 
+/* A value to hand to someone: the field shows it whole and selectable, the
+   button beside it copies it. */
+.copy-row { display: flex; gap: var(--s2); max-width: 720px; margin-bottom: var(--s4); }
+.copy-row input { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: var(--t-sm); }
+
 /* --- the room --- */
 .room-head {
   flex: none; display: flex; align-items: center; gap: var(--s3);

@@ -45,6 +45,7 @@ The same command deploys updates, and `dango backup ~/backups/chat --snapshot` k
 - **File attachments,** stored in the workspace and served only to who could read the message. Images, audio, and video show or play in place; everything else is a download, under a sandbox policy so an uploaded page is never a page of ours.
 - **Live delivery** over server-sent events. Every form also works with no script at all; the page script only makes things quieter.
 - **Search** across everything you can read, walked from the files when asked.
+- **Invite links:** adding someone gives a link that signs them in with one press of a button, the token carried in its fragment so it never reaches a server log.
 - **CLI and JSON API** covering the same operations, bearer-token only, with `--json` everywhere and the exit codes scripts want.
 
 ## The workspace

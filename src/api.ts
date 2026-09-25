@@ -35,6 +35,7 @@ import { canDeleteMessage, canEditMessage, canSeeChannel, isSiteAdmin } from './
 import { noteRead, postMessage } from './post';
 import { unreadRooms } from './reads';
 import { Room, channelRoom, dmRoom, threadRoom } from './rooms';
+import { inviteLink } from './views';
 import { searchMessages } from './search';
 import { isValidWorkspaceUserName } from './workspace';
 
@@ -69,6 +70,11 @@ function messageJson(m: Message): Record<string, unknown> {
 function sendOpError(res: Response, e: unknown): void {
   if (e instanceof OpError) apiError(res, opErrorStatus(e.kind), e.message);
   else throw e;
+}
+
+/** The origin the request arrived on; behind a trusted proxy its scheme is the proxy's. */
+function originOf(req: Request): string {
+  return `${req.protocol}://${req.get('host') ?? req.hostname}`;
 }
 
 function intParam(raw: string): number {
@@ -389,7 +395,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         return;
       }
       const { token } = addUserToken(root, username, { siteAdmin: b.siteAdmin === true });
-      res.status(201).json({ username, token });
+      res.status(201).json({ username, token, invite: inviteLink(originOf(req), token) });
     })
   );
 
@@ -401,7 +407,12 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         return;
       }
       const { token, user } = addUserToken(root, req.params.name, {});
-      res.status(201).json({ username: req.params.name, token, tokens: user.tokens.map((t) => tokenId(t)) });
+      res.status(201).json({
+        username: req.params.name,
+        token,
+        invite: inviteLink(originOf(req), token),
+        tokens: user.tokens.map((t) => tokenId(t)),
+      });
     })
   );
 

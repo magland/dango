@@ -493,13 +493,48 @@ ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.fla
   return doc('Admin', content, { viewer, root });
 }
 
-export function tokenPage(root: string, viewer: Viewer, username: string, token: string, created: boolean): string {
+/**
+ * Where an invite link points: /invite with the token in the fragment. A
+ * fragment is never sent to the server, so the token stays out of access
+ * logs, proxies, and Referer headers; the page script moves it into the
+ * sign-in form and clears it from the address bar.
+ */
+export function inviteLink(origin: string, token: string): string {
+  return `${origin}/invite#token=${token}`;
+}
+
+export function tokenPage(root: string, viewer: Viewer, username: string, token: string, created: boolean, origin: string): string {
+  const link = inviteLink(origin, token);
   const content = html`<h1>${created ? `${username} was added` : `A new token for ${username}`}</h1>
-<p>This token is shown once and stored only as a hash. Hand it over now:</p>
-<pre><code>${token}</code></pre>
-<p class="muted">They sign in with it at <code>/login</code>, or use it as a bearer token against the API.</p>
+<p>This is shown once; the workspace keeps only a hash of the token. Send ${username} the invite link, which signs them in with one click:</p>
+<div class="copy-row"><input type="text" readonly value="${link}" aria-label="Invite link"><button class="btn" type="button" data-copy="${link}">Copy link</button></div>
+<p class="muted">The link carries the token itself, so anyone holding it can sign in as ${username} until the token is revoked: send it privately, the way you would send a password.</p>
+<p>Or hand over the token alone, for the sign-in page or the CLI (<code>dango login</code>):</p>
+<div class="copy-row"><input type="text" readonly value="${token}" aria-label="Token"><button class="btn" type="button" data-copy="${token}">Copy token</button></div>
 <p><a class="btn" href="/admin">Back to admin</a></p>`;
   return doc('Token', content, { viewer, root });
+}
+
+/**
+ * What an invite link opens. It is its own page rather than /login, because
+ * /login sends a signed-in visitor straight on, and a redirect would carry
+ * the fragment, token and all, into the address bar of wherever it landed.
+ * Here the page script fills the form from the fragment and the person
+ * presses one button; nothing signs anyone in without that press, so a
+ * link cannot quietly swap a visitor into someone else's account.
+ */
+export function invitePage(signedInAs: string | null): string {
+  const content = html`<div class="form-box" style="margin:0 auto" data-invite>
+<h1>You're invited</h1>
+${signedInAs ? html`<div class="flash">This browser is signed in as <strong>${signedInAs}</strong>. Accepting the invite switches it to the invited account.</div>` : ''}
+<p data-invite-ready hidden>Your invite link filled in your sign-in token. Press the button to join the workspace.</p>
+<div class="form-error" data-invite-missing hidden>This invite link has no token in it. It may have been cut short when it was copied; ask for it again, or paste your token below.</div>
+<form method="post" action="/login">
+<input type="hidden" name="next" value="/">
+<div class="field"><label for="token">Token</label><input type="password" id="token" name="token" autocomplete="current-password" required></div>
+<button class="btn btn-primary" type="submit">Join the workspace</button>
+</form></div>`;
+  return layout('Invite', content, { viewer: null, root: '' });
 }
 
 export function editMessagePage(root: string, room: Room, m: Message, viewer: Viewer, error?: string): string {

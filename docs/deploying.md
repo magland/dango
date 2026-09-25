@@ -37,6 +37,8 @@ dango user add alice
 dango channel create general
 ```
 
+Adding someone, on the Admin page or with `dango user add`, gives an invite link as well as the token: `https://my-workspace-name.fly.dev/invite#token=dango_...`. Opening it fills in the sign-in form, and one press of a button signs them in. The token rides in the link's fragment, which browsers never send to the server, so it stays out of access logs and proxies, and the page clears it from the address bar once it has read it. The link is the token all the same: anyone who has it can sign in as that person until an administrator revokes the token, so send it privately. A new token for an existing person (`dango user token alice`, or New token on the Admin page) comes with a link of its own.
+
 The token is minted on your machine, not on the server. The deploy sets it as the `DANGO_OWNER_TOKEN` secret, and the server adopts it when it initializes the empty workspace, storing only its hash. It cannot be recovered afterwards from either the server or the Fly secret, which can be written but never read back. The deploy also stores nothing on your machine: `dango login` is the one command that writes a credential.
 
 Fly always terminates TLS in front of the app, so the deploy also sets `DANGO_TRUST_PROXY`, and the server records `network.trustProxy: true` in the workspace's `config.json` on the next start. That is what makes `Secure` cookies and the per-address limits read the real scheme and address. It is only seeded, so changing it by hand afterwards sticks.
@@ -69,6 +71,8 @@ dango deploy fly my-workspace-name --image ghcr.io/magland/dango:main
 The flags, all optional: `--region` (default `ewr`), `--volume <gb>` (default 10), `--vm-size` (default `shared-cpu-1x`), `--vm-memory` (default `512mb`), `--org`, and `--image <ref>` or `--from-source`. Fly volumes can grow but never shrink, and a volume cannot move between regions, so a smaller `--volume` and a different `--region` are both refused rather than quietly ignored.
 
 Every update is a restart, and a restart drops the open event streams. Pages reconnect by themselves and are sent every message that arrived in the meantime, so people see a pause of a few seconds rather than lost messages. An edit or a reaction made during the gap is the exception: it shows on the next reload rather than live. A quiet hour is still the time to deploy. [Updating on a schedule](../../mochiforge/docs/deploying.md#updating-on-a-schedule) in mochi's document applies unchanged, with `npx --yes @magland/dango@latest deploy fly my-workspace-name` as the command.
+
+The other cadence is on a build rather than on a clock, which is what this repository does for the workspace it runs itself. The deploy job at the end of `.github/workflows/image.yml` lists the apps it keeps current (today `workspace1`, serving `workspace1.magland.org`) and redeploys each once a main build has been pushed and checked, passing `--image` the exact tag that run built. It needs a `FLY_API_TOKEN` repository secret: `fly tokens create deploy -a workspace1` mints the narrowest token that can do it. A released version's image, built when publish.yml dispatches it, is not deployed by that job; the workspace already has that code from the main build before it. To follow a different app, change the matrix entry; to follow several, add one entry per app, each naming the secret that holds its own token.
 
 To see what is deployed, and whether it answers:
 
