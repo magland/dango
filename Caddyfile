@@ -1,0 +1,5 @@
+{$DOMAIN} {
+	# Caddy flushes a text/event-stream response as it is written, so the
+	# live message streams need no setting here.
+	reverse_proxy dango:3000
+}

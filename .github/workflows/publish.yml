@@ -1,0 +1,124 @@
+# Publishes @magland/dango to npm when a push to main touches package.json,
+# which is where a version bump lives (scripts/bump.sh makes one). Any other
+# push is not a release and does not start this workflow at all.
+#
+# The arrangement is mochiforge's publish workflow. Authentication is npm
+# trusted publishing: npm trades this workflow's OIDC identity for a
+# short-lived, single-publish credential, so there is no token in the
+# repository secrets to leak or rotate. npm accepts the exchange only from the
+# repository and workflow filename registered as the package's trusted
+# publisher, so renaming this file breaks publishing until that setting on
+# npmjs.com is updated to match.
+#
+# Two differences from mochi's, both for how a package comes into being. npm
+# attaches a trusted publisher only to a package that already exists, so the
+# very first version is published by hand; until then this workflow says so
+# and stops, rather than failing. And a version that is already on npm (the
+# hand-published first one, or a rerun) is not published again but is still
+# tagged and given its image, which is what makes `dango deploy fly` work for
+# it.
+name: publish
+
+on:
+  push:
+    branches: [main]
+    paths: [package.json]
+  workflow_dispatch:
+
+# Two pushes in quick succession must not race to publish the same version.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # to push the release tag
+      id-token: write # to mint the OIDC token npm exchanges for a credential
+      actions: write # to start the image workflow for the tag (see the last step)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: dango
+
+      # Dango compiles mochiforge's sources in with its own; see ci.yml.
+      - uses: actions/checkout@v4
+        with:
+          repository: magland/mochiforge
+          ref: main
+          path: mochiforge
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm 11.5.1 or newer. An exact version rather
+      # than @latest: this is the job that holds the publishing credential.
+      - name: Use an npm that can publish with OIDC
+        run: |
+          npm install -g npm@12.0.2
+          npm --version
+
+      - name: Decide what this run does
+        id: plan
+        working-directory: dango
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ -z "$(npm view "$name" name 2>/dev/null)" ]; then
+            echo "action=first" >> "$GITHUB_OUTPUT"
+            echo "::warning::$name has never been published. npm attaches a trusted publisher only to a package that exists, so publish $version by hand once (npm login; npm publish), register this workflow as its trusted publisher, and run this workflow again to tag it and build its image."
+          elif [ "$(npm view "$name@$version" version 2>/dev/null)" = "$version" ]; then
+            echo "action=tag" >> "$GITHUB_OUTPUT"
+            echo "$name@$version is already on npm; tagging and building its image only."
+          else
+            echo "action=publish" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install
+        if: steps.plan.outputs.action != 'first'
+        working-directory: dango
+        run: npm ci
+
+      # The unit suite, then the end-to-end one, which builds the package and
+      # drives the compiled output: a release is the last place a quietly
+      # smaller suite should pass.
+      - name: Test
+        if: steps.plan.outputs.action != 'first'
+        working-directory: dango
+        run: npm test
+
+      # No NODE_AUTH_TOKEN: the credential comes from the OIDC exchange.
+      # Provenance is generated as part of trusted publishing; the flag makes
+      # the intent explicit and fails the publish loudly if it cannot be met.
+      - name: Publish
+        if: steps.plan.outputs.action == 'publish'
+        working-directory: dango
+        run: npm publish --provenance
+
+      - name: Tag the release
+        if: steps.plan.outputs.action != 'first'
+        working-directory: dango
+        run: |
+          version="${{ steps.plan.outputs.version }}"
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "Tag v$version already exists; leaving it alone."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$version" -m "v$version"
+          git push origin "v$version"
+
+      # The image for the release, asked for by name: a tag pushed with the
+      # workflow's own token starts no workflow, so image.yml's tag trigger
+      # would never fire for it. Dispatching on the tag's ref is the exception
+      # GitHub allows, and image.yml reads the version off the ref.
+      - name: Build the image for the tag
+        if: steps.plan.outputs.action != 'first'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run image.yml --repo "${{ github.repository }}" --ref "v${{ steps.plan.outputs.version }}"

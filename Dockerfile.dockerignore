@@ -1,0 +1,14 @@
+# The build context is the directory holding both checkouts, which may hold
+# a good deal else. Everything is excluded, and exactly what the Dockerfile
+# copies is let back in: never node_modules, dist, .git, or a local workspace,
+# which is somebody's data and never belongs in an image.
+#
+# BuildKit reads this file because it sits beside the Dockerfile and shares
+# its name; a .dockerignore at the context root would apply to every build
+# from that directory, which is not this repository's to decide.
+*
+!dango/package.json
+!dango/package-lock.json
+!dango/tsconfig.json
+!dango/src
+!mochiforge/src

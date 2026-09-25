@@ -1,0 +1,67 @@
+{
+  "name": "@magland/dango",
+  "version": "0.1.0",
+  "description": "A self-hosted team chat with the shape of Slack: channels, threads, direct messages, reactions, uploads, and search, from one small server with no database.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/magland/dango.git"
+  },
+  "homepage": "https://github.com/magland/dango#readme",
+  "bugs": "https://github.com/magland/dango/issues",
+  "keywords": [
+    "chat",
+    "slack",
+    "self-hosted",
+    "channels",
+    "messaging"
+  ],
+  "bin": {
+    "dango": "dist/dango/src/index.js"
+  },
+  "main": "dist/dango/src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc",
+    "prepublishOnly": "npm run build",
+    "dev": "tsx src/index.ts serve example-root",
+    "start": "node dist/dango/src/index.js serve",
+    "example": "tsx scripts/create-example.ts example-root",
+    "test": "npm run test:unit && bash scripts/smoke.sh",
+    "test:unit": "node --import tsx --test tests/*.test.ts",
+    "smoke": "bash scripts/smoke.sh",
+    "bump": "bash scripts/bump.sh"
+  },
+  "dependencies": {
+    "@vscode/markdown-it-katex": "^1.1.2",
+    "aws4fetch": "^1.0.20",
+    "compression": "^1.8.1",
+    "express": "^4.21.2",
+    "highlight.js": "^11.11.1",
+    "katex": "^0.18.4",
+    "markdown-it": "^14.1.0",
+    "markdown-it-emoji": "^3.1.0",
+    "markdown-it-footnote": "^4.0.0",
+    "sanitize-html": "^2.17.7",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/compression": "^1.8.1",
+    "@types/express": "^4.17.23",
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^22.10.0",
+    "@types/sanitize-html": "^2.16.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

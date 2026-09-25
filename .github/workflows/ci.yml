@@ -1,0 +1,65 @@
+# The unit suite and the build, on every Node the package claims to support.
+#
+# Dango compiles mochiforge's sources in with its own, so every job checks out
+# both repositories side by side, as they sit on a developer's disk. The
+# mochiforge ref is `main` unless the dispatch names another, which is the
+# coupling the README describes: a change to the shared modules reaches dango's
+# next run without a release in between.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      mochiforge-ref:
+        description: mochiforge branch, tag, or commit to build against
+        default: main
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: dango
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magland/mochiforge
+          ref: ${{ inputs.mochiforge-ref || 'main' }}
+          path: mochiforge
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: dango/package-lock.json
+
+      - run: npm ci
+        working-directory: dango
+
+      # tsc alone, in a directory where mochiforge has no node_modules of its
+      # own: a package the shared modules need and dango does not declare
+      # fails here rather than in the image.
+      - run: npm run build
+        working-directory: dango
+
+      - run: npm run test:unit
+        working-directory: dango
+
+      # End to end, against the compiled output: sessions, the API, the CLI,
+      # live delivery, attachments, and backup.
+      - run: npm run smoke
+        working-directory: dango

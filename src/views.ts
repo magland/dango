@@ -1,0 +1,481 @@
+import { avatar } from '../../mochiforge/src/avatar';
+import { Html, html, joinHtml, raw } from '../../mochiforge/src/html';
+import { IconName, icon } from '../../mochiforge/src/icons';
+import { renderMarkdown } from '../../mochiforge/src/markdown';
+import { formatDay, timeTag } from '../../mochiforge/src/render';
+import { Viewer } from '../../mochiforge/src/session';
+import { THEMES, activeTheme, darkFor } from '../../mochiforge/src/themes';
+import { UserProfile, Vault, loadVault, userExists } from '../../mochiforge/src/vault';
+import { ChannelInfo, listChannels } from './channels';
+import { loadConfig } from './config';
+import { DmInfo, dmTitle, listDmsFor } from './dms';
+import { MARK } from './logo';
+import { Attachment, Message } from './messages';
+import { pageScript } from './pagescript';
+import { canDeleteMessage, canEditMessage, canSeeChannel, isSiteAdmin } from './perms';
+import { Room } from './rooms';
+import { styleSheet } from './style';
+
+// Every page the interface serves, rendered the way mochiforge renders its
+// own: html`` templates escaping by type, no client framework, and controls a
+// viewer cannot use simply not shown. The chrome differs from a forge's
+// because a chat is one screen rather than a document: the frame is a
+// sidebar and a room, and pages that are documents (login, admin, search)
+// render inside the same frame as a scrolling column.
+
+export interface PageOpts {
+  viewer: Viewer | null;
+  root: string;
+  /** The room URL the sidebar should mark as current. */
+  active?: string;
+  /** Marks / so the sidebar is the page on a phone. */
+  roomsPage?: boolean;
+}
+
+export function csrfField(viewer: Viewer): Html {
+  return html`<input type="hidden" name="csrf" value="${viewer.csrf}">`;
+}
+
+// ---- the frame ----
+
+function themeMenu(): Html {
+  const items = [
+    html`<button type="button" class="dd-item theme-item" role="menuitemradio" aria-checked="false" data-theme-name="auto"><span class="theme-check">${icon('check')}</span><span>Follow the system</span></button>`,
+    ...THEMES.map(
+      (t) =>
+        html`<button type="button" class="dd-item theme-item" role="menuitemradio" aria-checked="false" data-theme-name="${t.name}"><span class="theme-check">${icon('check')}</span><span>${t.label}</span></button>`
+    ),
+  ];
+  return joinHtml(items);
+}
+
+function userMenu(opts: PageOpts): Html {
+  const viewer = opts.viewer!;
+  const admin = isSiteAdmin(viewer.auth);
+  return html`<details class="dropdown user-menu"><summary class="topbar-icon" aria-label="Account">${icon('kebab')}</summary><div class="dropdown-menu dd-right" role="menu">
+<a class="dd-item" href="/${encodeURIComponent(viewer.auth.username)}">${icon('person')} Profile</a>
+<a class="dd-item" href="/account">${icon('sliders')} Account</a>
+${admin ? html`<a class="dd-item" href="/admin">${icon('server')} Admin</a>` : ''}
+<div class="dd-sep"></div>
+${themeMenu()}
+<div class="dd-sep"></div>
+<form method="post" action="/logout">${csrfField(viewer)}<button class="dd-item" type="submit">Sign out</button></form>
+</div></details>`;
+}
+
+function roomLink(url: string, glyph: Html | string, label: string, active?: string): Html {
+  const cls = url === active ? 'current' : '';
+  return html`<li><a class="${cls}" href="${url}"><span class="room-glyph">${glyph}</span><span>${label}</span></a></li>`;
+}
+
+function sidebar(opts: PageOpts): Html {
+  const viewer = opts.viewer!;
+  const root = opts.root;
+  const auth = viewer.auth;
+  const channels = listChannels(root).filter((c) => canSeeChannel(auth, c));
+  const dms = listDmsFor(root, auth.username);
+  const wsName = loadConfig(root).name;
+  return html`<nav class="app-side">
+<div class="side-head"><a class="brand" href="/">${raw(MARK)}<span>${wsName}</span></a></div>
+<div class="side-rooms">
+<div class="side-cap"><span>Channels</span><a href="/new" title="New channel">${icon('plus')}</a></div>
+<ul>${joinHtml(
+    channels.map((c) =>
+      roomLink(`/c/${encodeURIComponent(c.name)}`, c.private ? icon('lock') : '#', c.name, opts.active)
+    )
+  )}</ul>
+<div class="side-cap"><span>Direct messages</span><a href="/d/new" title="New conversation">${icon('plus')}</a></div>
+<ul>${joinHtml(dms.map((d) => roomLink(`/d/${d.id}`, icon('comment'), dmTitle(d, auth.username), opts.active)))}</ul>
+</div>
+<div class="side-foot">${avatar(auth.username, 24)}<span class="whoami">${auth.username}</span><a class="topbar-icon" href="/search" aria-label="Search">${icon('search')}</a>${userMenu(opts)}</div>
+</nav>`;
+}
+
+export function layout(title: string, main: Html, opts: PageOpts): string {
+  const theme = activeTheme().name;
+  const sheet = styleSheet(activeTheme()).tag;
+  const script = pageScript().tag;
+  const body = opts.viewer
+    ? html`<div class="app ${opts.roomsPage ? 'rooms-page' : ''}">${sidebar(opts)}<div class="app-main">${main}</div></div>`
+    : html`<main class="container" style="padding-top: 48px">${main}</main>`;
+  return html`<!doctype html>
+<html lang="en" data-theme-vault="${theme}" data-theme-dark="${darkFor(activeTheme())}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${title}</title>
+<link rel="stylesheet" href="/assets/style.css?t=${encodeURIComponent(theme)}&amp;v=${sheet}">
+<link rel="stylesheet" href="/assets/katex/katex.css">
+<link rel="icon" href="/favicon.svg?t=${encodeURIComponent(theme)}" type="image/svg+xml">
+<script src="/assets/page.js?v=${script}"></script>
+</head>
+<body>
+${body}
+</body>
+</html>`.text;
+}
+
+/** A document page inside the frame: a scrolling column with a measure. */
+function doc(title: string, content: Html, opts: PageOpts): string {
+  return layout(title, html`<div class="doc"><div class="inner">${content}</div></div>`, opts);
+}
+
+// ---- messages ----
+
+const IMAGE_RE = /\.(png|jpe?g|gif|webp|svg|avif)$/i;
+
+function bodyHtml(root: string, body: string): Html {
+  return raw(
+    renderMarkdown(body, {
+      rawBase: '',
+      blobBase: '',
+      mentions: (name) => userExists(root, name),
+    })
+  );
+}
+
+function fileRows(roomUrl: string, id: number, files: Attachment[]): Html | '' {
+  if (!files.length) return '';
+  const rows = files.map((f) => {
+    const href = `${roomUrl}/files/${id}/${encodeURIComponent(f.name)}`;
+    if (IMAGE_RE.test(f.name)) {
+      return html`<li><a href="${href}"><img class="msg-img" src="${href}" alt="${f.name}"></a></li>`;
+    }
+    return html`<li><a href="${href}">${icon('file')} ${f.name}</a></li>`;
+  });
+  return html`<ul class="msg-files">${joinHtml(rows)}</ul>`;
+}
+
+const QUICK_REACTIONS = ['\u{1F44D}', '✅', '\u{1F440}', '\u{1F389}', '❤️', '\u{1F604}'];
+
+function reactForm(roomUrl: string, id: number, emoji: string, viewer: Viewer, mine: boolean, count?: number): Html {
+  return html`<form data-react method="post" action="${roomUrl}/m/${id}/react">${csrfField(viewer)}<input type="hidden" name="emoji" value="${emoji}"><button class="${count === undefined ? 'dd-item' : `react-pill ${mine ? 'mine' : ''}`}" type="submit" title="${mine ? 'Remove your reaction' : 'React'}">${emoji}${count !== undefined ? html` <span>${count}</span>` : ''}</button></form>`;
+}
+
+function msgTools(room: Room, m: Message, viewer: Viewer): Html {
+  const parts: Html[] = [];
+  parts.push(
+    html`<details class="dropdown"><summary class="topbar-icon" style="width:30px;height:28px" aria-label="React" title="React">${icon('plus')}</summary><div class="dropdown-menu dd-right" role="menu">${joinHtml(
+      QUICK_REACTIONS.map((e) => reactForm(room.url, m.id, e, viewer, (m.reactions[e] ?? []).includes(viewer.auth.username)))
+    )}</div></details>`
+  );
+  if (room.kind !== 'thread') {
+    parts.push(html`<a href="${room.url}/t/${m.id}" title="Reply in thread">${icon('comment')}</a>`);
+  }
+  if (canEditMessage(viewer.auth, m.author)) {
+    parts.push(html`<a href="${room.url}/m/${m.id}/edit" title="Edit">${icon('pencil')}</a>`);
+  }
+  if (canDeleteMessage(viewer.auth, m.author)) {
+    parts.push(
+      html`<form method="post" action="${room.url}/m/${m.id}/delete">${csrfField(viewer)}<button type="submit" title="Delete">${icon('trash')}</button></form>`
+    );
+  }
+  return html`<span class="msg-tools">${joinHtml(parts)}</span>`;
+}
+
+/**
+ * One message as a list item. This is what the page renders and what the
+ * event stream sends, so a message looks the same however it arrived.
+ */
+export function messageHtml(root: string, room: Room, m: Message, viewer: Viewer): Html {
+  if (m.deleted) {
+    return html`<li class="msg" id="msg-${m.id}" data-mid="${m.id}"><span class="avatar" style="width:32px"></span><div class="msg-main"><span class="msg-deleted">This message was deleted.</span>${
+      m.replyCount > 0 && room.kind !== 'thread'
+        ? html`<div class="msg-below"><a class="thread-link" href="${room.url}/t/${m.id}">${m.replyCount} ${m.replyCount === 1 ? 'reply' : 'replies'}</a></div>`
+        : ''
+    }</div></li>`;
+  }
+  const reactions = Object.entries(m.reactions).map(([emoji, users]) =>
+    reactForm(room.url, m.id, emoji, viewer, users.includes(viewer.auth.username), users.length)
+  );
+  const thread =
+    room.kind !== 'thread' && m.replyCount > 0
+      ? html`<a class="thread-link" href="${room.url}/t/${m.id}">${icon('comment')} ${m.replyCount} ${m.replyCount === 1 ? 'reply' : 'replies'}</a>`
+      : '';
+  const below = reactions.length || thread ? html`<div class="msg-below">${joinHtml(reactions)}${thread}</div>` : '';
+  return html`<li class="msg" id="msg-${m.id}" data-mid="${m.id}">${avatar(m.author, 32)}<div class="msg-main">
+<div class="msg-head"><a class="author" href="/${encodeURIComponent(m.author)}">${m.author}</a>${timeTag(m.created)}${m.edited ? html`<span class="msg-edited">(edited)</span>` : ''}</div>
+<div class="msg-body markdown-body">${bodyHtml(root, m.body)}</div>
+${fileRows(room.url, m.id, m.files)}${below}
+</div>${msgTools(room, m, viewer)}</li>`;
+}
+
+function dayRule(iso: string): Html {
+  return html`<li class="day-rule" role="separator">${formatDay(iso)}</li>`;
+}
+
+function messageList(root: string, room: Room, messages: Message[], viewer: Viewer): Html {
+  const items: Html[] = [];
+  let lastDay = '';
+  for (const m of messages) {
+    const day = m.created.slice(0, 10);
+    if (day !== lastDay) {
+      items.push(dayRule(m.created));
+      lastDay = day;
+    }
+    items.push(messageHtml(root, room, m, viewer));
+  }
+  const last = messages.length ? messages[messages.length - 1].id : 0;
+  return html`<div class="msgs"><ul id="msg-list" data-stream="${room.url}/events" data-last="${last}">${joinHtml(items)}</ul></div>`;
+}
+
+function composer(room: Room, viewer: Viewer, placeholder: string): Html {
+  return html`<div class="composer"><form data-composer method="post" action="${room.url}/messages" enctype="multipart/form-data">${csrfField(viewer)}<div class="composer-box">
+<textarea name="body" rows="1" placeholder="${placeholder}" aria-label="${placeholder}"></textarea>
+<div class="composer-row"><input type="file" name="files" multiple aria-label="Attach files"><span class="hint">Enter sends, Shift+Enter is a new line, markdown works</span><button class="btn btn-primary" type="submit">Send</button></div>
+</div></form></div>`;
+}
+
+// ---- room pages ----
+
+function roomHead(room: Room, tools: Html | '' = ''): Html {
+  const topic = room.channel?.topic;
+  return html`<header class="room-head"><a class="back-link topbar-icon" href="/" aria-label="All rooms">&#8592;</a><h1>${room.title}</h1>${
+    topic ? html`<span class="room-topic">${topic}</span>` : ''
+  }<div class="room-tools">${tools}</div></header>`;
+}
+
+export function channelPage(root: string, room: Room, messages: Message[], viewer: Viewer): string {
+  const tools = html`<a class="topbar-icon" href="${room.url}/settings" aria-label="Channel settings" title="Channel settings">${icon('sliders')}</a>`;
+  const main = html`${roomHead(room, tools)}${messageList(root, room, messages, viewer)}${composer(room, viewer, `Message ${room.title}`)}`;
+  return layout(`${room.title}`, main, { viewer, root, active: room.url });
+}
+
+export function dmPage(root: string, room: Room, messages: Message[], viewer: Viewer): string {
+  const main = html`${roomHead(room)}${messageList(root, room, messages, viewer)}${composer(room, viewer, `Message ${room.title}`)}`;
+  return layout(room.title, main, { viewer, root, active: room.url });
+}
+
+export function threadPage(root: string, room: Room, anchor: Message, replies: Message[], viewer: Viewer): string {
+  const parent = room.parent!;
+  const head = html`<header class="room-head"><a class="topbar-icon" href="${parent.url}" aria-label="Back to ${parent.title}">&#8592;</a><h1>Thread</h1><span class="room-topic">in <a href="${parent.url}">${parent.title}</a></span><div class="room-tools"></div></header>`;
+  const anchorHtml = html`<ul class="thread-anchor" style="list-style:none;margin:0;padding:0">${messageHtml(root, parent, anchor, viewer)}</ul>`;
+  const items = replies.map((m) => messageHtml(root, room, m, viewer));
+  const last = replies.length ? replies[replies.length - 1].id : 0;
+  const list = html`<div class="msgs">${anchorHtml}<ul id="msg-list" data-stream="${room.url}/events" data-last="${last}">${joinHtml(items)}</ul></div>`;
+  const main = html`${head}${list}${composer(room, viewer, 'Reply in thread')}`;
+  return layout(`Thread in ${parent.title}`, main, { viewer, root, active: parent.url });
+}
+
+// ---- document pages ----
+
+export function homePage(root: string, viewer: Viewer): string {
+  const channels = listChannels(root).filter((c) => canSeeChannel(viewer.auth, c));
+  const wsName = loadConfig(root).name;
+  const rows = channels.map(
+    (c) => html`<li style="margin-bottom:6px"><a href="/c/${encodeURIComponent(c.name)}">${c.private ? icon('lock') : '#'} ${c.name}</a>${
+      c.topic ? html` <span class="muted">- ${c.topic}</span>` : ''
+    }</li>`
+  );
+  const content = html`<h1>${wsName}</h1>
+<p class="muted">Pick a channel, or start a <a href="/d/new">direct conversation</a>.</p>
+<ul style="list-style:none;padding:0">${joinHtml(rows)}</ul>
+<p><a class="btn" href="/new">${icon('plus')} New channel</a></p>`;
+  return doc(wsName, content, { viewer, root, roomsPage: true });
+}
+
+export function loginPage(next: string, error?: string): string {
+  const content = html`<div class="form-box" style="margin:0 auto">
+<h1>Sign in</h1>
+${error ? html`<div class="form-error">${error}</div>` : ''}
+<form method="post" action="/login">
+<input type="hidden" name="next" value="${next}">
+<div class="field"><label for="token">Token</label><input type="password" id="token" name="token" autocomplete="current-password" autofocus required>
+<p class="muted">Paste the token an administrator gave you. It identifies you; there is no separate username.</p></div>
+<button class="btn btn-primary" type="submit">Sign in</button>
+</form></div>`;
+  return layout('Sign in', content, { viewer: null, root: '' });
+}
+
+export function errorPage(status: number, message: string, opts: PageOpts): string {
+  const content = html`<h1>${status}</h1><p>${message}</p><p><a href="/">Back to the workspace</a></p>`;
+  return opts.viewer ? doc(`${status}`, content, opts) : layout(`${status}`, content, opts);
+}
+
+export function newChannelPage(root: string, viewer: Viewer, error?: string): string {
+  const content = html`<div class="form-box">
+<h1>New channel</h1>
+${error ? html`<div class="form-error">${error}</div>` : ''}
+<form method="post" action="/new">${csrfField(viewer)}
+<div class="field"><label for="name">Name</label><input type="text" id="name" name="name" required pattern="[a-z0-9][a-z0-9-]*" autofocus>
+<p class="muted">Lowercase letters, digits, and hyphens: what fits after a #.</p></div>
+<div class="field"><label for="topic">Topic</label><input type="text" id="topic" name="topic"></div>
+<div class="field"><label class="checkbox"><input type="checkbox" name="private" value="1"> Private: visible only to people added to it, and that cannot be undone later.</label></div>
+<button class="btn btn-primary" type="submit">Create channel</button>
+</form></div>`;
+  return doc('New channel', content, { viewer, root });
+}
+
+export function channelSettingsPage(
+  root: string,
+  room: Room,
+  viewer: Viewer,
+  opts: { error?: string; flash?: string } = {}
+): string {
+  const c = room.channel!;
+  const admin = isSiteAdmin(viewer.auth);
+  const memberRows = c.private
+    ? joinHtml(
+        c.members.map(
+          (m) => html`<li style="display:flex;align-items:center;gap:8px;margin-bottom:4px">${avatar(m, 20)} <a href="/${encodeURIComponent(m)}">${m}</a>
+<form method="post" action="${room.url}/members/remove" style="margin-left:auto">${csrfField(viewer)}<input type="hidden" name="user" value="${m}"><button class="btn-link" type="submit">${m === viewer.auth.username ? 'Leave' : 'Remove'}</button></form></li>`
+        )
+      )
+    : '';
+  const membersSection = c.private
+    ? html`<h2>Members</h2>
+<ul style="list-style:none;padding:0;max-width:420px">${memberRows}</ul>
+<form method="post" action="${room.url}/members/add">${csrfField(viewer)}
+<div class="field"><label for="user">Add someone</label><input type="text" id="user" name="user" placeholder="username"></div>
+<button class="btn" type="submit">Add</button>
+</form>`
+    : html`<p class="muted">#${c.name} is public: every member of the workspace can read and post in it.</p>`;
+  const danger = admin
+    ? html`<div class="danger-zone"><h3>Delete this channel</h3>
+<p>Everything said in it goes with it. There is no undo.</p>
+<form method="post" action="${room.url}/delete">${csrfField(viewer)}<button class="btn btn-danger" type="submit">Delete #${c.name}</button></form></div>`
+    : '';
+  const content = html`<h1>${room.title}</h1>
+${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.flash ? html`<div class="flash">${opts.flash}</div>` : ''}
+<form method="post" action="${room.url}/settings">${csrfField(viewer)}
+<div class="field" style="max-width:520px"><label for="topic">Topic</label><input type="text" id="topic" name="topic" value="${c.topic}"></div>
+<button class="btn btn-primary" type="submit">Save</button>
+</form>
+${membersSection}
+${danger}`;
+  return doc(`${room.title} settings`, content, { viewer, root, active: room.url });
+}
+
+export function newDmPage(root: string, viewer: Viewer, error?: string): string {
+  const state = loadVault(root);
+  const users = state.status === 'ok' ? Object.keys(state.vault.users).filter((u) => u !== viewer.auth.username).sort() : [];
+  const boxes = users.map(
+    (u) => html`<label class="checkbox" style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><input type="checkbox" name="user" value="${u}">${avatar(u, 20)} ${u}</label>`
+  );
+  const content = html`<div class="form-box">
+<h1>New conversation</h1>
+${error ? html`<div class="form-error">${error}</div>` : ''}
+<form method="post" action="/d/new">${csrfField(viewer)}
+<div class="field"><label>With</label>${joinHtml(boxes)}</div>
+<button class="btn btn-primary" type="submit">Start</button>
+</form></div>`;
+  return doc('New conversation', content, { viewer, root });
+}
+
+export interface SearchHit {
+  /** Where it was said: the room's URL and title. */
+  url: string;
+  where: string;
+  message: Message;
+  /** The room the hit renders against, for tools-free display. */
+  root: string;
+}
+
+export function searchPage(root: string, viewer: Viewer, query: string, hits: { url: string; where: string; message: Message }[]): string {
+  const rows = hits.map(
+    (h) => html`<div class="search-hit">
+<div class="where"><a href="${h.url}">${h.where}</a> <span class="muted">${avatar(h.message.author, 16)} ${h.message.author}</span> ${timeTag(h.message.created)}</div>
+<div class="markdown-body">${bodyHtml(root, h.message.body)}</div>
+</div>`
+  );
+  const content = html`<h1>Search</h1>
+<form method="get" action="/search" style="margin-bottom:24px;max-width:520px"><div class="field"><input type="text" name="q" value="${query}" placeholder="Search messages" autofocus aria-label="Search messages"></div></form>
+${query === '' ? '' : html`<p class="muted">${hits.length === 0 ? 'Nothing matched.' : `${hits.length} ${hits.length === 1 ? 'message matches' : 'messages match'}.`}</p>`}
+${joinHtml(rows)}`;
+  return doc('Search', content, { viewer, root });
+}
+
+export function profilePage(root: string, viewer: Viewer, username: string, profile: UserProfile | undefined): string {
+  const content = html`<div style="display:flex;align-items:center;gap:16px;margin-bottom:16px">${avatar(username, 64)}<div>
+<h1 style="margin:0">${profile?.name ?? username}</h1>
+${profile?.name ? html`<p class="muted" style="margin:0">${username}</p>` : ''}
+</div></div>
+${profile?.bio ? html`<p>${profile.bio}</p>` : ''}
+${
+    username === viewer.auth.username
+      ? html`<p><a class="btn" href="/account">Edit profile</a></p>`
+      : html`<form method="post" action="/d/new">${csrfField(viewer)}<input type="hidden" name="user" value="${username}"><button class="btn btn-primary" type="submit">Message ${username}</button></form>`
+  }`;
+  return doc(username, content, { viewer, root });
+}
+
+export function accountPage(root: string, viewer: Viewer, opts: { flash?: string; error?: string } = {}): string {
+  const profile = viewer.auth.user.profile;
+  const content = html`<h1>Account</h1>
+${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.flash ? html`<div class="flash">${opts.flash}</div>` : ''}
+<form method="post" action="/account" style="max-width:520px">${csrfField(viewer)}
+<div class="field"><label for="name">Display name</label><input type="text" id="name" name="name" value="${profile?.name ?? ''}"></div>
+<div class="field"><label for="bio">Bio</label><input type="text" id="bio" name="bio" value="${profile?.bio ?? ''}"></div>
+<button class="btn btn-primary" type="submit">Save</button>
+</form>
+<p class="muted" style="margin-top:24px">Signed in as <strong>${viewer.auth.username}</strong>. Tokens are minted by an administrator; ask one for a new token if you need to sign in elsewhere or use the API.</p>`;
+  return doc('Account', content, { viewer, root });
+}
+
+// ---- admin ----
+
+export function adminPage(root: string, viewer: Viewer, vault: Vault, opts: { flash?: string; error?: string } = {}): string {
+  const config = loadConfig(root);
+  const users = Object.entries(vault.users).sort(([a], [b]) => a.localeCompare(b));
+  const rows = users.map(([name, u]) => {
+    const isSelf = name === viewer.auth.username;
+    return html`<tr>
+<td>${avatar(name, 20)} <a href="/${encodeURIComponent(name)}">${name}</a>${u.siteAdmin ? html` <span class="muted">(admin)</span>` : ''}</td>
+<td class="muted">${u.tokens.length} ${u.tokens.length === 1 ? 'token' : 'tokens'}</td>
+<td style="text-align:right;white-space:nowrap">
+<form method="post" action="/admin/users/token" style="display:inline">${csrfField(viewer)}<input type="hidden" name="user" value="${name}"><button class="btn-link" type="submit">New token</button></form>
+${isSelf ? '' : html` · <form method="post" action="/admin/users/admin" style="display:inline">${csrfField(viewer)}<input type="hidden" name="user" value="${name}"><input type="hidden" name="value" value="${u.siteAdmin ? '0' : '1'}"><button class="btn-link" type="submit">${u.siteAdmin ? 'Revoke admin' : 'Make admin'}</button></form> · <form method="post" action="/admin/users/remove" style="display:inline">${csrfField(viewer)}<input type="hidden" name="user" value="${name}"><button class="btn-link" type="submit">Remove</button></form>`}
+</td></tr>`;
+  });
+  const content = html`<h1>Admin</h1>
+${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.flash ? html`<div class="flash">${opts.flash}</div>` : ''}
+<h2>People</h2>
+<table style="width:100%;max-width:680px"><tbody>${joinHtml(rows)}</tbody></table>
+<form method="post" action="/admin/users/add" style="margin-top:12px;max-width:520px">${csrfField(viewer)}
+<div class="field"><label for="username">Add someone</label><input type="text" id="username" name="username" placeholder="username" required>
+<p class="muted">Creates the account and mints its first token, shown once for you to hand over.</p></div>
+<label class="checkbox"><input type="checkbox" name="admin" value="1"> Site admin</label>
+<div style="margin-top:10px"><button class="btn btn-primary" type="submit">Add user</button></div>
+</form>
+<h2>Workspace</h2>
+<form method="post" action="/admin/settings" style="max-width:520px">${csrfField(viewer)}
+<div class="field"><label for="wsname">Name</label><input type="text" id="wsname" name="name" value="${config.name}"></div>
+<div class="field"><label for="theme">Theme</label><select id="theme" name="theme">${joinHtml(
+    THEMES.map((t) => html`<option value="${t.name}" ${t.name === config.theme ? raw('selected') : ''}>${t.label}</option>`)
+  )}</select>
+<p class="muted">The workspace's own look; each person can still pick their own from the account menu.</p></div>
+<button class="btn btn-primary" type="submit">Save</button>
+</form>`;
+  return doc('Admin', content, { viewer, root });
+}
+
+export function tokenPage(root: string, viewer: Viewer, username: string, token: string, created: boolean): string {
+  const content = html`<h1>${created ? `${username} was added` : `A new token for ${username}`}</h1>
+<p>This token is shown once and stored only as a hash. Hand it over now:</p>
+<pre><code>${token}</code></pre>
+<p class="muted">They sign in with it at <code>/login</code>, or use it as a bearer token against the API.</p>
+<p><a class="btn" href="/admin">Back to admin</a></p>`;
+  return doc('Token', content, { viewer, root });
+}
+
+export function editMessagePage(root: string, room: Room, m: Message, viewer: Viewer, error?: string): string {
+  const content = html`<h1>Edit message</h1>
+${error ? html`<div class="form-error">${error}</div>` : ''}
+<form method="post" action="${room.url}/m/${m.id}/edit" style="max-width:720px">${csrfField(viewer)}
+<div class="field"><textarea name="body" rows="8" autofocus>${m.body}</textarea></div>
+<button class="btn btn-primary" type="submit">Save</button>
+<a class="btn" href="${room.url}">Cancel</a>
+</form>`;
+  return doc('Edit message', content, { viewer, root, active: room.url });
+}
+
+export function aboutIcon(name: IconName): Html {
+  return icon(name);
+}
+
+/** How a channel or DM presents itself in search results. */
+export function roomLabel(room: { kind: string; channel?: ChannelInfo; dm?: DmInfo }, viewer: string): string {
+  if (room.channel) return `#${room.channel.name}`;
+  if (room.dm) return dmTitle(room.dm, viewer);
+  return 'somewhere';
+}

@@ -1,0 +1,33 @@
+# A remote workspace with automatic HTTPS.
+# Point a DNS record at this machine, then, with mochiforge checked out beside
+# this directory (the image compiles its sources in):
+#   DOMAIN=chat.example.org docker compose up -d
+#   docker compose logs dango   (copy the one-time owner token on first start)
+services:
+  dango:
+    build:
+      context: ..
+      dockerfile: dango/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - ./workspace:/workspace
+    environment:
+      # Caddy is the only way in (the server's port is not published), so the
+      # forwarded headers can be believed. This seeds network.trustProxy in the
+      # workspace's config.json once; edit it there afterwards.
+      DANGO_TRUST_PROXY: "1"
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN to your hostname, e.g. chat.example.org}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+volumes:
+  caddy_data:
+  caddy_config:

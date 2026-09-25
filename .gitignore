@@ -1,0 +1,5 @@
+node_modules/
+dist/
+example-root/
+# The workspace docker-compose.yml mounts, which is somebody's data.
+workspace/

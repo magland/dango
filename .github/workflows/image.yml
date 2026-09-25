@@ -1,0 +1,132 @@
+# Publishes the container image that `dango deploy fly` deploys.
+#
+# The same arrangement as mochiforge's image workflow. A version tag is tagged
+# with that version and moves `latest`; a successful ci run on main is tagged
+# `main` and nothing else. So the tags follow the released versions, and
+# `deploy` can pin to the CLI's own version and expect to find it. Nothing is
+# pushed until the tests have passed: for main that means waiting on ci and
+# building the commit ci tested; a version tag is gated on being pushed only
+# after a release passed.
+#
+# The build context is the workspace root holding both checkouts, since the
+# image compiles mochiforge's sources in (see the Dockerfile).
+#
+# One thing this workflow cannot do for you: a newly created GitHub package is
+# private, and Fly pulls anonymously. After the first successful run, set the
+# package to public under Packages > dango > Package settings, or deploys will
+# fail to pull the image.
+name: image
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: image-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          path: dango
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magland/mochiforge
+          ref: main
+          path: mochiforge
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Work out the tags
+        id: tags
+        run: |
+          image=ghcr.io/${{ github.repository_owner }}/dango
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            echo "tags=$image:$version,$image:latest" >> "$GITHUB_OUTPUT"
+            echo "ref=$image:$version" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=$image:main" >> "$GITHUB_OUTPUT"
+            echo "ref=$image:main" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The version in package.json is what the CLI asks the registry for, so
+      # a tag that disagrees with it would publish an image no deploy requests.
+      - name: Check the tag against package.json
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(node -p "require('./dango/package.json').version")
+          [ "v$version" = "$GITHUB_REF_NAME" ] || {
+            echo "tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          }
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: dango/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # An image that cannot serve a workspace is worse than no image, and this
+      # is the last point where that is cheap to find out.
+      - name: Run the image and check it serves a fresh workspace
+        run: |
+          docker run -d --name check -p 3000:3000 "${{ steps.tags.outputs.ref }}"
+          for _ in $(seq 1 60); do
+            curl -fsS -o /dev/null http://127.0.0.1:3000/login && break
+            sleep 1
+          done
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/login)
+          docker logs check
+          docker rm -f check >/dev/null
+          [ "$code" = "200" ] || { echo "the image did not answer 200"; exit 1; }
+
+      # The path `dango deploy` relies on: the server adopts an owner token
+      # supplied in the environment, and never writes it to its log.
+      - name: Check the owner token can be supplied to the image
+        run: |
+          token="dango_$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+          docker run -d --name preset -p 3001:3000 -e "DANGO_OWNER_TOKEN=$token" "${{ steps.tags.outputs.ref }}"
+          for _ in $(seq 1 60); do
+            curl -fsS -o /dev/null http://127.0.0.1:3001/login && break
+            sleep 1
+          done
+          who=$(curl -s -H "authorization: Bearer $token" http://127.0.0.1:3001/api/whoami)
+          logs=$(docker logs preset 2>&1)
+          docker rm -f preset >/dev/null
+          echo "$logs"
+          echo "$who" | grep -q '"username":"owner"' || {
+            echo "the supplied owner token was not adopted: $who"
+            exit 1
+          }
+          if echo "$logs" | grep -q "$token"; then
+            echo "the server echoed the supplied owner token into its log"
+            exit 1
+          fi
