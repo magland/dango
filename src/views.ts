@@ -15,7 +15,7 @@ import { Attachment, MAX_ATTACHMENTS_BYTES, Message } from './messages';
 import { pageScript } from './pagescript';
 import { canDeleteMessage, canEditMessage, canSeeChannel, isSiteAdmin } from './perms';
 import { Pin, pinOf, readPins } from './pins';
-import { RoomUnread, UNREAD_CAP, mentionsUser, readKey, unreadRooms } from './reads';
+import { RoomUnread, UNREAD_CAP, isNewsFor, mentionsUser, readKey, unreadRooms } from './reads';
 import { Room } from './rooms';
 import { styleSheet } from './style';
 
@@ -125,7 +125,11 @@ function sidebar(opts: PageOpts, rooms: RoomUnread[]): Html {
     rooms.filter((r) => r.kind === 'channel').map((r) => roomLink(r, privateNames.has(r.url) ? icon('lock') : '#', opts.active, isMuted(prefs, r.url)))
   )}</ul>
 <div class="side-cap"><span>Direct messages</span><a href="/d/new" title="New conversation">${icon('plus')}</a></div>
-<ul>${joinHtml(rooms.filter((r) => r.kind === 'dm').map((r) => roomLink(r, icon('comment'), opts.active, isMuted(prefs, r.url))))}</ul>
+<ul>${joinHtml(
+    rooms
+      .filter((r) => r.kind === 'dm')
+      .map((r) => roomLink(r, r.with && r.with.length === 1 ? avatar(r.with[0], 18) : icon('people'), opts.active, isMuted(prefs, r.url)))
+  )}</ul>
 </div>
 <div class="side-foot">${userMenu(opts)}<a class="topbar-icon" href="/search" aria-label="Search">${icon('search')}</a></div>
 </nav>`;
@@ -218,22 +222,22 @@ export function externalLinksInNewTab(rendered: string): string {
 
 /** A pushpin, drawn in the icon set's manner: a 16px box, currentColor, one stroke weight. */
 const PIN_ICON = raw(
-  '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2h4M7 2v4L4.5 9h7L9 6V2M8 9v5"/></svg>'
+  '<svg class="glyph" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2h4M7 2v4L4.5 9h7L9 6V2M8 9v5"/></svg>'
 );
 
 /** A bell, and a bell struck through, in the pushpin's manner: whether a room is notified. */
 const BELL_ICON = raw(
-  '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10.5V7a4 4 0 0 1 8 0v3.5l1.5 1.5h-11zM6.5 14a1.5 1.5 0 0 0 3 0"/></svg>'
+  '<svg class="glyph" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10.5V7a4 4 0 0 1 8 0v3.5l1.5 1.5h-11zM6.5 14a1.5 1.5 0 0 0 3 0"/></svg>'
 );
 /** The way back, and a paperclip for attaching files, in the same manner. */
 const BACK_ICON = raw(
-  '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3L5 8l5 5"/></svg>'
+  '<svg class="glyph" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3L5 8l5 5"/></svg>'
 );
 const PAPERCLIP_ICON = raw(
-  '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 7.5l-5.6 5.6a3.5 3.5 0 0 1-5-5l6-6a2.3 2.3 0 0 1 3.3 3.3l-6 6a1.2 1.2 0 0 1-1.7-1.7l5.5-5.5"/></svg>'
+  '<svg class="glyph" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 7.5l-5.6 5.6a3.5 3.5 0 0 1-5-5l6-6a2.3 2.3 0 0 1 3.3 3.3l-6 6a1.2 1.2 0 0 1-1.7-1.7l5.5-5.5"/></svg>'
 );
 const BELL_OFF_ICON = raw(
-  '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10.5V7a4 4 0 0 1 8 0v3.5l1.5 1.5h-11zM6.5 14a1.5 1.5 0 0 0 3 0M2 2l12 12"/></svg>'
+  '<svg class="glyph" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10.5V7a4 4 0 0 1 8 0v3.5l1.5 1.5h-11zM6.5 14a1.5 1.5 0 0 0 3 0M2 2l12 12"/></svg>'
 );
 
 function fileRows(roomUrl: string, id: number, files: Attachment[]): Html | '' {
@@ -291,11 +295,13 @@ function msgTools(room: Room, m: Message, viewer: Viewer): Html {
 
 /**
  * One message as a list item. This is what the page renders and what the
- * event stream sends, so a message looks the same however it arrived.
+ * event stream sends, so a message looks the same however it arrived. Its
+ * author and time ride on the item, so the page script can tell, as the
+ * list changes, which messages continue the one before (see messageItems).
  */
-export function messageHtml(root: string, room: Room, m: Message, viewer: Viewer): Html {
+export function messageHtml(root: string, room: Room, m: Message, viewer: Viewer, cont = false): Html {
   if (m.deleted) {
-    return html`<li class="msg" id="msg-${m.id}" data-mid="${m.id}"><span class="avatar" style="width:32px"></span><div class="msg-main"><span class="msg-deleted">This message was deleted.</span>${
+    return html`<li class="msg" id="msg-${m.id}" data-mid="${m.id}" data-created="${m.created}"><span class="avatar" style="width:32px"></span><div class="msg-main"><span class="msg-deleted">This message was deleted.</span>${
       m.replyCount > 0 && room.kind !== 'thread'
         ? html`<div class="msg-below"><a class="thread-link" href="${room.url}/t/${m.id}">${m.replyCount} ${m.replyCount === 1 ? 'reply' : 'replies'}</a></div>`
         : ''
@@ -313,7 +319,7 @@ export function messageHtml(root: string, room: Room, m: Message, viewer: Viewer
   // found in a scroll the way a flagged line can be found on a page.
   const mine = mentionsUser(m.body, viewer.auth.username) ? 'mentions-me' : '';
   const pin = room.kind === 'thread' ? null : pinOf(room.dir, m.id);
-  return html`<li class="msg ${mine} ${pin ? 'pinned' : ''}" id="msg-${m.id}" data-mid="${m.id}">${avatar(m.author, 32)}<div class="msg-main">
+  return html`<li class="msg ${mine} ${pin ? 'pinned' : ''} ${cont ? 'msg-cont' : ''}" id="msg-${m.id}" data-mid="${m.id}" data-author="${m.author}" data-created="${m.created}">${avatar(m.author, 32)}<div class="msg-main">
 ${pin ? html`<div class="pinned-by">${PIN_ICON} Pinned by ${pin.by}</div>` : ''}<div class="msg-head"><a class="author" href="/${encodeURIComponent(m.author)}">${m.author}</a>${timeTag(m.created)}${m.edited ? html`<span class="msg-edited">(edited)</span>` : ''}</div>
 <div class="msg-body markdown-body">${bodyHtml(root, m.body)}</div>
 ${fileRows(room.url, m.id, m.files)}${below}
@@ -324,20 +330,68 @@ function dayRule(iso: string): Html {
   return html`<li class="day-rule" role="separator">${formatDay(iso)}</li>`;
 }
 
-function messageList(root: string, room: Room, messages: Message[], viewer: Viewer): Html {
+/**
+ * How long after a message the same person's next one still continues it,
+ * drawn without the avatar and name again. The page script uses the same
+ * figure for what arrives live.
+ */
+const CONTINUE_MS = 5 * 60 * 1000;
+
+/**
+ * A run of messages as list items: a rule where the day changes, a rule
+ * where what the viewer has not read begins, and a message that follows
+ * its author's last within a few minutes drawn as a continuation. The page
+ * script redraws the day rules in the viewer's own time zone and applies
+ * the same grouping as the list changes; this is the first paint, and what
+ * a page without script keeps.
+ */
+function messageItems(root: string, room: Room, messages: Message[], viewer: Viewer, readUpTo?: number): Html[] {
   const items: Html[] = [];
   let lastDay = '';
-  for (const m of messages) {
+  let prev: Message | null = null;
+  let marked = readUpTo === undefined;
+  messages.forEach((m, i) => {
     const day = m.created.slice(0, 10);
     if (day !== lastDay) {
       items.push(dayRule(m.created));
       lastDay = day;
+      prev = null;
     }
-    items.push(messageHtml(root, room, m, viewer));
-  }
-  const last = messages.length ? messages[messages.length - 1].id : 0;
-  return html`<div class="msgs"><ul id="msg-list" data-stream="${room.url}/events" data-last="${last}">${joinHtml(items)}</ul></div>`;
+    // Not above the first message on the page: everything shown is new
+    // then, and a rule at the top says nothing.
+    if (!marked && m.id > readUpTo! && isNewsFor(m, viewer.auth.username)) {
+      marked = true;
+      if (i > 0) {
+        items.push(html`<li class="new-rule" role="separator">New</li>`);
+        prev = null;
+      }
+    }
+    const cont =
+      prev !== null &&
+      !prev.deleted &&
+      !m.deleted &&
+      prev.author === m.author &&
+      Date.parse(m.created) - Date.parse(prev.created) < CONTINUE_MS;
+    items.push(messageHtml(root, room, m, viewer, cont));
+    prev = m;
+  });
+  return items;
 }
+
+/**
+ * The scrolling list, and a button over its foot that brings the reader
+ * back to the newest message when they have scrolled away from it or
+ * something has arrived below them; the page script shows it.
+ */
+function messageList(root: string, room: Room, messages: Message[], viewer: Viewer, readUpTo?: number): Html {
+  const items = messageItems(root, room, messages, viewer, readUpTo);
+  const last = messages.length ? messages[messages.length - 1].id : 0;
+  return html`<div class="msgs"><ul id="msg-list" data-stream="${room.url}/events" data-last="${last}">${joinHtml(items)}</ul></div>${JUMP_NEWEST}`;
+}
+
+const JUMP_NEWEST = html`<div class="jump-newest-wrap"><button class="jump-newest" type="button" data-jump-newest hidden>Jump to newest ${raw(
+  '<svg class="glyph" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v10M3.5 8.5L8 13l4.5-4.5"/></svg>'
+)}</button></div>`;
 
 /**
  * The composer. data-max-bytes is the attachments' cap, so the page script
@@ -386,14 +440,15 @@ ${pinned.length === 0 ? html`<p class="muted">Nothing is pinned here yet. Pin a 
   return doc(`Pinned in ${room.title}`, content, { viewer, root, active: room.url, back: { url: room.url, label: room.title } });
 }
 
-export function channelPage(root: string, room: Room, messages: Message[], viewer: Viewer): string {
+/** readUpTo is where the viewer's read marker stood before this page, for the "New" rule. */
+export function channelPage(root: string, room: Room, messages: Message[], viewer: Viewer, readUpTo?: number): string {
   const tools = html`<a class="topbar-icon" href="${room.url}/settings" aria-label="Channel settings" title="Channel settings">${icon('sliders')}</a>`;
-  const main = html`${roomHead(root, room, viewer, tools)}${messageList(root, room, messages, viewer)}${composer(room, viewer, `Message ${room.title}`)}`;
+  const main = html`${roomHead(root, room, viewer, tools)}${messageList(root, room, messages, viewer, readUpTo)}${composer(room, viewer, `Message ${room.title}`)}`;
   return layout(`${room.title}`, main, { viewer, root, active: room.url });
 }
 
-export function dmPage(root: string, room: Room, messages: Message[], viewer: Viewer): string {
-  const main = html`${roomHead(root, room, viewer)}${messageList(root, room, messages, viewer)}${composer(room, viewer, `Message ${room.title}`)}`;
+export function dmPage(root: string, room: Room, messages: Message[], viewer: Viewer, readUpTo?: number): string {
+  const main = html`${roomHead(root, room, viewer)}${messageList(root, room, messages, viewer, readUpTo)}${composer(room, viewer, `Message ${room.title}`)}`;
   return layout(room.title, main, { viewer, root, active: room.url });
 }
 
@@ -401,9 +456,9 @@ export function threadPage(root: string, room: Room, anchor: Message, replies: M
   const parent = room.parent!;
   const head = html`<header class="room-head"><a class="topbar-icon" href="${parent.url}" aria-label="Back to ${parent.title}">${BACK_ICON}</a><div class="room-title"><h1>Thread</h1><span class="room-topic">in <a href="${parent.url}">${parent.title}</a></span></div><div class="room-tools"></div></header>`;
   const anchorHtml = html`<ul class="thread-anchor" style="list-style:none;margin:0;padding:0">${messageHtml(root, parent, anchor, viewer)}</ul>`;
-  const items = replies.map((m) => messageHtml(root, room, m, viewer));
+  const items = messageItems(root, room, replies, viewer);
   const last = replies.length ? replies[replies.length - 1].id : 0;
-  const list = html`<div class="msgs">${anchorHtml}<ul id="msg-list" data-stream="${room.url}/events" data-last="${last}">${joinHtml(items)}</ul></div>`;
+  const list = html`<div class="msgs">${anchorHtml}<ul id="msg-list" data-stream="${room.url}/events" data-last="${last}">${joinHtml(items)}</ul></div>${JUMP_NEWEST}`;
   const main = html`${head}${list}${composer(room, viewer, 'Reply in thread')}`;
   return layout(`Thread in ${parent.title}`, main, { viewer, root, active: parent.url });
 }
@@ -437,8 +492,14 @@ ${
   return doc(wsName, content, { viewer, root, roomsPage: true });
 }
 
+/**
+ * The mark above a signed-out page's form. Only the mark: a workspace says
+ * nothing about itself, its name included, to someone not signed in.
+ */
+const SIGNIN_MARK = html`<div class="signin-mark" aria-hidden="true">${raw(MARK)}</div>`;
+
 export function loginPage(next: string, error?: string): string {
-  const content = html`<div class="form-box" style="margin:0 auto">
+  const content = html`${SIGNIN_MARK}<div class="form-box" style="margin:0 auto">
 <h1>Sign in</h1>
 ${error ? html`<div class="form-error">${error}</div>` : ''}
 <form method="post" action="/login">
@@ -498,7 +559,7 @@ export function channelSettingsPage(
 <p>Everything said in it goes with it. There is no undo.</p>
 <form method="post" action="${room.url}/delete" data-confirm="Delete #${c.name} and everything said in it? There is no undo.">${csrfField(viewer)}<button class="btn btn-danger" type="submit">Delete #${c.name}</button></form></div>`
     : '';
-  const content = html`<h1>${room.title}</h1>
+  const content = html`<h1>${room.title} settings</h1>
 ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.flash ? html`<div class="flash">${opts.flash}</div>` : ''}
 <form method="post" action="${room.url}/settings">${csrfField(viewer)}
 <div class="field" style="max-width:520px"><label for="topic">Topic</label><input type="text" id="topic" name="topic" value="${c.topic}"></div>
@@ -513,7 +574,7 @@ export function newDmPage(root: string, viewer: Viewer, error?: string): string 
   const state = loadVault(root);
   const users = state.status === 'ok' ? Object.keys(state.vault.users).filter((u) => u !== viewer.auth.username).sort() : [];
   const boxes = users.map(
-    (u) => html`<label class="checkbox" style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><input type="checkbox" name="user" value="${u}">${avatar(u, 20)} ${u}</label>`
+    (u) => html`<label class="checkbox person-pick"><input type="checkbox" name="user" value="${u}">${avatar(u, 20)} ${u}</label>`
   );
   const content = html`<div class="form-box">
 <h1>New conversation</h1>
@@ -702,7 +763,7 @@ export function tokenPage(root: string, viewer: Viewer, username: string, token:
  * link cannot quietly swap a visitor into someone else's account.
  */
 export function invitePage(signedInAs: string | null): string {
-  const content = html`<div class="form-box" style="margin:0 auto" data-invite>
+  const content = html`${SIGNIN_MARK}<div class="form-box" style="margin:0 auto" data-invite>
 <h1>You're invited</h1>
 ${signedInAs ? html`<div class="flash">This browser is signed in as <strong>${signedInAs}</strong>. Accepting the invite switches it to the invited account.</div>` : ''}
 <p data-invite-ready hidden>Your invite link filled in your sign-in token. Press the button to join the workspace.</p>

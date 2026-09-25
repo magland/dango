@@ -133,6 +133,11 @@ const chrome = spawn(
     '--no-default-browser-check',
     '--disable-gpu',
     '--no-sandbox',
+    // Chrome hands notifications to the desktop's own notification service
+    // even when headless, so the pushes below would pop up on the screen of
+    // whoever runs this. Its built-in notifications stay inside the browser,
+    // and the checks read them through the service worker either way.
+    '--disable-features=NativeNotifications,SystemNotifications',
     '--window-size=1200,800',
     'about:blank',
   ],
@@ -477,6 +482,49 @@ if ((await n1.eval('chimes')) !== 1) fail('the tab chimed with the chime turned 
 if (await n1.eval("navigator.serviceWorker.getRegistration('/').then((r) => r.getNotifications()).then((ns) => ns[0].silent)"))
   fail('with the chime off, the notification was silenced anyway');
 ok('with the chime turned off, the notification keeps the system’s sound');
+
+// ---- the list as it reads ----
+
+await api(owner, 'POST', '/channels', { name: 'runs' });
+await api(bob, 'POST', '/channels/runs/messages', { body: 'run one' });
+const r1 = await openPage(aliceCookie);
+await r1.go('/c/runs'); // alice has read up to "run one"
+await r1.go('/search'); // and looks away, so what comes next waits for her
+await api(bob, 'POST', '/channels/runs/messages', { body: 'run two' });
+await api(bob, 'POST', '/channels/runs/messages', { body: 'run three' });
+await r1.go('/c/runs');
+const shape = await r1.eval(`(() => {
+  const items = [...document.querySelectorAll('#msg-list > li')];
+  return items.map((li) => li.classList.contains('new-rule') ? 'new' : li.classList.contains('day-rule') ? 'day'
+    : (li.classList.contains('msg-cont') ? '+' : '') + li.querySelector('.msg-body').textContent.trim()).join(' / ');
+})()`);
+if (shape !== 'day / run one / new / run two / +run three') fail(`the list does not read as it should: ${shape}`);
+ok('what is unread begins under a "New" rule, and a run from one person is drawn as one');
+const atBottom = await r1.eval("(() => { const p = document.querySelector('.msgs'); return p.scrollHeight - p.scrollTop - p.clientHeight < 2; })()");
+if (!atBottom) fail('the room did not open at its newest message');
+if (!/^\d{1,2}:\d\d/.test(await r1.eval("document.querySelector('#msg-list .msg-head time').textContent"))) fail('a message’s time is not the time of day');
+ok('a room opens at its newest message, with times of day');
+await api(bob, 'POST', '/channels/runs/messages', { body: 'run four' });
+await waitFor('the live message to continue the run', () =>
+  r1.eval("(() => { const li = [...document.querySelectorAll('#msg-list > .msg')].pop(); return li.textContent.includes('run four') && li.classList.contains('msg-cont'); })()")
+);
+ok('a message arriving live continues its author’s run');
+
+// On a touch screen Enter is a new line: a phone's keyboard has no Shift+Enter.
+const t1 = await openPage(aliceCookie);
+await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, t1.sessionId);
+await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 }, t1.sessionId);
+await t1.go('/c/runs');
+const beforeEnter = (await api(alice, 'GET', '/channels/runs/messages?limit=1')).messages[0].id;
+await t1.eval("document.querySelector('.composer textarea').focus(); true");
+await t1.type('line one');
+await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' }, t1.sessionId);
+await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, t1.sessionId);
+await t1.type('line two');
+await sleep(300);
+if ((await t1.eval("document.querySelector('.composer textarea').value")) !== 'line one\nline two') fail('Enter on a touch screen did not make a new line');
+if ((await api(alice, 'GET', '/channels/runs/messages?limit=1')).messages[0].id !== beforeEnter) fail('Enter on a touch screen sent the message');
+ok('on a touch screen Enter makes a new line, and Send sends');
 
 // ---- an invite link ----
 

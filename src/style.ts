@@ -53,7 +53,7 @@ const CHAT_CSS = `
 }
 .side-rooms li a:hover { background: var(--surface-hover); color: var(--fg); text-decoration: none; }
 .side-rooms li a.current { background: var(--chip-bg); color: var(--fg); font-weight: 600; }
-.side-rooms .room-glyph { color: var(--fg-subtle); flex: none; width: 1em; text-align: center; }
+.side-rooms .room-glyph { color: var(--fg-subtle); flex: none; width: 18px; display: flex; justify-content: center; }
 .side-foot {
   flex: none; display: flex; align-items: center; gap: var(--s2);
   padding: var(--s2) var(--s3) var(--s2) var(--s2); border-top: 1px solid var(--border-soft);
@@ -71,10 +71,6 @@ const CHAT_CSS = `
 .side-user .whoami { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--fg); }
 .side-user > svg:last-child { color: var(--fg-subtle); flex: none; }
 .dropdown-menu.dd-up { top: auto; bottom: calc(100% + 6px); margin-top: 0; width: 240px; }
-/* A menu row that is a button (a theme, signing out) is drawn as a row that
-   is a link, without the browser's own button edges. */
-.dropdown-menu button.dd-item { border: none; border-top: 1px solid var(--border-soft); }
-.dropdown-menu > :first-child button.dd-item, .dropdown-menu > button.dd-item:first-child { border-top: none; }
 
 /* Unread counts: a filled rectangle at the end of the room's row, in the
    sheet's own corner radius, and stronger when a mention is waiting. A room
@@ -143,6 +139,37 @@ const CHAT_CSS = `
 .msg-body.markdown-body > :first-child { margin-top: 0; }
 .msg-body.markdown-body > :last-child { margin-bottom: 0; }
 .msg-deleted { color: var(--fg-subtle); font-style: italic; }
+
+/* A continuation: the same person again within a few minutes, drawn as more
+   of what they were saying. The avatar keeps its column but is not drawn,
+   the name stays for a screen reader only, and the time sits in the gutter,
+   shown when the message is pointed at or tapped. */
+.msg-cont { padding-top: 1px; padding-bottom: 1px; }
+.msg-cont > .avatar { visibility: hidden; max-height: 0; margin-top: 0; }
+.msg-cont .msg-head .author {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+}
+.msg-cont .msg-head time {
+  position: absolute; left: 0; top: 1px; width: 52px; text-align: center;
+  font-size: 11px; line-height: 23px; white-space: nowrap; visibility: hidden;
+}
+.msg-cont:hover .msg-head time, .msg-cont.picked .msg-head time { visibility: visible; }
+
+/* Where what the viewer has not read begins: a rule in the colour a mention
+   is marked in, with the word at its end. */
+.new-rule { display: flex; align-items: center; gap: var(--s2); margin: var(--s2) 0; color: var(--danger); font-size: var(--t-xs); font-weight: 700; }
+.new-rule::before { content: ""; flex: 1; border-top: 1px solid var(--danger); }
+
+/* Back to the newest message, floating over the foot of the list while the
+   reader is scrolled away from it. */
+.jump-newest-wrap { position: relative; height: 0; flex: none; }
+.jump-newest {
+  position: absolute; bottom: var(--s2); left: 50%; transform: translateX(-50%); z-index: 10;
+  display: inline-flex; align-items: center; gap: 6px; min-height: var(--touch); padding: 4px var(--s3);
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); color: var(--fg);
+  font: inherit; font-size: var(--t-sm); white-space: nowrap; cursor: pointer; box-shadow: 0 4px 12px var(--shadow);
+}
+.jump-newest:hover { background: var(--surface-hover); }
 .msg-edited { font-size: var(--t-xs); color: var(--fg-subtle); }
 
 /* The tools sit in a small bordered strip that appears on hover, the shape a
@@ -248,7 +275,7 @@ form[data-busy] button[type="submit"] { opacity: 0.6; cursor: progress; }
    the pin tool filled in the accent when the message is pinned. The header's
    pin link carries the room's count beside it. */
 .pinned-by { display: flex; align-items: center; gap: 4px; font-size: var(--t-xs); color: var(--fg-muted); margin-bottom: 2px; }
-.pinned-by .icon { color: var(--accent); }
+.pinned-by .glyph { color: var(--accent); }
 .msg-tools button.is-pinned { color: var(--accent); }
 .pins-link { width: auto; gap: 4px; padding: 0 8px; font-size: var(--t-sm); }
 
@@ -261,7 +288,7 @@ form[data-busy] button[type="submit"] { opacity: 0.6; cursor: progress; }
 .room-tools button.topbar-icon.is-muted { color: var(--accent); }
 .side-rooms li a.muted-room .room-name { opacity: 0.65; }
 .room-muted { display: flex; flex: none; color: var(--fg-subtle); }
-.room-tools button.topbar-icon .icon, .room-muted .icon { color: inherit; margin-right: 0; }
+.room-tools button.topbar-icon .glyph, .room-muted .glyph { color: inherit; }
 
 /* Sizes: an attachment's, beside its name, and the files chosen in the
    composer, beside the picker. Quiet, in the subtle colour. */
@@ -302,6 +329,13 @@ form[data-busy] button[type="submit"] { opacity: 0.6; cursor: progress; }
 .attach:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 .attach:has(input:disabled) { opacity: 0.5; cursor: progress; }
 
+/* The people to start a conversation with: a box, a face, a name. */
+.field label.person-pick { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s1); }
+
+/* The mark over a signed-out page's form. */
+.signin-mark { display: flex; justify-content: center; margin-bottom: var(--s4); color: var(--fg); }
+.signin-mark svg { display: block; width: 44px; height: 44px; }
+
 /* --- pages that are documents rather than rooms (login, admin, account,
        search, profiles) reuse the forge's document styles inside the frame. */
 .doc { flex: 1; overflow-y: auto; padding: var(--s5) var(--s5) var(--s6); }
@@ -325,6 +359,8 @@ table.people td.actions { text-align: right; white-space: nowrap; }
    a thumb's size, as every other control does under a coarse pointer. */
 @media (pointer: coarse) {
   input[type="text"], input[type="password"], input[type="time"], select, textarea, .composer textarea { font-size: 16px; }
+  input[type="checkbox"], input[type="radio"] { width: 20px; height: 20px; }
+  .field label.person-pick { min-height: var(--touch); }
   .side-rooms li a { min-height: var(--touch); font-size: var(--t-base); }
   .side-cap { align-items: center; }
   .side-cap a { display: flex; align-items: center; justify-content: center; width: var(--touch); height: var(--touch); margin: -12px -12px -12px 0; }
@@ -356,6 +392,8 @@ table.people td.actions { text-align: right; white-space: nowrap; }
 
   .msgs { padding: var(--s3) var(--s2) var(--s2); }
   .msg { gap: var(--s2); padding: 6px; }
+  .msg-cont { padding-top: 1px; padding-bottom: 1px; }
+  .msg-cont .msg-head time { width: 46px; }
   .msg-img { max-height: 260px; }
 
   .composer { padding: var(--s1) var(--s2) var(--s2); }

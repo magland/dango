@@ -122,6 +122,8 @@ export interface RoomUnread extends Unread {
   url: string;
   title: string;
   kind: 'channel' | 'dm';
+  /** For a conversation, the people in it other than the viewer. */
+  with?: string[];
 }
 
 /** Every room the user can see, with what is unread in it, in sidebar order. */
@@ -134,7 +136,8 @@ export function unreadRooms(root: string, auth: AuthResult): RoomUnread[] {
   }
   for (const d of listDmsFor(root, auth.username)) {
     const url = `/d/${d.id}`;
-    out.push({ url, title: dmTitle(d, auth.username), kind: 'dm', ...unreadIn(root, auth.username, url, dmDir(root, d.id)) });
+    const others = d.participants.filter((p) => p !== auth.username);
+    out.push({ url, title: dmTitle(d, auth.username), kind: 'dm', with: others, ...unreadIn(root, auth.username, url, dmDir(root, d.id)) });
   }
   return out;
 }

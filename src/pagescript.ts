@@ -114,6 +114,15 @@ function scrollToBottom() {
   var pane = scrollPane();
   if (pane) pane.scrollTop = pane.scrollHeight;
 }
+// The button back to the newest message: shown once the reader is a screen
+// or more above it, or when something arrives below where they are.
+function farFromBottom(pane) {
+  return pane.scrollHeight - pane.scrollTop - pane.clientHeight > pane.clientHeight;
+}
+function showJump(on) {
+  var b = document.querySelector('[data-jump-newest]');
+  if (b) b.hidden = !on;
+}
 // ---- the frame ----
 // The frame is one screen high, the composer at its foot. 100dvh says so in
 // the sheet, and is what a page gets without script, but phone browsers do
@@ -135,6 +144,68 @@ document.addEventListener('DOMContentLoaded', function () {
   if (window.visualViewport) window.visualViewport.addEventListener('resize', fitFrame);
 });
 
+// The list as the reader sees it. The server draws it in its own time zone
+// and with times relative to when the page was made ("5 minutes ago", which
+// goes on saying so); here the day rules are redrawn in the reader's time
+// zone, each message's time becomes the time of day it was sent, and a
+// message that follows its author's last within a few minutes is drawn as a
+// continuation, by the rule the server uses for the first paint. It runs
+// whenever the list changes, so what arrives live is placed the same way.
+var CONTINUE_MS = 5 * 60 * 1000;
+function dayLabel(d) {
+  var today = new Date();
+  today.setHours(0, 0, 0, 0);
+  var day = new Date(d.getTime());
+  day.setHours(0, 0, 0, 0);
+  var ago = Math.round((today - day) / 86400000);
+  if (ago === 0) return 'Today';
+  if (ago === 1) return 'Yesterday';
+  var opts = { weekday: 'long', month: 'long', day: 'numeric' };
+  if (day.getFullYear() !== today.getFullYear()) opts.year = 'numeric';
+  return d.toLocaleDateString([], opts);
+}
+function clockTimes(within) {
+  var times = within.querySelectorAll('.msg-head time[datetime]');
+  for (var i = 0; i < times.length; i++) {
+    var d = new Date(times[i].getAttribute('datetime'));
+    if (!isNaN(d.getTime())) times[i].textContent = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
+}
+function arrangeList(list) {
+  var old = list.querySelectorAll(':scope > .day-rule');
+  for (var i = 0; i < old.length; i++) old[i].remove();
+  var items = list.children;
+  var lastDay = '';
+  var prev = null;
+  for (var j = 0; j < items.length; j++) {
+    var li = items[j];
+    if (!li.classList.contains('msg')) { prev = null; continue; }
+    var created = new Date(li.getAttribute('data-created') || '');
+    if (!isNaN(created.getTime())) {
+      var key = created.toDateString();
+      if (key !== lastDay) {
+        var rule = document.createElement('li');
+        rule.className = 'day-rule';
+        rule.setAttribute('role', 'separator');
+        rule.textContent = dayLabel(created);
+        // Above a "New" rule that heads the day, not between it and its message.
+        var before = li.previousElementSibling;
+        list.insertBefore(rule, before && before.classList.contains('new-rule') ? before : li);
+        j++;
+        lastDay = key;
+        prev = null;
+      }
+    }
+    var author = li.getAttribute('data-author');
+    var cont = !!(prev && author && prev.getAttribute('data-author') === author &&
+      created - new Date(prev.getAttribute('data-created')) < CONTINUE_MS);
+    li.classList.toggle('msg-cont', cont);
+    prev = li;
+  }
+  var pane = scrollPane();
+  clockTimes(pane || list);
+}
+
 // Rooms open at the newest message, which is where the conversation is, and
 // the view stays there while the reader does, whatever changes its height:
 // an image arriving after the page, a message repainted, the composer
@@ -144,8 +215,12 @@ document.addEventListener('DOMContentLoaded', function () {
   var pane = scrollPane();
   var list = msgList();
   if (!pane || !list) return;
+  arrangeList(list);
   scrollToBottom();
-  pane.addEventListener('scroll', function () { stuckToBottom = nearBottom(pane); }, { passive: true });
+  pane.addEventListener('scroll', function () {
+    stuckToBottom = nearBottom(pane);
+    if (stuckToBottom || farFromBottom(pane)) showJump(!stuckToBottom);
+  }, { passive: true });
   if (window.ResizeObserver) {
     var watch = new ResizeObserver(function () { if (stuckToBottom) scrollToBottom(); });
     watch.observe(pane);
@@ -182,10 +257,13 @@ function openStream(list) {
     }
     if (existing) {
       existing.outerHTML = msg.html;
+      arrangeList(list);
     } else if (msg.type === 'message') {
       list.insertAdjacentHTML('beforeend', msg.html);
       list.setAttribute('data-last', String(msg.id));
+      arrangeList(list);
       if (follow) scrollToBottom();
+      else showJump(true);
       // Seen, if someone is at the page (see attended()); otherwise it waits
       // for them to come back.
       if (attended()) markReadHere(msg.id);
@@ -634,6 +712,9 @@ document.addEventListener('submit', function (e) {
 
 // ---- the composer ----
 // Enter sends, Shift+Enter is a newline; the textarea grows with its content.
+// On a touch screen Enter is a newline and Send sends: a phone's keyboard has
+// no Shift+Enter, so otherwise a message could never have a second line.
+var touchKeyboard = matchMedia('(hover: none) and (pointer: coarse)');
 function autosize(ta) {
   ta.style.height = 'auto';
   ta.style.height = Math.min(ta.scrollHeight + 2, window.innerHeight * 0.4) + 'px';
@@ -647,7 +728,7 @@ document.addEventListener('input', function (e) {
 document.addEventListener('keydown', function (e) {
   if (!e.target.matches || !e.target.matches('.composer textarea')) return;
   if (mentionKey(e, e.target)) return;
-  if (e.key === 'Enter' && !e.shiftKey) {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !touchKeyboard.matches) {
     e.preventDefault();
     var form = e.target.closest('form');
     if (form) sendComposer(form);
@@ -962,6 +1043,7 @@ document.addEventListener('click', function (e) {
   }
   var copy = closestOf(t, '[data-copy]');
   if (copy) { copyText(copy, copy.getAttribute('data-copy')); return; }
+  if (closestOf(t, '[data-jump-newest]')) { scrollToBottom(); stuckToBottom = true; showJump(false); return; }
   var mention = closestOf(t, '[data-mention]');
   if (mention) {
     var ta = mention.closest('form').querySelector('textarea');

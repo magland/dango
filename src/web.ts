@@ -65,6 +65,7 @@ import {
 } from './notify';
 import { noteRead, postMessage } from './post';
 import { vapidKeys } from './push';
+import { readKey, readMarkers } from './reads';
 import { Room, channelRoom, dmRoom, threadRoom } from './rooms';
 import { searchMessages } from './search';
 import * as views from './views';
@@ -585,23 +586,26 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
 
   // Rendering a room is reading it: the viewer's marker moves to the newest
   // message shown, and their other pages hear that the count is now zero.
-  const seen = (viewer: Viewer, room: Room, messages: Message[]) => {
+  // Where the marker stood before is returned, for the page's "New" rule.
+  const seen = (viewer: Viewer, room: Room, messages: Message[]): number => {
+    const before = readMarkers(root, viewer.auth.username)[readKey(room.url)] ?? 0;
     if (messages.length) noteRead(root, viewer.auth.username, room, messages[messages.length - 1].id);
+    return before;
   };
 
   // The room pages themselves.
   app.get('/c/:channel', (req, res) =>
     withRoom(req, res, (viewer, room) => {
       const messages = readMessages(room.dir, { limit: 100 });
-      seen(viewer, room, messages);
-      res.type('html').send(views.channelPage(root, room, messages, viewer));
+      const readUpTo = seen(viewer, room, messages);
+      res.type('html').send(views.channelPage(root, room, messages, viewer, readUpTo));
     })
   );
   app.get('/d/:dm', (req, res) =>
     withRoom(req, res, (viewer, room) => {
       const messages = readMessages(room.dir, { limit: 100 });
-      seen(viewer, room, messages);
-      res.type('html').send(views.dmPage(root, room, messages, viewer));
+      const readUpTo = seen(viewer, room, messages);
+      res.type('html').send(views.dmPage(root, room, messages, viewer, readUpTo));
     })
   );
   app.get(['/c/:channel/t/:tid', '/d/:dm/t/:tid'], (req, res) =>
