@@ -11,6 +11,11 @@ import { channelDir, dmDir } from './workspace';
 // Case-insensitive substring match, newest first, capped. On a workspace
 // whose history outgrows this there is room for an index later; the walk is
 // the version whose answers are trivially correct.
+//
+// A query can be narrowed, the way Slack's can: from:alice keeps what alice
+// wrote, and in:#general (or in:general) keeps one channel, or in:alice the
+// conversations alice is in. What is left of the query is the text to find,
+// and a query of filters alone lists everything they allow.
 
 export interface SearchHit {
   /** The page the hit is read on: the room, or the thread it sits in. */
@@ -23,15 +28,40 @@ export interface SearchHit {
 const MAX_HITS = 100;
 const SCAN_LIMIT = 5000;
 
-function matches(m: Message, needle: string): boolean {
-  return !m.deleted && m.body.toLowerCase().includes(needle);
+export interface SearchQuery {
+  /** The text to find, lowercased; empty when the query is filters alone. */
+  text: string;
+  /** from:name, the author, without an @. */
+  from?: string;
+  /** in:name, a channel's name without its #, or a person a conversation is with. */
+  in?: string;
+}
+
+export function parseQuery(query: string): SearchQuery {
+  const out: SearchQuery = { text: '' };
+  const words: string[] = [];
+  for (const word of query.trim().split(/\s+/)) {
+    const f = /^from:@?(.+)$/i.exec(word);
+    const i = /^in:#?(.+)$/i.exec(word);
+    if (f) out.from = f[1];
+    else if (i) out.in = i[1].toLowerCase();
+    else if (word) words.push(word);
+  }
+  out.text = words.join(' ').toLowerCase();
+  return out;
+}
+
+function matches(m: Message, q: SearchQuery): boolean {
+  if (m.deleted) return false;
+  if (q.from !== undefined && m.author.toLowerCase() !== q.from.toLowerCase()) return false;
+  return q.text === '' || m.body.toLowerCase().includes(q.text);
 }
 
 function scanRoom(
   dir: string,
   url: string,
   where: string,
-  needle: string,
+  needle: SearchQuery,
   out: SearchHit[],
   withThreads: boolean
 ): void {
@@ -52,14 +82,16 @@ function scanRoom(
 }
 
 export function searchMessages(root: string, auth: AuthResult, query: string): SearchHit[] {
-  const needle = query.trim().toLowerCase();
-  if (needle === '') return [];
+  const needle = parseQuery(query);
+  if (needle.text === '' && needle.from === undefined && needle.in === undefined) return [];
   const out: SearchHit[] = [];
   for (const c of listChannels(root)) {
     if (!canSeeChannel(auth, c)) continue;
+    if (needle.in !== undefined && c.name !== needle.in) continue;
     scanRoom(channelDir(root, c.name), `/c/${encodeURIComponent(c.name)}`, `#${c.name}`, needle, out, true);
   }
   for (const dm of listDmsFor(root, auth.username)) {
+    if (needle.in !== undefined && !dm.participants.some((p) => p !== auth.username && p.toLowerCase() === needle.in)) continue;
     scanRoom(dmDir(root, dm.id), `/d/${dm.id}`, dmTitle(dm, auth.username), needle, out, true);
   }
   out.sort((a, b) => b.message.created.localeCompare(a.message.created));

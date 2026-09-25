@@ -110,9 +110,11 @@ const CHAT_CSS = `
   border-left: 1px solid var(--border-soft); padding-left: var(--s3);
 }
 .room-tools { margin-left: auto; flex: none; display: flex; align-items: center; gap: var(--s2); }
-/* A document page's bar exists only for the phone, where no sidebar leads
-   back; it says where it goes. */
+/* A document page's bar leads back to where it belongs. A page of a room's
+   own (its settings, its pins) carries it everywhere, the room's header in
+   its place; any other page only on the phone, where no sidebar leads back. */
 .doc-head { display: none; }
+.doc-head.for-room { display: flex; }
 .doc-back { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: var(--touch); color: var(--fg-muted); font-weight: 600; }
 .doc-back span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .doc-back:hover { color: var(--fg); text-decoration: none; }
@@ -294,7 +296,10 @@ form[data-busy] button[type="submit"] { opacity: 0.6; cursor: progress; }
    composer, beside the picker. Quiet, in the subtle colour. */
 .file-size { color: var(--fg-subtle); font-size: var(--t-xs); }
 .file-size.over { color: var(--danger); }
-.file-caption { font-size: var(--t-xs); color: var(--fg-muted); }
+.file-caption { display: flex; gap: 6px; max-width: min(420px, 100%); font-size: var(--t-xs); color: var(--fg-muted); }
+/* A camera names a picture with a long run of digits: one line of it is
+   enough, and the whole name is in the picture's alt text and its link. */
+.file-caption .file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Completing an @: a list above the text, in the dropdown's clothes, with
    the chosen row filled as a hovered one would be. */
@@ -344,12 +349,14 @@ form[data-busy] button[type="submit"] { opacity: 0.6; cursor: progress; }
 .search-result .where { display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--s2); font-size: var(--t-sm); margin-bottom: 2px; }
 .search-result .who { display: inline-flex; align-items: center; gap: 4px; color: var(--fg-muted); }
 .search-result .markdown-body { overflow-wrap: anywhere; }
+[data-highlight] mark { background: var(--line-mark); color: inherit; border-radius: 2px; }
+.this-device { margin-left: 6px; }
 
 /* The admin's list of people: a name, its tokens, and what can be done. */
 table.people { max-width: 720px; }
 table.people td { vertical-align: middle; }
 table.people td.person .avatar { vertical-align: middle; margin-right: 4px; }
-table.people td.tokens { white-space: nowrap; }
+table.people td.tokens, table.people td.seen { white-space: nowrap; }
 table.people td.actions { text-align: right; white-space: nowrap; }
 
 /* --- touch ---
@@ -416,7 +423,9 @@ table.people td.actions { text-align: right; white-space: nowrap; }
   table.people tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; border-top: 1px solid var(--border-soft); }
   table.people tr:first-child { border-top: none; }
   table.people td { border-top: none; padding: 6px 4px; }
-  table.people td.actions { grid-column: 1 / -1; text-align: left; white-space: normal; padding-top: 0; }
+  table.people td.person, table.people td.actions { grid-column: 1 / -1; }
+  table.people td.seen, table.people td.tokens, table.people td.actions { padding-top: 0; }
+  table.people td.actions { text-align: left; white-space: normal; }
 }
 `;
 

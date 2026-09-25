@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import { avatar } from '../../mochiforge/src/avatar';
 import { Html, html, joinHtml, raw } from '../../mochiforge/src/html';
 import { IconName, icon } from '../../mochiforge/src/icons';
@@ -15,9 +17,11 @@ import { Attachment, MAX_ATTACHMENTS_BYTES, Message } from './messages';
 import { pageScript } from './pagescript';
 import { canDeleteMessage, canEditMessage, canSeeChannel, isSiteAdmin } from './perms';
 import { Pin, pinOf, readPins } from './pins';
-import { RoomUnread, UNREAD_CAP, isNewsFor, mentionsUser, readKey, unreadRooms } from './reads';
+import { READ_FILE, RoomUnread, UNREAD_CAP, isNewsFor, mentionsUser, readKey, unreadRooms } from './reads';
 import { Room } from './rooms';
+import { parseQuery } from './search';
 import { styleSheet } from './style';
+import { userDir } from './workspace';
 
 // Every page the interface serves, rendered the way mochiforge renders its
 // own: html`` templates escaping by type, no client framework, and controls a
@@ -181,7 +185,7 @@ ${body}
 function doc(title: string, content: Html, opts: PageOpts): string {
   const back = opts.back ?? { url: '/', label: opts.viewer ? loadConfig(opts.root).name : 'Back' };
   const head = opts.viewer
-    ? html`<header class="room-head doc-head"><a class="doc-back" href="${back.url}">${BACK_ICON}<span>${back.label}</span></a></header>`
+    ? html`<header class="room-head doc-head ${opts.back ? 'for-room' : ''}"><a class="doc-back" href="${back.url}">${BACK_ICON}<span>${back.label}</span></a></header>`
     : '';
   return layout(title, html`${head}<div class="doc"><div class="inner">${content}</div></div>`, opts);
 }
@@ -196,13 +200,24 @@ const IMAGE_RE = /\.(png|jpe?g|gif|webp|svg|avif)$/i;
 const AUDIO_RE = /\.(wav|mp3|ogg|oga|opus|flac|m4a|aac|weba)$/i;
 const VIDEO_RE = /\.(mp4|m4v|webm|ogv|mov)$/i;
 
-function bodyHtml(root: string, body: string): Html {
+/**
+ * A message's text as HTML: markdown, @names of people linked to them, and
+ * #names of channels the reader can see linked to the channel. A private
+ * channel the reader is not in stays plain text, as a channel that does not
+ * exist does, so a message does not tell them it is there.
+ */
+function bodyHtml(root: string, body: string, viewer: Viewer): Html {
+  let visible: Set<string> | null = null;
   return raw(
     externalLinksInNewTab(
       renderMarkdown(body, {
         rawBase: '',
         blobBase: '',
         mentions: (name) => userExists(root, name),
+        channels: (name) => {
+          visible ??= new Set(listChannels(root).filter((c) => canSeeChannel(viewer.auth, c)).map((c) => c.name));
+          return visible.has(name) ? `/c/${encodeURIComponent(name)}` : null;
+        },
       })
     )
   );
@@ -247,7 +262,7 @@ function fileRows(roomUrl: string, id: number, files: Attachment[]): Html | '' {
     // The approximate size, quietly, so a large file is known before it is opened.
     const size = html`<span class="file-size">${formatSize(f.size)}</span>`;
     if (IMAGE_RE.test(f.name)) {
-      return html`<li class="msg-media"><a href="${href}" target="_blank" rel="noopener"><img class="msg-img" src="${href}" alt="${f.name}"></a><span class="file-caption">${f.name} ${size}</span></li>`;
+      return html`<li class="msg-media"><a href="${href}" target="_blank" rel="noopener"><img class="msg-img" src="${href}" alt="${f.name}" loading="lazy" decoding="async"></a><span class="file-caption"><span class="file-name">${f.name}</span> ${size}</span></li>`;
     }
     // The name links to the file above its player, so it can still be saved.
     // Audio is not fetched until played; a video fetches enough for a poster.
@@ -321,7 +336,7 @@ export function messageHtml(root: string, room: Room, m: Message, viewer: Viewer
   const pin = room.kind === 'thread' ? null : pinOf(room.dir, m.id);
   return html`<li class="msg ${mine} ${pin ? 'pinned' : ''} ${cont ? 'msg-cont' : ''}" id="msg-${m.id}" data-mid="${m.id}" data-author="${m.author}" data-created="${m.created}">${avatar(m.author, 32)}<div class="msg-main">
 ${pin ? html`<div class="pinned-by">${PIN_ICON} Pinned by ${pin.by}</div>` : ''}<div class="msg-head"><a class="author" href="/${encodeURIComponent(m.author)}">${m.author}</a>${timeTag(m.created)}${m.edited ? html`<span class="msg-edited">(edited)</span>` : ''}</div>
-<div class="msg-body markdown-body">${bodyHtml(root, m.body)}</div>
+<div class="msg-body markdown-body">${bodyHtml(root, m.body, viewer)}</div>
 ${fileRows(room.url, m.id, m.files)}${below}
 </div>${msgTools(room, m, viewer)}</li>`;
 }
@@ -345,9 +360,9 @@ const CONTINUE_MS = 5 * 60 * 1000;
  * the same grouping as the list changes; this is the first paint, and what
  * a page without script keeps.
  */
-function messageItems(root: string, room: Room, messages: Message[], viewer: Viewer, readUpTo?: number): Html[] {
+function messageItems(root: string, room: Room, messages: Message[], viewer: Viewer, readUpTo?: number, startDay = ''): Html[] {
   const items: Html[] = [];
-  let lastDay = '';
+  let lastDay = startDay;
   let prev: Message | null = null;
   let marked = readUpTo === undefined;
   messages.forEach((m, i) => {
@@ -434,7 +449,6 @@ function roomHead(root: string, room: Room, viewer: Viewer, tools: Html | '' = '
 /** A room's pinned messages, most recently pinned first, each whole. */
 export function pinsPage(root: string, room: Room, pinned: { pin: Pin; message: Message }[], viewer: Viewer): string {
   const content = html`<h1>Pinned in ${room.title}</h1>
-<p><a href="${room.url}">Back to ${room.title}</a></p>
 ${pinned.length === 0 ? html`<p class="muted">Nothing is pinned here yet. Pin a message from its tools, the pushpin that appears when you point at it.</p>` : ''}
 <ul class="pins-list" style="list-style:none;margin:0;padding:0" data-pins>${joinHtml(pinned.map(({ message }) => messageHtml(root, room, message, viewer)))}</ul>`;
   return doc(`Pinned in ${room.title}`, content, { viewer, root, active: room.url, back: { url: room.url, label: room.title } });
@@ -455,8 +469,10 @@ export function dmPage(root: string, room: Room, messages: Message[], viewer: Vi
 export function threadPage(root: string, room: Room, anchor: Message, replies: Message[], viewer: Viewer): string {
   const parent = room.parent!;
   const head = html`<header class="room-head"><a class="topbar-icon" href="${parent.url}" aria-label="Back to ${parent.title}">${BACK_ICON}</a><div class="room-title"><h1>Thread</h1><span class="room-topic">in <a href="${parent.url}">${parent.title}</a></span></div><div class="room-tools"></div></header>`;
-  const anchorHtml = html`<ul class="thread-anchor" style="list-style:none;margin:0;padding:0">${messageHtml(root, parent, anchor, viewer)}</ul>`;
-  const items = messageItems(root, room, replies, viewer);
+  // The parent carries the day it was said, and the replies take theirs from
+  // it, so a reply the same day is not set under a rule of its own.
+  const anchorHtml = html`<ul class="thread-anchor" style="list-style:none;margin:0;padding:0">${dayRule(anchor.created)}${messageHtml(root, parent, anchor, viewer)}</ul>`;
+  const items = messageItems(root, room, replies, viewer, undefined, anchor.created.slice(0, 10));
   const last = replies.length ? replies[replies.length - 1].id : 0;
   const list = html`<div class="msgs">${anchorHtml}<ul id="msg-list" data-stream="${room.url}/events" data-last="${last}">${joinHtml(items)}</ul></div>${JUMP_NEWEST}`;
   const main = html`${head}${list}${composer(room, viewer, 'Reply in thread')}`;
@@ -599,13 +615,15 @@ export function searchPage(root: string, viewer: Viewer, query: string, hits: { 
   const rows = hits.map(
     (h) => html`<div class="search-result">
 <div class="where"><a href="${h.url}">${h.where}</a><span class="who">${avatar(h.message.author, 16)} ${h.message.author}</span>${timeTag(h.message.created)}</div>
-<div class="markdown-body">${bodyHtml(root, h.message.body)}</div>
+<div class="markdown-body">${bodyHtml(root, h.message.body, viewer)}</div>
 </div>`
   );
+  // The words found are marked in each result by the page script.
   const content = html`<h1>Search</h1>
-<form method="get" action="/search" style="margin-bottom:24px;max-width:520px"><div class="field"><input type="text" name="q" value="${query}" placeholder="Search messages" autofocus aria-label="Search messages"></div></form>
+<form method="get" action="/search" style="margin-bottom:24px;max-width:520px"><div class="field"><input type="text" name="q" value="${query}" placeholder="Search messages" autofocus aria-label="Search messages">
+<p class="muted">Narrow it with <code>from:alice</code> or <code>in:#general</code>.</p></div></form>
 ${query === '' ? '' : html`<p class="muted">${hits.length === 0 ? 'Nothing matched.' : `${hits.length} ${hits.length === 1 ? 'message matches' : 'messages match'}.`}</p>`}
-${joinHtml(rows)}`;
+<div data-highlight="${parseQuery(query).text}">${joinHtml(rows)}</div>`;
   return doc('Search', content, { viewer, root });
 }
 
@@ -666,7 +684,7 @@ function notificationsSection(root: string, viewer: Viewer, notify: AccountNotif
   return html`<h2 id="notifications">Notifications</h2>
 <div class="push-device" data-push data-vapid="${notify.vapidKey}" style="max-width:520px">
 <p data-push-status>Turning notifications on for a device needs script.</p>
-<p><button class="btn btn-primary" type="button" data-push-on hidden>Turn on for this device</button> <button class="btn" type="button" data-push-off hidden>Turn off for this device</button> <button class="btn" type="button" data-push-test hidden>Send a test notification</button></p>
+<p><button class="btn btn-primary" type="button" data-push-on hidden>Turn on in this browser</button> <button class="btn" type="button" data-push-off hidden>Turn off in this browser</button> <button class="btn" type="button" data-push-test hidden>Send a test notification</button></p>
 <div data-chime hidden><label class="checkbox"><input type="checkbox"> Play a chime in an open workspace tab when a notification arrives</label> <button class="btn-link" type="button" data-chime-play>Hear it</button>
 <p class="muted">The system's own notification sound is often off, and a web page cannot choose it. The chime plays in a tab you have clicked or typed in since it opened; this setting is for this browser only.</p></div>
 </div>
@@ -697,13 +715,28 @@ ${
 
 // ---- admin ----
 
+/**
+ * When someone was last in the workspace. Reading and posting both move a
+ * person's read markers, so the file that keeps them is touched whenever
+ * they use a room, and its time says when that last was; nothing else is
+ * recorded for it.
+ */
+function lastActive(root: string, username: string): Html {
+  try {
+    return html`active ${timeTag(fs.statSync(path.join(userDir(root, username), READ_FILE)).mtime.toISOString(), '')}`;
+  } catch {
+    return html`not seen yet`;
+  }
+}
+
 export function adminPage(root: string, viewer: Viewer, vault: Vault, opts: { flash?: string; error?: string } = {}): string {
   const config = loadConfig(root);
   const users = Object.entries(vault.users).sort(([a], [b]) => a.localeCompare(b));
   const rows = users.map(([name, u]) => {
     const isSelf = name === viewer.auth.username;
     return html`<tr>
-<td class="person">${avatar(name, 20)} <a href="/${encodeURIComponent(name)}">${name}</a>${u.siteAdmin ? html` <span class="muted">(admin)</span>` : ''}</td>
+<td class="person">${avatar(name, 20)} <a href="/${encodeURIComponent(name)}">${name}</a>${u.profile?.name ? html` <span class="muted">${u.profile.name}</span>` : ''}${u.siteAdmin ? html` <span class="muted">(admin)</span>` : ''}</td>
+<td class="muted seen">${lastActive(root, name)}</td>
 <td class="muted tokens">${u.tokens.length} ${u.tokens.length === 1 ? 'token' : 'tokens'}</td>
 <td class="actions">
 <form method="post" action="/admin/users/token" style="display:inline">${csrfField(viewer)}<input type="hidden" name="user" value="${name}"><button class="btn-link" type="submit">New token</button></form>

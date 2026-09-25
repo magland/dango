@@ -61,6 +61,40 @@ function closestOf(el, selector) {
   return null;
 }
 
+// ---- search ----
+// The words found, marked in each result. The server matches what is left of
+// the query once its filters are taken out as one run, case aside, so the
+// same run is marked here: in the text of the results, and not in the line
+// saying where each was said or inside its mathematics.
+document.addEventListener('DOMContentLoaded', function () {
+  var box = document.querySelector('[data-highlight]');
+  var needle = box ? (box.getAttribute('data-highlight') || '').toLowerCase() : '';
+  if (!needle) return;
+  var walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT, {
+    acceptNode: function (n) { return closestOf(n.parentNode, '.katex, .where') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT; },
+  });
+  var nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  nodes.forEach(function (node) {
+    var text = node.nodeValue;
+    var lower = text.toLowerCase();
+    var at = lower.indexOf(needle);
+    if (at < 0) return;
+    var frag = document.createDocumentFragment();
+    var last = 0;
+    while (at >= 0) {
+      frag.appendChild(document.createTextNode(text.slice(last, at)));
+      var mark = document.createElement('mark');
+      mark.textContent = text.slice(at, at + needle.length);
+      frag.appendChild(mark);
+      last = at + needle.length;
+      at = lower.indexOf(needle, last);
+    }
+    frag.appendChild(document.createTextNode(text.slice(last)));
+    node.parentNode.replaceChild(frag, node);
+  });
+});
+
 // ---- invite links ----
 // An invite link is /invite#token=<token>. The fragment never reaches the
 // server; this moves it into the form and then out of the address bar and
@@ -171,11 +205,11 @@ function clockTimes(within) {
     if (!isNaN(d.getTime())) times[i].textContent = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   }
 }
-function arrangeList(list) {
+function arrangeList(list, startDay) {
   var old = list.querySelectorAll(':scope > .day-rule');
   for (var i = 0; i < old.length; i++) old[i].remove();
   var items = list.children;
-  var lastDay = '';
+  var lastDay = startDay;
   var prev = null;
   for (var j = 0; j < items.length; j++) {
     var li = items[j];
@@ -202,8 +236,16 @@ function arrangeList(list) {
     li.classList.toggle('msg-cont', cont);
     prev = li;
   }
-  var pane = scrollPane();
-  clockTimes(pane || list);
+  return lastDay;
+}
+// A thread's list continues from the message it hangs from, which sits in a
+// list of its own above the replies and is set under its day's rule too.
+function arrangeRoom() {
+  var list = msgList();
+  if (!list) return;
+  var anchor = document.querySelector('.msgs > .thread-anchor');
+  arrangeList(list, anchor ? arrangeList(anchor, '') : '');
+  clockTimes(scrollPane() || list);
 }
 
 // Rooms open at the newest message, which is where the conversation is, and
@@ -215,10 +257,17 @@ document.addEventListener('DOMContentLoaded', function () {
   var pane = scrollPane();
   var list = msgList();
   if (!pane || !list) return;
-  arrangeList(list);
+  arrangeRoom();
   scrollToBottom();
+  // Only the reader moving up lets go of the bottom. A scroll event can
+  // arrive after the list has grown under it (an image loading just after
+  // the page moved to the bottom), and read by distance alone it would look
+  // like the reader had left.
+  var lastTop = pane.scrollTop;
   pane.addEventListener('scroll', function () {
-    stuckToBottom = nearBottom(pane);
+    if (nearBottom(pane)) stuckToBottom = true;
+    else if (pane.scrollTop < lastTop) stuckToBottom = false;
+    lastTop = pane.scrollTop;
     if (stuckToBottom || farFromBottom(pane)) showJump(!stuckToBottom);
   }, { passive: true });
   if (window.ResizeObserver) {
@@ -257,11 +306,11 @@ function openStream(list) {
     }
     if (existing) {
       existing.outerHTML = msg.html;
-      arrangeList(list);
+      arrangeRoom();
     } else if (msg.type === 'message') {
       list.insertAdjacentHTML('beforeend', msg.html);
       list.setAttribute('data-last', String(msg.id));
-      arrangeList(list);
+      arrangeRoom();
       if (follow) scrollToBottom();
       else showJump(true);
       // Seen, if someone is at the page (see attended()); otherwise it waits
@@ -526,6 +575,26 @@ function currentSubscription() {
     return reg ? reg.pushManager.getSubscription() : null;
   });
 }
+// Which of the listed devices is this browser, so the list and the status
+// line above it are not read as disagreeing: a device's id is the start of
+// the SHA-256 of its push endpoint (deviceId in notify.ts).
+function markThisDevice(endpoint) {
+  if (!window.crypto || !crypto.subtle || !window.TextEncoder) return;
+  crypto.subtle.digest('SHA-256', new TextEncoder().encode(endpoint)).then(function (buf) {
+    var hex = Array.prototype.map.call(new Uint8Array(buf), function (b) { return ('0' + b.toString(16)).slice(-2); }).join('').slice(0, 16);
+    var row = document.querySelector('[data-device="' + hex + '"]');
+    if (!row || row.querySelector('.this-device')) return;
+    var mark = document.createElement('span');
+    mark.className = 'muted this-device';
+    mark.textContent = '(this browser)';
+    row.firstElementChild.after(mark);
+  });
+}
+function offText() {
+  return document.querySelector('[data-device]')
+    ? 'Notifications are off in this browser. The devices listed below still receive them.'
+    : 'Notifications are off in this browser.';
+}
 function pushSetup(box) {
   var status = box.querySelector('[data-push-status]');
   var on = box.querySelector('[data-push-on]');
@@ -555,14 +624,15 @@ function pushSetup(box) {
     }
     currentSubscription().then(function (sub) {
       if (sub && sameKey(sub, key)) {
-        show('Notifications are on for this device.', 'on');
+        show('Notifications are on in this browser.', 'on');
+        markThisDevice(sub.endpoint);
         // Offered again on each visit, which keeps the workspace's copy of
         // the keys current and restores a device removed from another one.
         pushPost('/account/push/subscribe', { subscription: sub.toJSON() }).catch(function () {});
       } else {
-        show('Notifications are off for this device.', 'off');
+        show(offText(), 'off');
       }
-    }, function () { show('Notifications are off for this device.', 'off'); });
+    }, function () { show(offText(), 'off'); });
   }
   on.addEventListener('click', function () {
     on.disabled = true;

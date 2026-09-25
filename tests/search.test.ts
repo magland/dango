@@ -49,3 +49,26 @@ test('deleted messages and case differences behave', () => {
   assert.strictEqual(searchMessages(root, auth('alice'), 'forgotten').length, 0);
   assert.strictEqual(searchMessages(root, auth('alice'), '   ').length, 0);
 });
+
+test('from: and in: narrow a search, and alone list what they allow', () => {
+  const root = tmpRoot();
+  createChannel(root, 'general', { createdBy: 'alice' });
+  createChannel(root, 'random', { createdBy: 'alice' });
+  createChannel(root, 'secret', { private: true, createdBy: 'alice' });
+  addMessage(channelDir(root, 'general'), { author: 'alice', body: 'lunch at noon' });
+  addMessage(channelDir(root, 'general'), { author: 'bob', body: 'lunch sounds good' });
+  addMessage(channelDir(root, 'random'), { author: 'bob', body: 'lunch photos' });
+  addMessage(channelDir(root, 'secret'), { author: 'alice', body: 'secret lunch' });
+  const dm = openDm(root, ['alice', 'bob']);
+  addMessage(dmDir(root, dm.id), { author: 'alice', body: 'lunch?' });
+
+  const bodies = (q: string, who = 'bob') => searchMessages(root, auth(who), q).map((h) => h.message.body).sort();
+  assert.deepStrictEqual(bodies('lunch from:bob'), ['lunch photos', 'lunch sounds good']);
+  assert.deepStrictEqual(bodies('lunch from:@Alice'), ['lunch at noon', 'lunch?']);
+  assert.deepStrictEqual(bodies('lunch in:#general'), ['lunch at noon', 'lunch sounds good']);
+  assert.deepStrictEqual(bodies('in:alice'), ['lunch?']);
+  assert.deepStrictEqual(bodies('from:bob in:random'), ['lunch photos']);
+  // A filter does not open a channel the viewer cannot read.
+  assert.deepStrictEqual(bodies('in:secret'), []);
+  assert.deepStrictEqual(bodies('in:secret', 'alice'), ['secret lunch']);
+});

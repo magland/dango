@@ -12,6 +12,7 @@
 // Needs Node 22 or newer, and Chrome or Chromium (CHROME=<path> to choose).
 
 import { spawn, execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as os from 'node:os';
@@ -437,9 +438,18 @@ await send('ServiceWorker.enable', {}, n1.sessionId);
 await n1.go('/account');
 await waitFor('the service worker to be active', () => n1.eval("navigator.serviceWorker.getRegistration('/').then((r) => !!(r && r.active))"));
 ok('a signed-in page registers the service worker');
-await waitFor('the device status', async () => /off for this device/.test(await n1.eval("document.querySelector('[data-push-status]').textContent")));
+await waitFor('the device status', async () => /off in this browser/.test(await n1.eval("document.querySelector('[data-push-status]').textContent")));
 if (await n1.eval("document.querySelector('[data-push-on]').hidden")) fail('the account page offers no way to turn notifications on');
 ok('the account page says notifications are off here, and offers to turn them on');
+// The list of devices marks the one that is this browser. No push service
+// is reachable to subscribe for real, so a row is made with the id the
+// server gives an endpoint (deviceId in notify.ts), and the page is asked to
+// find it from the endpoint the way it does for its own subscription.
+const endpoint = 'https://push.example.org/send/abc123';
+const devId = createHash('sha256').update(endpoint).digest('hex').slice(0, 16);
+await n1.eval(`document.body.insertAdjacentHTML('beforeend', '<ul><li data-device="${devId}"><span>Chrome on Linux</span></li></ul>'); markThisDevice('${endpoint}'); true`);
+await waitFor('this browser to be marked in the list', () => n1.eval(`!!document.querySelector('[data-device="${devId}"] .this-device')`));
+ok('the list of devices says which one is this browser');
 const zone = await n1.eval("document.querySelector('[data-tz-fill]').value");
 if (zone !== (await n1.eval('Intl.DateTimeFormat().resolvedOptions().timeZone'))) fail(`the quiet hours' time zone was not filled from the browser: ${zone}`);
 ok("the quiet hours' time zone is filled in from the browser");
@@ -486,7 +496,7 @@ ok('with the chime turned off, the notification keeps the system’s sound');
 // ---- the list as it reads ----
 
 await api(owner, 'POST', '/channels', { name: 'runs' });
-await api(bob, 'POST', '/channels/runs/messages', { body: 'run one' });
+await api(bob, 'POST', '/channels/runs/messages', { body: 'run one, in #runs' });
 const r1 = await openPage(aliceCookie);
 await r1.go('/c/runs'); // alice has read up to "run one"
 await r1.go('/search'); // and looks away, so what comes next waits for her
@@ -498,8 +508,10 @@ const shape = await r1.eval(`(() => {
   return items.map((li) => li.classList.contains('new-rule') ? 'new' : li.classList.contains('day-rule') ? 'day'
     : (li.classList.contains('msg-cont') ? '+' : '') + li.querySelector('.msg-body').textContent.trim()).join(' / ');
 })()`);
-if (shape !== 'day / run one / new / run two / +run three') fail(`the list does not read as it should: ${shape}`);
+if (shape !== 'day / run one, in #runs / new / run two / +run three') fail(`the list does not read as it should: ${shape}`);
 ok('what is unread begins under a "New" rule, and a run from one person is drawn as one');
+if (!(await r1.eval(`!!document.querySelector('#msg-list a[href="/c/runs"]')`))) fail('a channel named in a message is not a link to it');
+ok('a channel named in a message links to the channel');
 const atBottom = await r1.eval("(() => { const p = document.querySelector('.msgs'); return p.scrollHeight - p.scrollTop - p.clientHeight < 2; })()");
 if (!atBottom) fail('the room did not open at its newest message');
 if (!/^\d{1,2}:\d\d/.test(await r1.eval("document.querySelector('#msg-list .msg-head time').textContent"))) fail('a message’s time is not the time of day');
