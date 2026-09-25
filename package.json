@@ -1,6 +1,6 @@
 {
   "name": "@magland/dango",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A self-hosted team chat with the shape of Slack: channels, threads, direct messages, reactions, uploads, and search, from one small server with no database.",
   "license": "Apache-2.0",
   "repository": {
