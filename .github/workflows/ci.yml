@@ -50,9 +50,14 @@ jobs:
       - run: npm ci
         working-directory: dango
 
-      # tsc alone, in a directory where mochiforge has no node_modules of its
-      # own: a package the shared modules need and dango does not declare
+      # mochiforge has no node_modules here, and its sources find packages by
+      # walking up from mochiforge/src, which reaches the checkout root and
+      # never dango/node_modules. The link puts dango's packages there, as the
+      # Dockerfile does, so the build and the tests see exactly what dango
+      # declares: a package the shared modules need and dango does not declare
       # fails here rather than in the image.
+      - run: ln -s dango/node_modules node_modules
+
       - run: npm run build
         working-directory: dango
 

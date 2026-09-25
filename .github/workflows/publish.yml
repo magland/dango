@@ -83,6 +83,11 @@ jobs:
         working-directory: dango
         run: npm ci
 
+      # The shared modules' packages, where their sources look for them; see ci.yml.
+      - name: Link the packages for mochiforge's sources
+        if: steps.plan.outputs.action != 'first'
+        run: ln -s dango/node_modules node_modules
+
       # The unit suite, then the end-to-end one, which builds the package and
       # drives the compiled output: a release is the last place a quietly
       # smaller suite should pass.
