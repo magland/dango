@@ -68,6 +68,10 @@ const CHAT_CSS = `
 .side-user .whoami { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--fg); }
 .side-user > svg:last-child { color: var(--fg-subtle); flex: none; }
 .dropdown-menu.dd-up { top: auto; bottom: calc(100% + 6px); margin-top: 0; width: 240px; }
+/* A menu row that is a button (a theme, signing out) is drawn as a row that
+   is a link, without the browser's own button edges. */
+.dropdown-menu button.dd-item { border: none; border-top: 1px solid var(--border-soft); }
+.dropdown-menu > :first-child button.dd-item, .dropdown-menu > button.dd-item:first-child { border-top: none; }
 
 /* Unread counts: a filled rectangle at the end of the room's row, in the
    sheet's own corner radius, and stronger when a mention is waiting. A room
@@ -75,7 +79,7 @@ const CHAT_CSS = `
    the number. */
 .badge {
   margin-left: auto; flex: none; min-width: 20px; padding: 0 6px; text-align: center;
-  border-radius: var(--radius); font-size: var(--t-xs); font-weight: 700; line-height: 18px;
+  border: none; border-radius: var(--radius); font-size: var(--t-xs); font-weight: 700; line-height: 18px;
   background: var(--fg-muted); color: var(--bg);
 }
 .badge.mention { background: var(--danger); color: var(--on-danger); }
@@ -94,13 +98,25 @@ const CHAT_CSS = `
   padding: 0 var(--s4); height: 52px;
   border-bottom: 1px solid var(--border);
 }
-.room-head h1 { margin: 0; font-size: var(--t-lg); font-family: var(--font-ui); white-space: nowrap; }
+/* The room's name and topic, beside each other here and one above the other
+   on a phone. The name gives way to an ellipsis only after the topic has. */
+.room-title { flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--s3); }
+.room-head h1 {
+  margin: 0; font-size: var(--t-lg); font-family: var(--font-ui);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .room-topic {
   flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--fg-muted); font-size: var(--t-sm);
   border-left: 1px solid var(--border-soft); padding-left: var(--s3);
 }
-.room-tools { margin-left: auto; display: flex; align-items: center; gap: var(--s2); }
+.room-tools { margin-left: auto; flex: none; display: flex; align-items: center; gap: var(--s2); }
+/* A document page's bar exists only for the phone, where no sidebar leads
+   back; it says where it goes. */
+.doc-head { display: none; }
+.doc-back { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: var(--touch); color: var(--fg-muted); font-weight: 600; }
+.doc-back span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doc-back:hover { color: var(--fg); text-decoration: none; }
 
 /* --- messages ---
 
@@ -117,28 +133,56 @@ const CHAT_CSS = `
 .msg-head .author { font-weight: 700; color: var(--fg); }
 .msg-head time { font-size: var(--t-xs); }
 .msg-body { overflow-wrap: anywhere; }
+/* A table or a line of code keeps its shape and scrolls sideways in a
+   narrow column, rather than breaking every word to fit. */
+.msg-body table, .msg-body pre { overflow-wrap: normal; }
+.msg-body .katex-display { overflow-x: auto; overflow-y: hidden; }
 .msg-body.markdown-body > :first-child { margin-top: 0; }
 .msg-body.markdown-body > :last-child { margin-bottom: 0; }
 .msg-deleted { color: var(--fg-subtle); font-style: italic; }
 .msg-edited { font-size: var(--t-xs); color: var(--fg-subtle); }
 
 /* The tools sit in a small bordered strip that appears on hover, the shape a
-   control always has in this vocabulary. On a coarse pointer there is no
-   hover, so they are simply always shown. */
+   control always has in this vocabulary. */
 .msg-tools {
-  position: absolute; top: -10px; right: var(--s2); display: none; align-items: center;
+  position: absolute; top: -10px; right: var(--s2); z-index: 5; display: none; align-items: center;
   background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
   box-shadow: 0 2px 8px var(--shadow);
 }
 .msg:hover .msg-tools, .msg:focus-within .msg-tools { display: inline-flex; }
-@media (pointer: coarse) { .msg-tools { display: inline-flex; position: static; box-shadow: none; margin-top: 4px; } }
 .msg-tools form { margin: 0; display: flex; }
-.msg-tools button, .msg-tools a {
+.msg-tools button, .msg-tools a, .msg-tools summary {
   display: flex; align-items: center; justify-content: center;
   min-width: 30px; height: 28px; padding: 0 6px;
   border: none; background: none; color: var(--fg-muted); font: inherit; font-size: var(--t-sm); cursor: pointer;
 }
-.msg-tools button:hover, .msg-tools a:hover { background: var(--surface-hover); color: var(--fg); text-decoration: none; }
+.msg-tools button:hover, .msg-tools a:hover, .msg-tools summary:hover { background: var(--surface-hover); color: var(--fg); text-decoration: none; }
+
+/* Reacting: the quick reactions in one row, opening from the strip's right
+   edge rather than from the plus, so on a narrow screen the row stays on it. */
+.msg-tools .react-menu { position: static; }
+.react-menu .dropdown-menu { top: 100%; right: -1px; width: auto; margin-top: 4px; display: flex; }
+.react-menu .dropdown-menu form { display: flex; }
+.react-menu .dropdown-menu button.dd-item {
+  width: auto; min-width: 40px; height: 40px; min-height: 0; padding: 0 8px; justify-content: center;
+  border: none; font-size: var(--t-lg);
+}
+
+/* Where nothing hovers, a tap on a message shows its tools, larger, for a
+   thumb (the page script keeps the tapped message marked). Without script
+   there is nothing to take the tap, so the tools are simply shown, under the
+   message they belong to. */
+@media (hover: none) {
+  .msg:hover { background: none; }
+  .msg:hover .msg-tools, .msg:focus-within .msg-tools { display: none; }
+  .js .msg.picked { background: var(--surface); }
+  .js .msg.picked .msg-tools { display: inline-flex; }
+  .msg-tools { top: -20px; }
+  .msg-tools button, .msg-tools a, .msg-tools summary { min-width: 40px; height: 38px; }
+  html:not(.js) .msg { flex-wrap: wrap; }
+  html:not(.js) .msg-main { flex-basis: calc(100% - 44px); }
+  html:not(.js) .msg .msg-tools { display: inline-flex; position: static; box-shadow: none; margin: 4px 0 0 44px; }
+}
 
 /* Reactions and the thread link: pills under the body, bordered because they
    are controls. The one the viewer has pressed is filled. */
@@ -241,21 +285,56 @@ form[data-busy] button[type="submit"] { opacity: 0.6; cursor: progress; }
   padding: 10px 12px; font: inherit; font-size: var(--t-base); color: var(--fg); width: 100%;
 }
 .composer textarea:focus { outline: none; }
+/* A room's name can be long, and a placeholder that wrapped would spill out
+   of a box one line high; it shortens instead. */
+.composer textarea::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .composer-row { display: flex; align-items: center; gap: var(--s2); padding: 4px 8px 6px; }
-.composer-row .hint { color: var(--fg-subtle); font-size: var(--t-xs); margin-left: auto; }
-.composer-row input[type="file"] { font-size: var(--t-xs); color: var(--fg-muted); max-width: 50%; }
+.composer-row .hint { color: var(--fg-subtle); font-size: var(--t-xs); margin-left: auto; text-align: right; }
+.composer-row [data-file-total] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The file picker is a paperclip. The input inside it is the real control,
+   kept for the keyboard and the form but not drawn, so the browser's own
+   "Choose Files" button does not sit in the composer. */
+.attach { position: relative; flex: none; cursor: pointer; }
+.attach input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; clip: rect(0 0 0 0); }
+.attach:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.attach:has(input:disabled) { opacity: 0.5; cursor: progress; }
 
 /* --- pages that are documents rather than rooms (login, admin, account,
        search, profiles) reuse the forge's document styles inside the frame. */
 .doc { flex: 1; overflow-y: auto; padding: var(--s5) var(--s5) var(--s6); }
 .doc > .inner { max-width: 920px; }
-.search-hit { border-left: 3px solid var(--border); padding: 2px 0 2px var(--s3); margin-bottom: var(--s4); }
-.search-hit .where { font-size: var(--t-sm); margin-bottom: 2px; }
+.search-result { border-left: 3px solid var(--border); padding: 2px 0 2px var(--s3); margin-bottom: var(--s4); max-width: var(--measure); }
+.search-result .where { display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--s2); font-size: var(--t-sm); margin-bottom: 2px; }
+.search-result .who { display: inline-flex; align-items: center; gap: 4px; color: var(--fg-muted); }
+.search-result .markdown-body { overflow-wrap: anywhere; }
+
+/* The admin's list of people: a name, its tokens, and what can be done. */
+table.people { max-width: 720px; }
+table.people td { vertical-align: middle; }
+table.people td.person .avatar { vertical-align: middle; margin-right: 4px; }
+table.people td.tokens { white-space: nowrap; }
+table.people td.actions { text-align: right; white-space: nowrap; }
+
+/* --- touch ---
+
+   A field set under 16px is one iOS zooms the page into on focus, and does
+   not zoom back out of; at 16px it stays put. Rows in the room list grow to
+   a thumb's size, as every other control does under a coarse pointer. */
+@media (pointer: coarse) {
+  input[type="text"], input[type="password"], input[type="time"], select, textarea, .composer textarea { font-size: 16px; }
+  .side-rooms li a { min-height: var(--touch); font-size: var(--t-base); }
+  .side-cap { align-items: center; }
+  .side-cap a { display: flex; align-items: center; justify-content: center; width: var(--touch); height: var(--touch); margin: -12px -12px -12px 0; }
+  .mention-list button { min-height: var(--touch); }
+}
 
 /* --- phones ---
 
    The sidebar gives way rather than squeezing: below 760px the room list is
-   its own page (/), which every room page links back to from its header. */
+   its own page (/), which every room page links back to from its header,
+   and every other page from a bar of its own. What stays is spaced for a
+   narrow screen: less gutter, the topic under the room's name, and the
+   composer one row, paperclip, text, and Send. */
 .back-link { display: none; }
 @media (max-width: 760px) {
   .app { grid-template-columns: minmax(0, 1fr); }
@@ -263,6 +342,40 @@ form[data-busy] button[type="submit"] { opacity: 0.6; cursor: progress; }
   .app.rooms-page .app-side { display: flex; border-right: none; }
   .app.rooms-page .app-main { display: none; }
   .back-link { display: flex; }
+  .doc-head { display: flex; }
+
+  .room-head { padding: 0 var(--s2); gap: var(--s1); }
+  .room-title { flex-direction: column; align-items: flex-start; gap: 0; }
+  .room-head h1 { max-width: 100%; font-size: var(--t-base); line-height: 1.3; }
+  .room-topic { max-width: 100%; border-left: none; padding-left: 0; font-size: var(--t-xs); line-height: 1.3; }
+  .room-tools { gap: 0; }
+  .doc-head { padding-left: var(--s3); }
+
+  .msgs { padding: var(--s3) var(--s2) var(--s2); }
+  .msg { gap: var(--s2); padding: 6px; }
+  .msg-img { max-height: 260px; }
+
+  .composer { padding: var(--s1) var(--s2) var(--s2); }
+  .composer-box { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: end; }
+  .composer-box > * { grid-column: 1 / -1; }
+  .composer-row { display: contents; }
+  .send-progress { grid-row: 1; }
+  .composer textarea { grid-row: 2; grid-column: 2; padding: 9px 4px; min-height: 0; }
+  .composer .attach { grid-row: 2; grid-column: 1; margin: 4px 0 4px 4px; }
+  .composer button[type="submit"] { grid-row: 2; grid-column: 3; margin: 4px 4px 4px 0; }
+  .send-status { grid-row: 3; }
+  .composer-row [data-file-total] { grid-row: 4; padding: 0 12px 6px; }
+  .composer-row [data-file-total]:empty { display: none; }
+  .composer-row .hint { display: none; }
+  .mention-list { left: 0; right: 0; width: auto; }
+
+  .doc { padding: var(--s4) var(--s4) var(--s6); }
+  /* The people list becomes a name and its count on one line, and what can
+     be done with them on the next. */
+  table.people tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; border-top: 1px solid var(--border-soft); }
+  table.people tr:first-child { border-top: none; }
+  table.people td { border-top: none; padding: 6px 4px; }
+  table.people td.actions { grid-column: 1 / -1; text-align: left; white-space: normal; padding-top: 0; }
 }
 `;
 

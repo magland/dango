@@ -33,6 +33,8 @@ export interface PageOpts {
   active?: string;
   /** Marks / so the sidebar is the page on a phone. */
   roomsPage?: boolean;
+  /** Where a document page's back link leads on a phone; the room list when unset. */
+  back?: { url: string; label: string };
 }
 
 export function csrfField(viewer: Viewer): Html {
@@ -151,7 +153,7 @@ export function layout(title: string, main: Html, opts: PageOpts): string {
 <html lang="en" data-theme-vault="${theme}" data-theme-dark="${darkFor(activeTheme())}">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <title data-title="${baseTitle}">${fullTitle}</title>
 <link rel="stylesheet" href="/assets/style.css?t=${encodeURIComponent(theme)}&amp;v=${sheet}">
 <link rel="stylesheet" href="/assets/katex/katex.css">
@@ -167,9 +169,17 @@ ${body}
 </html>`.text;
 }
 
-/** A document page inside the frame: a scrolling column with a measure. */
+/**
+ * A document page inside the frame: a scrolling column with a measure. On a
+ * phone the sidebar is not beside it, so the page carries a bar with the way
+ * back, to the room it belongs to or else to the room list.
+ */
 function doc(title: string, content: Html, opts: PageOpts): string {
-  return layout(title, html`<div class="doc"><div class="inner">${content}</div></div>`, opts);
+  const back = opts.back ?? { url: '/', label: opts.viewer ? loadConfig(opts.root).name : 'Back' };
+  const head = opts.viewer
+    ? html`<header class="room-head doc-head"><a class="doc-back" href="${back.url}">${BACK_ICON}<span>${back.label}</span></a></header>`
+    : '';
+  return layout(title, html`${head}<div class="doc"><div class="inner">${content}</div></div>`, opts);
 }
 
 // ---- messages ----
@@ -215,6 +225,13 @@ const PIN_ICON = raw(
 const BELL_ICON = raw(
   '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10.5V7a4 4 0 0 1 8 0v3.5l1.5 1.5h-11zM6.5 14a1.5 1.5 0 0 0 3 0"/></svg>'
 );
+/** The way back, and a paperclip for attaching files, in the same manner. */
+const BACK_ICON = raw(
+  '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3L5 8l5 5"/></svg>'
+);
+const PAPERCLIP_ICON = raw(
+  '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 7.5l-5.6 5.6a3.5 3.5 0 0 1-5-5l6-6a2.3 2.3 0 0 1 3.3 3.3l-6 6a1.2 1.2 0 0 1-1.7-1.7l5.5-5.5"/></svg>'
+);
 const BELL_OFF_ICON = raw(
   '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10.5V7a4 4 0 0 1 8 0v3.5l1.5 1.5h-11zM6.5 14a1.5 1.5 0 0 0 3 0M2 2l12 12"/></svg>'
 );
@@ -250,7 +267,7 @@ function reactForm(roomUrl: string, id: number, emoji: string, viewer: Viewer, m
 function msgTools(room: Room, m: Message, viewer: Viewer): Html {
   const parts: Html[] = [];
   parts.push(
-    html`<details class="dropdown"><summary class="topbar-icon" style="width:30px;height:28px" aria-label="React" title="React">${icon('plus')}</summary><div class="dropdown-menu dd-right" role="menu">${joinHtml(
+    html`<details class="dropdown react-menu"><summary aria-label="React" title="React">${icon('plus')}</summary><div class="dropdown-menu dd-right" role="menu">${joinHtml(
       QUICK_REACTIONS.map((e) => reactForm(room.url, m.id, e, viewer, (m.reactions[e] ?? []).includes(viewer.auth.username)))
     )}</div></details>`
   );
@@ -334,7 +351,7 @@ function composer(room: Room, viewer: Viewer, placeholder: string): Html {
 <div class="send-progress" data-send-progress hidden><div></div></div>
 <textarea name="body" rows="1" placeholder="${placeholder}" aria-label="${placeholder}"></textarea>
 <div class="send-status" data-send-status role="status" aria-live="polite" hidden></div>
-<div class="composer-row"><input type="file" name="files" multiple aria-label="Attach files"><span class="file-size" data-file-total></span><span class="hint">Enter sends, Shift+Enter is a new line, markdown works</span><button class="btn btn-primary" type="submit">Send</button></div>
+<div class="composer-row"><label class="attach topbar-icon" title="Attach files">${PAPERCLIP_ICON}<input type="file" name="files" multiple aria-label="Attach files"></label><span class="file-size" data-file-total></span><span class="hint">Enter sends, Shift+Enter is a new line, markdown works</span><button class="btn btn-primary" type="submit">Send</button></div>
 </div></form></div>`;
 }
 
@@ -355,9 +372,9 @@ function roomHead(root: string, room: Room, viewer: Viewer, tools: Html | '' = '
   const topic = room.channel?.topic;
   const pins = readPins(room.dir).length;
   const pinsLink = html`<a class="topbar-icon pins-link" href="${room.url}/pins" title="Pinned messages" aria-label="Pinned messages, ${pins}">${PIN_ICON}<span data-pin-count>${pins || ''}</span></a>`;
-  return html`<header class="room-head"><a class="back-link topbar-icon" href="/" aria-label="All rooms">&#8592;</a><h1>${room.title}</h1>${
+  return html`<header class="room-head"><a class="back-link topbar-icon" href="/" aria-label="All rooms">${BACK_ICON}</a><div class="room-title"><h1>${room.title}</h1>${
     topic ? html`<span class="room-topic">${topic}</span>` : ''
-  }<div class="room-tools">${pinsLink}${muteButton(root, room, viewer)}${tools}</div></header>`;
+  }</div><div class="room-tools">${pinsLink}${muteButton(root, room, viewer)}${tools}</div></header>`;
 }
 
 /** A room's pinned messages, most recently pinned first, each whole. */
@@ -366,7 +383,7 @@ export function pinsPage(root: string, room: Room, pinned: { pin: Pin; message: 
 <p><a href="${room.url}">Back to ${room.title}</a></p>
 ${pinned.length === 0 ? html`<p class="muted">Nothing is pinned here yet. Pin a message from its tools, the pushpin that appears when you point at it.</p>` : ''}
 <ul class="pins-list" style="list-style:none;margin:0;padding:0" data-pins>${joinHtml(pinned.map(({ message }) => messageHtml(root, room, message, viewer)))}</ul>`;
-  return doc(`Pinned in ${room.title}`, content, { viewer, root, active: room.url });
+  return doc(`Pinned in ${room.title}`, content, { viewer, root, active: room.url, back: { url: room.url, label: room.title } });
 }
 
 export function channelPage(root: string, room: Room, messages: Message[], viewer: Viewer): string {
@@ -382,7 +399,7 @@ export function dmPage(root: string, room: Room, messages: Message[], viewer: Vi
 
 export function threadPage(root: string, room: Room, anchor: Message, replies: Message[], viewer: Viewer): string {
   const parent = room.parent!;
-  const head = html`<header class="room-head"><a class="topbar-icon" href="${parent.url}" aria-label="Back to ${parent.title}">&#8592;</a><h1>Thread</h1><span class="room-topic">in <a href="${parent.url}">${parent.title}</a></span><div class="room-tools"></div></header>`;
+  const head = html`<header class="room-head"><a class="topbar-icon" href="${parent.url}" aria-label="Back to ${parent.title}">${BACK_ICON}</a><div class="room-title"><h1>Thread</h1><span class="room-topic">in <a href="${parent.url}">${parent.title}</a></span></div><div class="room-tools"></div></header>`;
   const anchorHtml = html`<ul class="thread-anchor" style="list-style:none;margin:0;padding:0">${messageHtml(root, parent, anchor, viewer)}</ul>`;
   const items = replies.map((m) => messageHtml(root, room, m, viewer));
   const last = replies.length ? replies[replies.length - 1].id : 0;
@@ -489,7 +506,7 @@ ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.fla
 </form>
 ${membersSection}
 ${danger}`;
-  return doc(`${room.title} settings`, content, { viewer, root, active: room.url });
+  return doc(`${room.title} settings`, content, { viewer, root, active: room.url, back: { url: room.url, label: room.title } });
 }
 
 export function newDmPage(root: string, viewer: Viewer, error?: string): string {
@@ -519,8 +536,8 @@ export interface SearchHit {
 
 export function searchPage(root: string, viewer: Viewer, query: string, hits: { url: string; where: string; message: Message }[]): string {
   const rows = hits.map(
-    (h) => html`<div class="search-hit">
-<div class="where"><a href="${h.url}">${h.where}</a> <span class="muted">${avatar(h.message.author, 16)} ${h.message.author}</span> ${timeTag(h.message.created)}</div>
+    (h) => html`<div class="search-result">
+<div class="where"><a href="${h.url}">${h.where}</a><span class="who">${avatar(h.message.author, 16)} ${h.message.author}</span>${timeTag(h.message.created)}</div>
 <div class="markdown-body">${bodyHtml(root, h.message.body)}</div>
 </div>`
   );
@@ -625,9 +642,9 @@ export function adminPage(root: string, viewer: Viewer, vault: Vault, opts: { fl
   const rows = users.map(([name, u]) => {
     const isSelf = name === viewer.auth.username;
     return html`<tr>
-<td>${avatar(name, 20)} <a href="/${encodeURIComponent(name)}">${name}</a>${u.siteAdmin ? html` <span class="muted">(admin)</span>` : ''}</td>
-<td class="muted">${u.tokens.length} ${u.tokens.length === 1 ? 'token' : 'tokens'}</td>
-<td style="text-align:right;white-space:nowrap">
+<td class="person">${avatar(name, 20)} <a href="/${encodeURIComponent(name)}">${name}</a>${u.siteAdmin ? html` <span class="muted">(admin)</span>` : ''}</td>
+<td class="muted tokens">${u.tokens.length} ${u.tokens.length === 1 ? 'token' : 'tokens'}</td>
+<td class="actions">
 <form method="post" action="/admin/users/token" style="display:inline">${csrfField(viewer)}<input type="hidden" name="user" value="${name}"><button class="btn-link" type="submit">New token</button></form>
 ${isSelf ? '' : html` · <form method="post" action="/admin/users/admin" style="display:inline">${csrfField(viewer)}<input type="hidden" name="user" value="${name}"><input type="hidden" name="value" value="${u.siteAdmin ? '0' : '1'}"><button class="btn-link" type="submit">${u.siteAdmin ? 'Revoke admin' : 'Make admin'}</button></form> · <form method="post" action="/admin/users/remove" style="display:inline" data-confirm="Remove ${name} and every token they hold?">${csrfField(viewer)}<input type="hidden" name="user" value="${name}"><button class="btn-link" type="submit">Remove</button></form>`}
 </td></tr>`;
@@ -635,7 +652,7 @@ ${isSelf ? '' : html` · <form method="post" action="/admin/users/admin" style="
   const content = html`<h1>Admin</h1>
 ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.flash ? html`<div class="flash">${opts.flash}</div>` : ''}
 <h2>People</h2>
-<table style="width:100%;max-width:680px"><tbody>${joinHtml(rows)}</tbody></table>
+<table class="listing people"><tbody>${joinHtml(rows)}</tbody></table>
 <form method="post" action="/admin/users/add" style="margin-top:12px;max-width:520px">${csrfField(viewer)}
 <div class="field"><label for="username">Add someone</label><input type="text" id="username" name="username" placeholder="username" required>
 <p class="muted">Creates the account and mints its first token, shown once for you to hand over.</p></div>
@@ -706,7 +723,7 @@ export function deleteMessagePage(root: string, room: Room, m: Message, viewer: 
 <button class="btn btn-danger" type="submit">Delete message</button>
 <a class="btn" href="${room.url}">Cancel</a>
 </form>`;
-  return doc('Delete message', content, { viewer, root, active: room.parent?.url ?? room.url });
+  return doc('Delete message', content, { viewer, root, active: room.parent?.url ?? room.url, back: { url: room.url, label: room.title } });
 }
 
 export function editMessagePage(root: string, room: Room, m: Message, viewer: Viewer, error?: string): string {
@@ -717,7 +734,7 @@ ${error ? html`<div class="form-error">${error}</div>` : ''}
 <button class="btn btn-primary" type="submit">Save</button>
 <a class="btn" href="${room.url}">Cancel</a>
 </form>`;
-  return doc('Edit message', content, { viewer, root, active: room.url });
+  return doc('Edit message', content, { viewer, root, active: room.url, back: { url: room.url, label: room.title } });
 }
 
 export function aboutIcon(name: IconName): Html {

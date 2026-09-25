@@ -15,6 +15,10 @@ import { createHash } from 'crypto';
 const PAGE_JS = `
 // ---- appearance (the pattern from mochiforge, under dango's own key) ----
 var dangoRoot = document.documentElement;
+// Said before first paint, for the sheet: on a screen with no hover a
+// message's tools wait for a tap when script is here to take it, and are
+// simply shown when it is not.
+dangoRoot.classList.add('js');
 var dangoTheme = {
   vault: dangoRoot.getAttribute('data-theme-vault') || 'paper',
   dark: dangoRoot.getAttribute('data-theme-dark') || 'midnight',
@@ -110,9 +114,22 @@ function scrollToBottom() {
   var pane = scrollPane();
   if (pane) pane.scrollTop = pane.scrollHeight;
 }
-// Rooms open at the newest message, which is where the conversation is.
+// Rooms open at the newest message, which is where the conversation is, and
+// the view stays there while the reader does, whatever changes its height:
+// an image arriving after the page, a message repainted, the composer
+// growing, or a phone's keyboard opening under it.
+var stuckToBottom = true;
 document.addEventListener('DOMContentLoaded', function () {
-  if (msgList()) scrollToBottom();
+  var pane = scrollPane();
+  var list = msgList();
+  if (!pane || !list) return;
+  scrollToBottom();
+  pane.addEventListener('scroll', function () { stuckToBottom = nearBottom(pane); }, { passive: true });
+  if (window.ResizeObserver) {
+    var watch = new ResizeObserver(function () { if (stuckToBottom) scrollToBottom(); });
+    watch.observe(pane);
+    watch.observe(list);
+  }
 });
 
 // One EventSource per open room page. The stream sends {type, id, html};
@@ -827,13 +844,18 @@ function sendComposer(form) {
   };
   xhr.send(data);
 }
-// The total of the files chosen, quietly, beside the picker.
+// What was chosen, quietly, beside the picker: the file's name, or how many
+// there are, and their total size. The picker itself is a paperclip, which
+// says nothing about what it holds.
 function showFileTotal(form) {
   var el = form.querySelector('[data-file-total]');
   if (!el) return;
+  var file = form.querySelector('input[type="file"]');
+  var n = file && file.files ? file.files.length : 0;
   var bytes = selectedBytes(form);
   var max = parseInt(form.getAttribute('data-max-bytes') || '0', 10);
-  el.textContent = bytes > 0 ? humanSize(bytes) + (max && bytes > max ? ' (over the ' + humanSize(max) + ' limit)' : '') : '';
+  var what = n === 1 ? file.files[0].name + ', ' : n + ' files, ';
+  el.textContent = n > 0 ? what + humanSize(bytes) + (max && bytes > max ? ' (over the ' + humanSize(max) + ' limit)' : '') : '';
   el.className = 'file-size' + (max && bytes > max ? ' over' : '');
 }
 document.addEventListener('change', function (e) {
@@ -886,8 +908,21 @@ function deleteMessage(link) {
 // Reactions and pins post through fetch and let the event stream repaint the
 // message; without script the same elements are buttons in forms and the
 // page reloads. A refusal (going too fast, most likely) is said, not dropped.
+// Where nothing hovers, tapping a message shows its tools, and tapping it
+// again, or another message, puts them away. A tap on a link or control in
+// the message does what it would anyway, and one inside the tools uses them.
+var noHover = matchMedia('(hover: none)');
+function pickMessage(t) {
+  if (!noHover.matches) return;
+  var msg = closestOf(t, '.msg');
+  if (msg && (closestOf(t, '.msg-tools') || closestOf(t, 'a, button, summary, input, textarea, audio, video'))) return;
+  var picked = document.querySelectorAll('.msg.picked');
+  for (var i = 0; i < picked.length; i++) if (picked[i] !== msg) picked[i].classList.remove('picked');
+  if (msg && msg.querySelector('.msg-tools')) msg.classList.toggle('picked');
+}
 document.addEventListener('click', function (e) {
   var t = e.target;
+  pickMessage(t);
   var theme = closestOf(t, '[data-theme-name]');
   if (theme) { setTheme(theme.getAttribute('data-theme-name')); return; }
   var del = closestOf(t, 'a[data-delete-message]');
