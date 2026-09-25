@@ -426,7 +426,7 @@ function pushSetup(box) {
   }
   function refresh() {
     if (Notification.permission === 'denied') {
-      show("Notifications are blocked for this workspace in the browser's settings. Allow them there, then reload this page.", '');
+      show('Notifications are blocked for this workspace in this browser. Click the icon at the left of the address bar, set Notifications to Allow, and reload this page. (In Safari on a Mac: Safari, Settings, Websites, Notifications.)', '');
       return;
     }
     currentSubscription().then(function (sub) {
@@ -486,6 +486,83 @@ function pushSetup(box) {
   });
   refresh();
 }
+// ---- the chime ----
+// When a notification arrives and a workspace tab is open, the service worker
+// asks a tab to play a chime (see src/sw.ts), since the system's own sound is
+// often off and a page cannot choose it. Browsers let a page make sound only
+// after someone has clicked or typed in it, so the audio is started on the
+// first such press and kept; a tab nobody has touched answers that it could
+// not, and the worker asks the next one or leaves the sound to the system.
+// The chime is drawn here rather than loaded: two soft sine tones a fifth
+// apart, E5 then B5, each with a quiet octave above it for a bell's shimmer,
+// swelling in over 15ms and dying away over about a second.
+var audio = null;
+function startAudio() {
+  var AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  if (!audio) {
+    try { audio = new AC(); } catch (e) { return; }
+  }
+  if (audio.state === 'suspended' && audio.resume) audio.resume().catch(function () {});
+}
+['pointerdown', 'keydown', 'touchend'].forEach(function (type) {
+  document.addEventListener(type, startAudio, { capture: true, passive: true });
+});
+function chimeWanted() {
+  try { return localStorage.getItem('dango.chime') !== 'off'; } catch (e) { return true; }
+}
+var chimes = 0;
+function bellTone(freq, at, length, peak) {
+  var out = audio.createGain();
+  out.gain.setValueAtTime(0.0001, at);
+  out.gain.exponentialRampToValueAtTime(peak, at + 0.015);
+  out.gain.exponentialRampToValueAtTime(0.0001, at + length);
+  out.connect(audio.destination);
+  [[freq, 1], [freq * 2, 0.22]].forEach(function (partial) {
+    var level = audio.createGain();
+    level.gain.value = partial[1];
+    level.connect(out);
+    var osc = audio.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = partial[0];
+    osc.connect(level);
+    osc.start(at);
+    osc.stop(at + length + 0.05);
+  });
+}
+function playChime() {
+  if (!audio || audio.state !== 'running') return false;
+  var t = audio.currentTime + 0.02;
+  bellTone(659.25, t, 0.9, 0.08);
+  bellTone(987.77, t + 0.13, 1.2, 0.065);
+  chimes++;
+  return true;
+}
+if (navigator.serviceWorker) {
+  navigator.serviceWorker.addEventListener('message', function (e) {
+    if (!e.data || e.data.type !== 'chime') return;
+    var played = chimeWanted() && playChime();
+    if (e.ports && e.ports[0]) e.ports[0].postMessage({ played: played });
+  });
+  if (navigator.serviceWorker.startMessages) navigator.serviceWorker.startMessages();
+}
+// The account page's switch for it, kept per browser, and a button to hear it.
+document.addEventListener('DOMContentLoaded', function () {
+  var box = document.querySelector('[data-chime]');
+  if (!box) return;
+  box.hidden = false;
+  var toggle = box.querySelector('input[type="checkbox"]');
+  toggle.checked = chimeWanted();
+  toggle.addEventListener('change', function () {
+    try { localStorage.setItem('dango.chime', toggle.checked ? 'on' : 'off'); } catch (e) {}
+  });
+  box.querySelector('[data-chime-play]').addEventListener('click', function () {
+    startAudio();
+    // A context started by this very press may still be starting.
+    if (!playChime() && audio && audio.resume) audio.resume().then(playChime, function () {});
+  });
+});
+
 // Signing out drops this browser's subscription and tells the workspace, so
 // a shared computer stops showing the notifications of whoever left it. The
 // form still posts if any of this fails or takes too long.

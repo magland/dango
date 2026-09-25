@@ -439,6 +439,11 @@ const zone = await n1.eval("document.querySelector('[data-tz-fill]').value");
 if (zone !== (await n1.eval('Intl.DateTimeFormat().resolvedOptions().timeZone'))) fail(`the quiet hours' time zone was not filled from the browser: ${zone}`);
 ok("the quiet hours' time zone is filled in from the browser");
 const reg = await waitFor('the registration to be reported', async () => registrations.find((r) => r.scopeURL === base + '/' && !r.isDeleted));
+// A real click, as the browser counts one, so the page may make sound.
+for (const type of ['mousePressed', 'mouseReleased']) {
+  await send('Input.dispatchMouseEvent', { type, x: 600, y: 700, button: 'left', clickCount: 1 }, n1.sessionId);
+}
+await waitFor('the page’s audio to start', () => n1.eval("!!audio && audio.state === 'running'"));
 await send(
   'ServiceWorker.deliverPushMessage',
   {
@@ -455,6 +460,23 @@ const shown = await waitFor('the notification to show', () =>
 );
 if (shown[0] !== '#general|bob: lunch?|/c/general|/c/general') fail(`the notification was not what the push said: ${JSON.stringify(shown)}`);
 ok('a push shows a notification naming the room and the message, and where pressing it goes');
+if ((await n1.eval('chimes')) !== 1) fail(`the open tab did not chime once for the push: ${await n1.eval('chimes')}`);
+if (!(await n1.eval("navigator.serviceWorker.getRegistration('/').then((r) => r.getNotifications()).then((ns) => ns[0].silent)")))
+  fail('the notification made a sound of its own beside the chime');
+ok('an open tab plays the chime, and the notification is shown silent so there is one sound');
+await n1.eval("localStorage.setItem('dango.chime', 'off'); true");
+await send(
+  'ServiceWorker.deliverPushMessage',
+  { origin: base, registrationId: reg.registrationId, data: JSON.stringify({ title: '#general', body: 'bob: again', tag: '/c/general', url: '/c/general', time: Date.now() }) },
+  n1.sessionId
+);
+await waitFor('the second notification', () =>
+  n1.eval("navigator.serviceWorker.getRegistration('/').then((r) => r.getNotifications()).then((ns) => ns.length && ns[0].body === 'bob: again')")
+);
+if ((await n1.eval('chimes')) !== 1) fail('the tab chimed with the chime turned off');
+if (await n1.eval("navigator.serviceWorker.getRegistration('/').then((r) => r.getNotifications()).then((ns) => ns[0].silent)"))
+  fail('with the chime off, the notification was silenced anyway');
+ok('with the chime turned off, the notification keeps the system’s sound');
 
 // ---- an invite link ----
 

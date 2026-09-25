@@ -589,6 +589,8 @@ function notificationsSection(root: string, viewer: Viewer, notify: AccountNotif
 <div class="push-device" data-push data-vapid="${notify.vapidKey}" style="max-width:520px">
 <p data-push-status>Turning notifications on for a device needs script.</p>
 <p><button class="btn btn-primary" type="button" data-push-on hidden>Turn on for this device</button> <button class="btn" type="button" data-push-off hidden>Turn off for this device</button> <button class="btn" type="button" data-push-test hidden>Send a test notification</button></p>
+<div data-chime hidden><label class="checkbox"><input type="checkbox"> Play a chime in an open workspace tab when a notification arrives</label> <button class="btn-link" type="button" data-chime-play>Hear it</button>
+<p class="muted">The system's own notification sound is often off, and a web page cannot choose it. The chime plays in a tab you have clicked or typed in since it opened; this setting is for this browser only.</p></div>
 </div>
 ${
     devices.length
