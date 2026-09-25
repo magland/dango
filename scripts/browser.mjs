@@ -288,6 +288,22 @@ await waitFor('the returning tab’s title to clear', async () => (await a2.eval
 await waitFor('the server to hear it was read', async () => !(await api(alice, 'GET', '/unread')).rooms.some((r) => r.url === '/c/general'));
 ok('coming back to the tab reads it, and clears the title');
 
+// A visible page nobody has touched in a while is not being read: it counts
+// what arrives, and the server is not told it was read (so the phone is
+// notified), until someone is back at it. The idle clock is wound back rather
+// than waited out.
+await a2.eval('lastActive = Date.now() - 10 * 60 * 1000; true');
+await api(bob, 'POST', '/channels/general/messages', { body: 'while alice is at lunch' });
+await waitFor('the message to appear', async () => (await a2.eval("document.getElementById('msg-list').textContent")).includes('at lunch'));
+await waitFor('the unattended tab’s title to count it', async () => (await a2.eval('document.title')) === '(1) dango');
+await sleep(300);
+if (!(await api(alice, 'GET', '/unread')).rooms.some((r) => r.url === '/c/general')) fail('a visible but unattended tab reported a message read');
+ok('a visible tab nobody has used in a while counts what arrives, and does not report it read');
+await a2.eval("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift' })); true");
+await waitFor('the title to clear once someone is back', async () => (await a2.eval('document.title')) === 'dango');
+await waitFor('the server to hear it was read', async () => !(await api(alice, 'GET', '/unread')).rooms.some((r) => r.url === '/c/general'));
+ok('the first key pressed on returning reads it, and clears the title');
+
 // ---- @-completion ----
 
 await a2.eval("document.querySelector('.composer textarea').focus(); true");
@@ -419,6 +435,9 @@ ok('a signed-in page registers the service worker');
 await waitFor('the device status', async () => /off for this device/.test(await n1.eval("document.querySelector('[data-push-status]').textContent")));
 if (await n1.eval("document.querySelector('[data-push-on]').hidden")) fail('the account page offers no way to turn notifications on');
 ok('the account page says notifications are off here, and offers to turn them on');
+const zone = await n1.eval("document.querySelector('[data-tz-fill]').value");
+if (zone !== (await n1.eval('Intl.DateTimeFormat().resolvedOptions().timeZone'))) fail(`the quiet hours' time zone was not filled from the browser: ${zone}`);
+ok("the quiet hours' time zone is filled in from the browser");
 const reg = await waitFor('the registration to be reported', async () => registrations.find((r) => r.scopeURL === base + '/' && !r.isDeleted));
 await send(
   'ServiceWorker.deliverPushMessage',

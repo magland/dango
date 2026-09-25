@@ -10,7 +10,7 @@ import { ChannelInfo, listChannels } from './channels';
 import { loadConfig } from './config';
 import { DmInfo, dmTitle } from './dms';
 import { MARK } from './logo';
-import { Device, NotifyPrefs } from './notify';
+import { Device, NotifyPrefs, isMuted, readPrefs } from './notify';
 import { Attachment, MAX_ATTACHMENTS_BYTES, Message } from './messages';
 import { pageScript } from './pagescript';
 import { canDeleteMessage, canEditMessage, canSeeChannel, isSiteAdmin } from './perms';
@@ -102,25 +102,28 @@ function unreadSummary(rooms: RoomUnread[]): { total: number; urgent: boolean } 
   return { total, urgent };
 }
 
-function roomLink(u: RoomUnread, glyph: Html | string, active?: string): Html {
-  const cls = [u.url === active ? 'current' : '', u.count ? 'unread' : ''].join(' ');
+function roomLink(u: RoomUnread, glyph: Html | string, active?: string, muted = false): Html {
+  const cls = [u.url === active ? 'current' : '', u.count ? 'unread' : '', muted ? 'muted-room' : ''].join(' ');
   const label = u.kind === 'channel' ? u.title.slice(1) : u.title;
-  return html`<li><a class="${cls}" href="${u.url}" data-room="${u.url}"><span class="room-glyph">${glyph}</span><span class="room-name">${label}</span>${badge(u)}</a></li>`;
+  return html`<li><a class="${cls}" href="${u.url}" data-room="${u.url}"><span class="room-glyph">${glyph}</span><span class="room-name">${label}</span>${
+    muted ? html`<span class="room-muted" title="Notifications muted">${BELL_OFF_ICON}</span>` : ''
+  }${badge(u)}</a></li>`;
 }
 
 function sidebar(opts: PageOpts, rooms: RoomUnread[]): Html {
   const root = opts.root;
   const privateNames = new Set(listChannels(root).filter((c) => c.private).map((c) => `/c/${encodeURIComponent(c.name)}`));
   const wsName = loadConfig(root).name;
+  const prefs = readPrefs(root, opts.viewer!.auth.username);
   return html`<nav class="app-side">
 <div class="side-head"><a class="brand" href="/">${raw(MARK)}<span>${wsName}</span></a></div>
 <div class="side-rooms">
 <div class="side-cap"><span>Channels</span><a href="/new" title="New channel">${icon('plus')}</a></div>
 <ul>${joinHtml(
-    rooms.filter((r) => r.kind === 'channel').map((r) => roomLink(r, privateNames.has(r.url) ? icon('lock') : '#', opts.active))
+    rooms.filter((r) => r.kind === 'channel').map((r) => roomLink(r, privateNames.has(r.url) ? icon('lock') : '#', opts.active, isMuted(prefs, r.url)))
   )}</ul>
 <div class="side-cap"><span>Direct messages</span><a href="/d/new" title="New conversation">${icon('plus')}</a></div>
-<ul>${joinHtml(rooms.filter((r) => r.kind === 'dm').map((r) => roomLink(r, icon('comment'), opts.active)))}</ul>
+<ul>${joinHtml(rooms.filter((r) => r.kind === 'dm').map((r) => roomLink(r, icon('comment'), opts.active, isMuted(prefs, r.url))))}</ul>
 </div>
 <div class="side-foot">${userMenu(opts)}<a class="topbar-icon" href="/search" aria-label="Search">${icon('search')}</a></div>
 </nav>`;
@@ -206,6 +209,14 @@ export function externalLinksInNewTab(rendered: string): string {
 /** A pushpin, drawn in the icon set's manner: a 16px box, currentColor, one stroke weight. */
 const PIN_ICON = raw(
   '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2h4M7 2v4L4.5 9h7L9 6V2M8 9v5"/></svg>'
+);
+
+/** A bell, and a bell struck through, in the pushpin's manner: whether a room is notified. */
+const BELL_ICON = raw(
+  '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10.5V7a4 4 0 0 1 8 0v3.5l1.5 1.5h-11zM6.5 14a1.5 1.5 0 0 0 3 0"/></svg>'
+);
+const BELL_OFF_ICON = raw(
+  '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10.5V7a4 4 0 0 1 8 0v3.5l1.5 1.5h-11zM6.5 14a1.5 1.5 0 0 0 3 0M2 2l12 12"/></svg>'
 );
 
 function fileRows(roomUrl: string, id: number, files: Attachment[]): Html | '' {
@@ -329,13 +340,24 @@ function composer(room: Room, viewer: Viewer, placeholder: string): Html {
 
 // ---- room pages ----
 
-function roomHead(room: Room, tools: Html | '' = ''): Html {
+/**
+ * The bell in a room's header, which mutes or unmutes the room's
+ * notifications for the viewer. It shows the room's state, and pressing it
+ * changes it; the label says which way.
+ */
+function muteButton(root: string, room: Room, viewer: Viewer): Html {
+  const muted = isMuted(readPrefs(root, viewer.auth.username), room.url);
+  const label = muted ? `Unmute ${room.title}: notify me of it again` : `Mute ${room.title}: no notifications from it`;
+  return html`<form method="post" action="${room.url}/mute" class="mute-form">${csrfField(viewer)}<input type="hidden" name="muted" value="${muted ? '0' : '1'}"><button class="topbar-icon ${muted ? 'is-muted' : ''}" type="submit" title="${label}" aria-label="${label}" aria-pressed="${muted ? 'true' : 'false'}">${muted ? BELL_OFF_ICON : BELL_ICON}</button></form>`;
+}
+
+function roomHead(root: string, room: Room, viewer: Viewer, tools: Html | '' = ''): Html {
   const topic = room.channel?.topic;
   const pins = readPins(room.dir).length;
   const pinsLink = html`<a class="topbar-icon pins-link" href="${room.url}/pins" title="Pinned messages" aria-label="Pinned messages, ${pins}">${PIN_ICON}<span data-pin-count>${pins || ''}</span></a>`;
   return html`<header class="room-head"><a class="back-link topbar-icon" href="/" aria-label="All rooms">&#8592;</a><h1>${room.title}</h1>${
     topic ? html`<span class="room-topic">${topic}</span>` : ''
-  }<div class="room-tools">${pinsLink}${tools}</div></header>`;
+  }<div class="room-tools">${pinsLink}${muteButton(root, room, viewer)}${tools}</div></header>`;
 }
 
 /** A room's pinned messages, most recently pinned first, each whole. */
@@ -349,12 +371,12 @@ ${pinned.length === 0 ? html`<p class="muted">Nothing is pinned here yet. Pin a 
 
 export function channelPage(root: string, room: Room, messages: Message[], viewer: Viewer): string {
   const tools = html`<a class="topbar-icon" href="${room.url}/settings" aria-label="Channel settings" title="Channel settings">${icon('sliders')}</a>`;
-  const main = html`${roomHead(room, tools)}${messageList(root, room, messages, viewer)}${composer(room, viewer, `Message ${room.title}`)}`;
+  const main = html`${roomHead(root, room, viewer, tools)}${messageList(root, room, messages, viewer)}${composer(room, viewer, `Message ${room.title}`)}`;
   return layout(`${room.title}`, main, { viewer, root, active: room.url });
 }
 
 export function dmPage(root: string, room: Room, messages: Message[], viewer: Viewer): string {
-  const main = html`${roomHead(room)}${messageList(root, room, messages, viewer)}${composer(room, viewer, `Message ${room.title}`)}`;
+  const main = html`${roomHead(root, room, viewer)}${messageList(root, room, messages, viewer)}${composer(room, viewer, `Message ${room.title}`)}`;
   return layout(room.title, main, { viewer, root, active: room.url });
 }
 
@@ -553,6 +575,7 @@ ${notificationsSection(root, viewer, notify)}
  */
 function notificationsSection(root: string, viewer: Viewer, notify: AccountNotifications): Html {
   const { prefs, devices } = notify;
+  const quiet = prefs.quiet;
   const rooms = unreadRooms(root, viewer.auth);
   const level = (value: string, label: string, hint: string) =>
     html`<label class="checkbox" style="display:block;margin-bottom:6px"><input type="radio" name="level" value="${value}" ${prefs.level === value ? raw('checked') : ''}> ${label}<br><span class="muted">${hint}</span></label>`;
@@ -578,9 +601,14 @@ ${level('direct', 'Direct messages, mentions, and replies in my threads', 'Messa
 ${level('all', 'Everything', 'All of the above, and every message in every channel you can read.')}
 ${level('none', 'Nothing', 'No notifications on any device. Unread counts still show in the sidebar.')}
 <label class="checkbox" style="display:block;margin:12px 0"><input type="checkbox" name="preview" value="1" ${prefs.preview ? raw('checked') : ''}> Show who wrote what<br><span class="muted">Otherwise a notification only says that something arrived. The text is encrypted for your device on its way through your browser's push service (Google, Apple, Mozilla, or Microsoft), which sees when a notification is sent but not what it says; it does show on your lock screen.</span></label>
+<h3>Quiet hours</h3>
+<label class="checkbox" style="display:block;margin-bottom:8px"><input type="checkbox" name="quiet" value="1" ${quiet ? raw('checked') : ''}> Send no notifications between</label>
+<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px"><input type="time" name="quiet_start" value="${quiet?.start ?? '22:00'}" aria-label="Quiet from"> and <input type="time" name="quiet_end" value="${quiet?.end ?? '07:00'}" aria-label="Quiet until"></div>
+<div class="field"><label for="tz">Time zone</label><input type="text" id="tz" name="tz" value="${quiet?.tz ?? ''}" placeholder="UTC" data-tz-fill>
+<p class="muted">What arrives in those hours is not notified later; it waits in the unread counts. The time zone is this browser's unless you change it.</p></div>
 ${
     rooms.length
-      ? html`<h3>Muted rooms</h3><p class="muted">Nothing from a muted room is notified, mentions included; its unread count still shows.</p>${joinHtml(rooms.map(muteBox))}`
+      ? html`<h3>Muted rooms</h3><p class="muted">Nothing from a muted room is notified, mentions included; its unread count still shows. The bell in a room's header does the same.</p>${joinHtml(rooms.map(muteBox))}`
       : ''
   }
 <div style="margin-top:12px"><button class="btn btn-primary" type="submit">Save</button></div>

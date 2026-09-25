@@ -22,8 +22,8 @@ import { userDir } from './workspace';
 //                              each browser's push subscription, a label for
 //                              it, and when it was added
 //   users/<name>/notify.json   what they want to hear about: a level, whether
-//                              a notification shows the message's text, and
-//                              the rooms they have muted
+//                              a notification shows the message's text, the
+//                              rooms they have muted, and their quiet hours
 //
 // A message is not pushed the moment it is sent. Each person's pushes for a
 // room wait a few seconds, gathered, and are sent only if the person's read
@@ -52,24 +52,80 @@ const MAX_DEVICES = 20;
  */
 export type NotifyLevel = 'all' | 'direct' | 'none';
 
+/**
+ * A stretch of the day in which nothing is pushed, in the person's own time
+ * zone: from `start` up to `end`, each "HH:MM", wrapping past midnight when
+ * `end` comes first ("22:00" to "07:00"). Nothing is saved up for the end of
+ * it: what arrived is waiting in the unread counts, which is where it would
+ * be read anyway, and a burst of the night's notifications at seven in the
+ * morning is the thing quiet hours are meant to spare.
+ */
+export interface QuietHours {
+  start: string;
+  end: string;
+  /** An IANA zone, "Europe/Paris"; the browser's own, filled in by the account page. */
+  tz: string;
+}
+
 export interface NotifyPrefs {
   level: NotifyLevel;
   /** Whether a notification shows who said what, or only that something arrived. */
   preview: boolean;
   /** Rooms nothing is pushed from, as read.json keys them ("c/general", "d/3"). */
   muted: string[];
+  quiet: QuietHours | null;
 }
 
-export const DEFAULT_PREFS: NotifyPrefs = { level: 'direct', preview: true, muted: [] };
+export const DEFAULT_PREFS: NotifyPrefs = { level: 'direct', preview: true, muted: [], quiet: null };
+
+function defaults(): NotifyPrefs {
+  return { ...DEFAULT_PREFS, muted: [] };
+}
+
+export function isTimeOfDay(v: unknown): v is string {
+  return typeof v === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(v);
+}
+
+export function isTimeZone(v: unknown): v is string {
+  if (typeof v !== 'string' || v === '' || v.length > 64) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: v });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function normalizePrefs(parsed: unknown): NotifyPrefs {
-  const out: NotifyPrefs = { ...DEFAULT_PREFS, muted: [] };
+  const out = defaults();
   if (typeof parsed !== 'object' || parsed === null) return out;
   const rec = parsed as Record<string, unknown>;
   if (rec.level === 'all' || rec.level === 'direct' || rec.level === 'none') out.level = rec.level;
   if (typeof rec.preview === 'boolean') out.preview = rec.preview;
   if (Array.isArray(rec.muted)) out.muted = [...new Set(rec.muted.filter((k): k is string => typeof k === 'string'))];
+  const q = rec.quiet as Record<string, unknown> | null | undefined;
+  if (q && isTimeOfDay(q.start) && isTimeOfDay(q.end) && q.start !== q.end) {
+    out.quiet = { start: q.start, end: q.end, tz: isTimeZone(q.tz) ? q.tz : 'UTC' };
+  }
   return out;
+}
+
+/** The minute of the day it is now in a time zone, 0 to 1439. */
+export function minuteOfDay(tz: string, now: Date = new Date()): number {
+  const parts = new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(now);
+  const get = (type: string) => parseInt(parts.find((p) => p.type === type)?.value ?? '0', 10);
+  return get('hour') * 60 + get('minute');
+}
+
+/** Whether a person's quiet hours are on right now. */
+export function isQuiet(prefs: NotifyPrefs, now: Date = new Date()): boolean {
+  const q = prefs.quiet;
+  if (!q) return false;
+  const toMin = (hhmm: string) => parseInt(hhmm.slice(0, 2), 10) * 60 + parseInt(hhmm.slice(3), 10);
+  const t = minuteOfDay(q.tz, now);
+  const start = toMin(q.start);
+  const end = toMin(q.end);
+  return start < end ? t >= start && t < end : t >= start || t < end;
 }
 
 const prefsCache = fileCache<NotifyPrefs>({
@@ -77,23 +133,49 @@ const prefsCache = fileCache<NotifyPrefs>({
     try {
       return normalizePrefs(JSON.parse(fs.readFileSync(file, 'utf8')));
     } catch {
-      return { ...DEFAULT_PREFS, muted: [] };
+      return defaults();
     }
   },
-  missing: () => ({ ...DEFAULT_PREFS, muted: [] }),
+  missing: () => defaults(),
 });
 
 export function readPrefs(root: string, username: string): NotifyPrefs {
   return prefsCache.get(path.join(userDir(root, username), NOTIFY_FILE));
 }
 
-export function writePrefs(root: string, username: string, prefs: NotifyPrefs): NotifyPrefs {
-  const clean = normalizePrefs(prefs);
+/** Change a person's preferences under the file's lock, from what is on disk now. */
+export function updatePrefs(root: string, username: string, fn: (prefs: NotifyPrefs) => NotifyPrefs): NotifyPrefs {
   const file = path.join(userDir(root, username), NOTIFY_FILE);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  writeFileAtomic(file, JSON.stringify(clean, null, 2) + '\n', { mode: 0o600 });
-  prefsCache.invalidate(file);
-  return clean;
+  return withFileLock(`${file}.lock`, () => {
+    let current = defaults();
+    try {
+      current = normalizePrefs(JSON.parse(fs.readFileSync(file, 'utf8')));
+    } catch {
+      current = defaults();
+    }
+    const clean = normalizePrefs(fn(current));
+    writeFileAtomic(file, JSON.stringify(clean, null, 2) + '\n', { mode: 0o600 });
+    prefsCache.invalidate(file);
+    return clean;
+  });
+}
+
+export function writePrefs(root: string, username: string, prefs: NotifyPrefs): NotifyPrefs {
+  return updatePrefs(root, username, () => prefs);
+}
+
+/** Mute or unmute one room, as the bell in its header does. */
+export function setMuted(root: string, username: string, roomUrl: string, muted: boolean): NotifyPrefs {
+  const key = readKey(roomUrl);
+  return updatePrefs(root, username, (p) => ({
+    ...p,
+    muted: muted ? [...p.muted.filter((k) => k !== key), key] : p.muted.filter((k) => k !== key),
+  }));
+}
+
+export function isMuted(prefs: NotifyPrefs, roomUrl: string): boolean {
+  return prefs.muted.includes(readKey(roomUrl));
 }
 
 // ---- devices ----
@@ -471,8 +553,9 @@ async function deliver(root: string, username: string, entry: Pending): Promise<
   if (!room) return;
   if ('participants' in room ? !canSeeDm(auth, room) : !canSeeChannel(auth, room)) return;
   // Read in the meantime, on some other screen, or deleted, or muted since:
-  // not news.
+  // not news. Inside quiet hours nothing goes, and nothing is kept for later.
   const prefs = readPrefs(root, username);
+  if (isQuiet(prefs)) return;
   const marker = readMarkers(root, username)[readKey(entry.room.url)] ?? 0;
   let people: Set<string> | null = null;
   const inThread = () => (people ??= threadPeople(entry.room));

@@ -50,6 +50,8 @@ import { Pin, pinMessage, pinOf, readPins, unpinMessage } from './pins';
 import {
   NotifyLevel,
   addDevice,
+  isTimeOfDay,
+  isTimeZone,
   deviceId,
   deviceLabel,
   parseSubscription,
@@ -58,6 +60,7 @@ import {
   readPrefs,
   removeDevice,
   renewDevice,
+  setMuted,
   writePrefs,
 } from './notify';
 import { noteRead, postMessage } from './post';
@@ -316,7 +319,22 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     const body = req.body as Record<string, unknown>;
     const level: NotifyLevel = body.level === 'all' || body.level === 'none' ? body.level : 'direct';
     const muted = (Array.isArray(body.mute) ? body.mute : [body.mute]).filter((k): k is string => typeof k === 'string' && k !== '');
-    writePrefs(root, viewer.auth.username, { level, preview: body.preview === '1', muted });
+    const start = String(body.quiet_start ?? '');
+    const end = String(body.quiet_end ?? '');
+    if (body.quiet === '1' && (!isTimeOfDay(start) || !isTimeOfDay(end) || start === end)) {
+      res
+        .status(400)
+        .type('html')
+        .send(views.accountPage(root, viewer, accountNotifications(viewer), { error: 'Quiet hours need a start and an end, and they cannot be the same time.' }));
+      return;
+    }
+    const tz = String(body.tz ?? '');
+    writePrefs(root, viewer.auth.username, {
+      level,
+      preview: body.preview === '1',
+      muted,
+      quiet: body.quiet === '1' ? { start, end, tz: isTimeZone(tz) ? tz : 'UTC' } : null,
+    });
     res.redirect(303, '/account#notifications');
   });
 
@@ -817,6 +835,23 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     );
   pinRoute('pin');
   pinRoute('unpin');
+
+  // Muting, from the bell in a room's header: nothing from the room, or its
+  // threads, is notified to the person who muted it. It is theirs alone, so
+  // it is not published to anyone; the page it came from is shown again.
+  app.post(BASES.map((b) => `${b}/mute`), formBody, (req, res) =>
+    withRoom(
+      req,
+      res,
+      (viewer, room) => {
+        const muted = (req.body as Record<string, unknown>).muted === '1';
+        setMuted(root, viewer.auth.username, room.url, muted);
+        if (wantsJson(req)) res.json({ muted });
+        else res.redirect(303, room.url);
+      },
+      { form: true }
+    )
+  );
 
   app.get(BASES.map((b) => `${b}/pins`), (req, res) =>
     withRoom(req, res, (viewer, room) => {

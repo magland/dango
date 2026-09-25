@@ -17,6 +17,10 @@ import {
   NotifyPrefs,
   addDevice,
   cancelPending,
+  isMuted,
+  isQuiet,
+  minuteOfDay,
+  setMuted,
   deviceLabel,
   parseSubscription,
   previewText,
@@ -167,10 +171,49 @@ test('devices are per person, one endpoint belongs to one person, and a renewal 
 test('preferences default to what is addressed to you, and survive a round trip', () => {
   const root = tmpRoot();
   assert.deepStrictEqual(readPrefs(root, 'alice'), DEFAULT_PREFS);
-  writePrefs(root, 'alice', { level: 'all', preview: false, muted: ['c/random', 'c/random'] });
-  assert.deepStrictEqual(readPrefs(root, 'alice'), { level: 'all', preview: false, muted: ['c/random'] });
+  writePrefs(root, 'alice', { level: 'all', preview: false, muted: ['c/random', 'c/random'], quiet: null });
+  assert.deepStrictEqual(readPrefs(root, 'alice'), { level: 'all', preview: false, muted: ['c/random'], quiet: null });
   fs.writeFileSync(path.join(root, 'users', 'alice', 'notify.json'), '{"level":"loud"}');
   assert.strictEqual(readPrefs(root, 'alice').level, 'direct');
+});
+
+test('quiet hours are read in the person’s own zone, and may run past midnight', () => {
+  const prefs = (start: string, end: string, tz = 'UTC'): NotifyPrefs => ({ ...DEFAULT_PREFS, quiet: { start, end, tz } });
+  const at = (iso: string) => new Date(iso);
+  assert.strictEqual(isQuiet(prefs('22:00', '07:00'), at('2026-09-25T23:30:00Z')), true);
+  assert.strictEqual(isQuiet(prefs('22:00', '07:00'), at('2026-09-25T06:59:00Z')), true);
+  assert.strictEqual(isQuiet(prefs('22:00', '07:00'), at('2026-09-25T07:00:00Z')), false, 'the end is not quiet');
+  assert.strictEqual(isQuiet(prefs('22:00', '07:00'), at('2026-09-25T12:00:00Z')), false);
+  assert.strictEqual(isQuiet(prefs('12:00', '14:00'), at('2026-09-25T13:00:00Z')), true);
+  assert.strictEqual(isQuiet(prefs('12:00', '14:00'), at('2026-09-25T15:00:00Z')), false);
+  // 03:30 UTC is 23:30 the evening before in New York (EDT, UTC-4).
+  assert.strictEqual(minuteOfDay('America/New_York', at('2026-09-25T03:30:00Z')), 23 * 60 + 30);
+  assert.strictEqual(isQuiet(prefs('22:00', '07:00', 'America/New_York'), at('2026-09-25T03:30:00Z')), true);
+  assert.strictEqual(isQuiet(prefs('22:00', '07:00', 'America/New_York'), at('2026-09-25T13:00:00Z')), false);
+  assert.strictEqual(isQuiet(DEFAULT_PREFS), false);
+});
+
+test('quiet hours that cannot be read are no quiet hours, and a zone that cannot is UTC', () => {
+  const root = tmpRoot();
+  fs.mkdirSync(path.join(root, 'users', 'alice'), { recursive: true });
+  const file = path.join(root, 'users', 'alice', 'notify.json');
+  fs.writeFileSync(file, JSON.stringify({ quiet: { start: '25:00', end: '07:00', tz: 'UTC' } }));
+  assert.strictEqual(readPrefs(root, 'alice').quiet, null);
+  fs.writeFileSync(file, JSON.stringify({ quiet: { start: '07:00', end: '07:00', tz: 'UTC' } }) + ' ');
+  assert.strictEqual(readPrefs(root, 'alice').quiet, null);
+  fs.writeFileSync(file, JSON.stringify({ quiet: { start: '22:00', end: '07:00', tz: 'Mars/Olympus' } }));
+  assert.deepStrictEqual(readPrefs(root, 'alice').quiet, { start: '22:00', end: '07:00', tz: 'UTC' });
+});
+
+test('muting a room from its header adds it to the list, once, and unmuting takes it off', () => {
+  const root = tmpRoot();
+  setMuted(root, 'alice', '/c/general', true);
+  setMuted(root, 'alice', '/c/general', true);
+  setMuted(root, 'alice', '/d/3', true);
+  assert.deepStrictEqual(readPrefs(root, 'alice').muted, ['c/general', 'd/3']);
+  assert.strictEqual(isMuted(readPrefs(root, 'alice'), '/c/general'), true);
+  setMuted(root, 'alice', '/c/general', false);
+  assert.deepStrictEqual(readPrefs(root, 'alice').muted, ['d/3']);
 });
 
 test('who wants to hear of a message', () => {
@@ -286,7 +329,7 @@ test('a message read on another screen inside the wait is not pushed', async () 
 
 test('messages inside one wait become one notification, and a preview can be withheld', async () => {
   const { root, room, b } = workspaceWithDm();
-  writePrefs(root, 'alice', { level: 'direct', preview: false, muted: [] });
+  writePrefs(root, 'alice', { level: 'direct', preview: false, muted: [], quiet: null });
   const sent = capturePushes();
   for (const body of ['one', 'two', 'three']) queueNotifications(root, room, addMessage(room.dir, { author: 'bob', body }), 20);
   await settle(80);
@@ -300,6 +343,21 @@ test('a subscription the push service says is gone is forgotten', async () => {
   queueNotifications(root, room, addMessage(room.dir, { author: 'bob', body: 'hello' }), 20);
   await settle(80);
   assert.strictEqual(readDevices(root, 'alice').length, 0);
+});
+
+test('nothing is pushed inside quiet hours', async () => {
+  const { root, room } = workspaceWithDm();
+  // An hour either side of now, in UTC.
+  const hhmm = (d: Date) => d.toISOString().slice(11, 16);
+  const now = Date.now();
+  writePrefs(root, 'alice', {
+    ...DEFAULT_PREFS,
+    quiet: { start: hhmm(new Date(now - 3600_000)), end: hhmm(new Date(now + 3600_000)), tz: 'UTC' },
+  });
+  const sent = capturePushes();
+  queueNotifications(root, room, addMessage(room.dir, { author: 'bob', body: 'late, sorry' }), 20);
+  await settle(80);
+  assert.strictEqual(sent.length, 0);
 });
 
 test('someone removed from a private channel inside the wait hears nothing', async () => {

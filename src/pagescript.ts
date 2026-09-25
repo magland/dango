@@ -140,8 +140,9 @@ function openStream(list) {
       list.insertAdjacentHTML('beforeend', msg.html);
       list.setAttribute('data-last', String(msg.id));
       if (follow) scrollToBottom();
-      // Seen, if anyone is looking; otherwise it waits for the tab to return.
-      if (document.visibilityState === 'visible') markReadHere(msg.id);
+      // Seen, if someone is at the page (see attended()); otherwise it waits
+      // for them to come back.
+      if (attended()) markReadHere(msg.id);
     }
   };
   // The browser retries a dropped stream by itself, but gives up for good
@@ -166,10 +167,11 @@ document.addEventListener('DOMContentLoaded', function () {
 // ---- unread counts ----
 // Every signed-in page holds one stream of the viewer's counts (/events),
 // which keeps the sidebar's badges, the tab title, and the favicon current.
-// The room on screen is the exception while the tab is visible: what arrives
-// there is being read, so it is reported read instead of counted, which is
-// what moves the marker for every other device. While the tab is hidden it
-// counts like any other room, so the title says something arrived.
+// The room on screen is the exception while someone is at the page: what
+// arrives there is being read, so it is reported read instead of counted,
+// which is what moves the marker for every other device (and what keeps their
+// phone from being notified of it). While nobody is, it counts like any
+// other room, so the title says something arrived.
 //
 // This script runs in <head>, before the body exists, so everything about the
 // page is looked up once it has loaded (frame() below), never at load time.
@@ -281,7 +283,7 @@ function openUserStream() {
     var msg;
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
     if (msg.type !== 'unread') return;
-    if (msg.url === f.room && document.visibilityState === 'visible') return;
+    if (msg.url === f.room && attended()) return;
     setCount(msg.url, msg.count, msg.mentions);
   };
   es.onerror = function () {
@@ -292,15 +294,50 @@ document.addEventListener('DOMContentLoaded', function () {
   seedCounts();
   openUserStream();
 });
-// Coming back to a tab reads what arrived in its room while it was away.
-document.addEventListener('visibilitychange', function () {
+
+// ---- whether anyone is at the page ----
+// A visible page is not proof of a reader: a room left open on a desktop
+// nobody is sitting at is visible all night, and if it reported everything
+// read, the phone in its owner's pocket would never hear of any of it. So the
+// page counts as attended only while it is visible and has been used lately:
+// a key, a click or tap, a scroll, or the pointer moving over it, within the
+// last five minutes if the window has the focus, or two if it does not (a
+// second monitor, say). Someone who watches a busy room for longer than that
+// without touching anything is notified of what they saw, which is the
+// cheaper of the two mistakes. Browsers offer no idle signal of their own
+// that works everywhere without a permission prompt; this is the one that
+// does.
+var lastActive = Date.now();
+var IDLE_FOCUSED_MS = 5 * 60 * 1000;
+var IDLE_UNFOCUSED_MS = 2 * 60 * 1000;
+function attended() {
+  if (document.visibilityState !== 'visible') return false;
+  return Date.now() - lastActive < (document.hasFocus() ? IDLE_FOCUSED_MS : IDLE_UNFOCUSED_MS);
+}
+// Coming back reads what arrived in the room while nobody was there.
+function catchUp() {
   var f = frame();
-  if (document.visibilityState !== 'visible' || !f || !f.room) return;
   var list = msgList();
-  if (!list) return;
+  if (!f || !f.room || !list) return;
   var last = parseInt(list.getAttribute('data-last') || '0', 10);
   if (last > 0) markReadHere(last);
   setCount(f.room, 0, 0);
+}
+function noteActivity() {
+  var away = !attended();
+  lastActive = Date.now();
+  if (away && attended()) catchUp();
+}
+['keydown', 'pointerdown', 'pointermove', 'touchstart', 'wheel', 'scroll'].forEach(function (type) {
+  document.addEventListener(type, noteActivity, { capture: true, passive: true });
+});
+window.addEventListener('focus', noteActivity);
+// Returning to a tab is itself someone arriving, however briefly they were
+// gone: what came while it was hidden was counted, and is read now.
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState !== 'visible') return;
+  lastActive = Date.now();
+  catchUp();
 });
 
 // ---- notifications ----
@@ -313,6 +350,12 @@ document.addEventListener('DOMContentLoaded', function () {
   }
   var box = document.querySelector('[data-push]');
   if (box) pushSetup(box);
+  // Quiet hours are kept in the person's own time zone, which the browser
+  // knows; an empty field is filled with it, and a filled one is left alone.
+  var tz = document.querySelector('[data-tz-fill]');
+  if (tz && !tz.value && window.Intl) {
+    try { tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) {}
+  }
 });
 function isIos() {
   return /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);

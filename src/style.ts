@@ -205,6 +205,17 @@ form[data-busy] button[type="submit"] { opacity: 0.6; cursor: progress; }
 .msg-tools button.is-pinned { color: var(--accent); }
 .pins-link { width: auto; gap: 4px; padding: 0 8px; font-size: var(--t-sm); }
 
+/* Muting: the bell in the header is a button in a form, drawn as the other
+   header icons are, in the accent while the room is muted; a muted room's
+   name in the sidebar is quieter, with the struck bell beside it. */
+.mute-form { display: contents; }
+.room-tools button.topbar-icon { border: none; background: none; padding: 0; cursor: pointer; font: inherit; }
+.room-tools button.topbar-icon:hover { background: var(--surface-hover); color: var(--fg); }
+.room-tools button.topbar-icon.is-muted { color: var(--accent); }
+.side-rooms li a.muted-room .room-name { opacity: 0.65; }
+.room-muted { display: flex; flex: none; color: var(--fg-subtle); }
+.room-tools button.topbar-icon .icon, .room-muted .icon { color: inherit; margin-right: 0; }
+
 /* Sizes: an attachment's, beside its name, and the files chosen in the
    composer, beside the picker. Quiet, in the subtle colour. */
 .file-size { color: var(--fg-subtle); font-size: var(--t-xs); }
