@@ -139,8 +139,12 @@ export function createApp(root: string) {
     res.set('Cache-Control', 'public, max-age=31536000, immutable');
     res.sendFile(path.join(katexDir, 'fonts', req.params.file));
   });
-  app.get('/favicon.svg', (_req, res) => {
-    res.type('image/svg+xml').set('Cache-Control', 'public, max-age=86400').send(faviconSvg());
+  // ?unread= picks the variant with a dot; each variant is its own URL, so
+  // each can be cached, and the page script switching between them costs a
+  // request only the first time.
+  app.get('/favicon.svg', (req, res) => {
+    const unread = req.query.unread === 'urgent' ? 'urgent' : req.query.unread === 'some' ? 'some' : null;
+    res.type('image/svg+xml').set('Cache-Control', 'public, max-age=86400').send(faviconSvg(undefined, unread));
   });
   app.get('/favicon.ico', (_req, res) => {
     res.status(204).end();

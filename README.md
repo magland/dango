@@ -87,6 +87,7 @@ npm run example    # creates example-root/ with sample users and messages
 npm run dev        # serves example-root/ at http://127.0.0.1:3000
 npm run test:unit  # the pure modules, in milliseconds
 npm run smoke      # end to end, against the compiled output
+npm run test:browser  # the page script in headless Chrome (Node 22+, Chrome installed)
 ```
 
 A release is a version bump pushed to main: `npm run bump` (patch, or `minor`, `major`, or a version) commits the new version, and `.github/workflows/publish.yml` tests it, publishes it to npm through trusted publishing, tags it, and builds its image, which is what `dango deploy fly` deploys.

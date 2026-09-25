@@ -37,10 +37,11 @@
     "dev": "tsx src/index.ts serve example-root",
     "start": "node dist/dango/src/index.js serve",
     "example": "tsx scripts/create-example.ts example-root",
-    "test": "npm run test:unit && bash scripts/smoke.sh",
+    "test": "npm run test:unit && bash scripts/smoke.sh && node scripts/browser.mjs",
     "test:unit": "node --import tsx --test tests/*.test.ts",
     "smoke": "bash scripts/smoke.sh",
-    "bump": "bash scripts/bump.sh"
+    "bump": "bash scripts/bump.sh",
+    "test:browser": "node scripts/browser.mjs"
   },
   "dependencies": {
     "@vscode/markdown-it-katex": "^1.1.2",

@@ -159,17 +159,40 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 
 // ---- unread counts ----
-// Every signed-in page holds one stream of the viewer's counts (/events).
-// A count for the room on screen is not shown while the page is visible,
-// since the page is about to read it; instead the newest message is reported
-// read, which is what moves the marker for every other device.
-var app = document.querySelector('.app');
-var currentRoom = app ? app.getAttribute('data-current-room') || '' : '';
-var baseTitle = (function () {
+// Every signed-in page holds one stream of the viewer's counts (/events),
+// which keeps the sidebar's badges, the tab title, and the favicon current.
+// The room on screen is the exception while the tab is visible: what arrives
+// there is being read, so it is reported read instead of counted, which is
+// what moves the marker for every other device. While the tab is hidden it
+// counts like any other room, so the title says something arrived.
+//
+// This script runs in <head>, before the body exists, so everything about the
+// page is looked up once it has loaded (frame() below), never at load time.
+var frameInfo = null;
+function frame() {
+  if (frameInfo) return frameInfo;
+  var app = document.querySelector('.app');
+  if (!app) return null;
   var t = document.querySelector('title');
-  return t ? t.getAttribute('data-title') || t.textContent : document.title;
-})();
+  var link = document.querySelector('link[rel="icon"]');
+  frameInfo = {
+    app: app,
+    room: app.getAttribute('data-current-room') || '',
+    viewer: app.getAttribute('data-viewer') || '',
+    csrf: app.getAttribute('data-csrf') || '',
+    title: t ? t.getAttribute('data-title') || t.textContent : document.title,
+    icon: link,
+    iconBase: link ? link.getAttribute('href').replace(/&unread=[a-z]+/, '') : ''
+  };
+  return frameInfo;
+}
 var counts = {};
+var urgent = {};
+// A direct message is addressed to you by being one, so its count is marked
+// the way a mention is.
+function isUrgent(url, mentions) {
+  return mentions > 0 || url.indexOf('/d/') === 0;
+}
 function applyBadge(url, count, mentions) {
   var links = document.querySelectorAll('[data-room="' + url + '"]');
   for (var i = 0; i < links.length; i++) {
@@ -177,7 +200,7 @@ function applyBadge(url, count, mentions) {
     if (!b) continue;
     if (count > 0) {
       b.textContent = count > 99 ? '99+' : String(count);
-      b.className = 'badge' + (mentions > 0 ? ' mention' : '');
+      b.className = 'badge' + (isUrgent(url, mentions) ? ' mention' : '');
       b.hidden = false;
       links[i].classList.add('unread');
     } else {
@@ -187,56 +210,76 @@ function applyBadge(url, count, mentions) {
   }
 }
 function applyTitle() {
+  var f = frame();
+  if (!f) return;
   var total = 0;
-  for (var k in counts) if (counts[k]) total += counts[k];
-  document.title = total > 0 ? '(' + (total > 99 ? '99+' : total) + ') ' + baseTitle : baseTitle;
-}
-(function seedCounts() {
-  var badges = document.querySelectorAll('.side-rooms [data-room]');
-  for (var i = 0; i < badges.length; i++) {
-    var b = badges[i].querySelector('[data-room-badge]');
-    if (b && !b.hidden) counts[badges[i].getAttribute('data-room')] = parseInt(b.textContent, 10) || 0;
+  var anyUrgent = false;
+  for (var k in counts) {
+    if (!counts[k]) continue;
+    total += counts[k];
+    if (urgent[k]) anyUrgent = true;
   }
-  document.addEventListener('DOMContentLoaded', applyTitle);
-})();
+  document.title = total > 0 ? '(' + (total > 99 ? '99+' : total) + ') ' + f.title : f.title;
+  if (f.icon) {
+    var href = f.iconBase + (total > 0 ? '&unread=' + (anyUrgent ? 'urgent' : 'some') : '');
+    if (f.icon.getAttribute('href') !== href) f.icon.setAttribute('href', href);
+  }
+}
+function setCount(url, count, mentions) {
+  counts[url] = count;
+  urgent[url] = count > 0 && isUrgent(url, mentions);
+  applyBadge(url, count, mentions);
+  applyTitle();
+}
+// The counts the page was rendered with, read off the sidebar's badges.
+function seedCounts() {
+  var links = document.querySelectorAll('.side-rooms [data-room]');
+  for (var i = 0; i < links.length; i++) {
+    var b = links[i].querySelector('[data-room-badge]');
+    var url = links[i].getAttribute('data-room');
+    if (b && !b.hidden) {
+      counts[url] = parseInt(b.textContent, 10) || 0;
+      urgent[url] = b.classList.contains('mention') || url.indexOf('/d/') === 0;
+    }
+  }
+  applyTitle();
+}
 function markReadHere(id) {
-  if (!currentRoom || !window.fetch || !app) return;
+  var f = frame();
+  if (!f || !f.room || !window.fetch) return;
   var body = new FormData();
-  body.append('csrf', app.getAttribute('data-csrf') || '');
+  body.append('csrf', f.csrf);
   body.append('id', String(id));
-  fetch(currentRoom + '/read', { method: 'POST', body: body });
+  fetch(f.room + '/read', { method: 'POST', body: body });
 }
 function openUserStream() {
-  if (!app || !window.EventSource) return;
+  var f = frame();
+  if (!f || !window.EventSource) return;
   var es = new EventSource('/events');
   es.onmessage = function (ev) {
     var msg;
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
     if (msg.type !== 'unread') return;
-    // The room on screen reads what arrives; its own count is left alone
-    // unless the tab is hidden, when it is shown like any other.
-    if (msg.url === currentRoom && document.visibilityState === 'visible') return;
-    counts[msg.url] = msg.count;
-    applyBadge(msg.url, msg.count, msg.mentions);
-    applyTitle();
+    if (msg.url === f.room && document.visibilityState === 'visible') return;
+    setCount(msg.url, msg.count, msg.mentions);
   };
   es.onerror = function () {
     if (es.readyState === 2) setTimeout(openUserStream, 5000);
   };
 }
-document.addEventListener('DOMContentLoaded', openUserStream);
-// Coming back to a tab reads what arrived while it was away.
+document.addEventListener('DOMContentLoaded', function () {
+  seedCounts();
+  openUserStream();
+});
+// Coming back to a tab reads what arrived in its room while it was away.
 document.addEventListener('visibilitychange', function () {
-  if (document.visibilityState !== 'visible' || !currentRoom) return;
+  var f = frame();
+  if (document.visibilityState !== 'visible' || !f || !f.room) return;
   var list = msgList();
   if (!list) return;
   var last = parseInt(list.getAttribute('data-last') || '0', 10);
-  if (last > 0) {
-    markReadHere(last);
-    counts[currentRoom] = 0;
-    applyBadge(currentRoom, 0, 0);
-    applyTitle();
-  }
+  if (last > 0) markReadHere(last);
+  setCount(f.room, 0, 0);
 });
 
 // ---- the composer ----
@@ -314,7 +357,7 @@ function mentionInput(ta) {
   var at = mentionAtCaret(ta);
   if (!at) { closeMentions(ta); return; }
   loadMembers(function (list) {
-    var me = app ? app.getAttribute('data-viewer') : '';
+    var me = frame() ? frame().viewer : '';
     var items = [];
     for (var i = 0; i < list.length && items.length < 8; i++) {
       var u = list[i];

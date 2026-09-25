@@ -68,3 +68,11 @@ jobs:
       # live delivery, attachments, and backup.
       - run: npm run smoke
         working-directory: dango
+
+      # The page script, in a real browser: live counts, the tab title,
+      # @-completion, the account menu, invite links. The runner image ships
+      # Chrome; the script speaks the DevTools protocol through Node's own
+      # WebSocket, which Node 20 lacks, so it runs on the newer two.
+      - run: npm run test:browser
+        if: matrix.node != 20
+        working-directory: dango

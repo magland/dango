@@ -69,10 +69,35 @@ ${themeMenu()}
 }
 
 /** The count beside a room, or nothing; marked when a mention is among what is unread. */
-export function badge(u: { count: number; mentions: number }): Html {
+export function badge(u: { url: string; count: number; mentions: number }): Html {
   if (u.count === 0) return html`<span class="badge" data-room-badge hidden></span>`;
   const text = u.count > UNREAD_CAP ? `${UNREAD_CAP}+` : String(u.count);
-  return html`<span class="badge ${u.mentions ? 'mention' : ''}" data-room-badge title="${u.count} unread${u.mentions ? `, ${u.mentions} mentioning you` : ''}">${text}</span>`;
+  return html`<span class="badge ${isUrgent(u) ? 'mention' : ''}" data-room-badge title="${u.count} unread${u.mentions ? `, ${u.mentions} mentioning you` : ''}">${text}</span>`;
+}
+
+/**
+ * Whether what is unread is addressed to the viewer: a mention, or anything
+ * in a direct conversation, which is addressed to them by being one. The
+ * page script applies the same rule to live counts.
+ */
+function isUrgent(u: { url: string; count: number; mentions: number }): boolean {
+  return u.count > 0 && (u.mentions > 0 || u.url.startsWith('/d/'));
+}
+
+/**
+ * The tab's title and icon for what is unread: "(3) #general · workspace1",
+ * so a tab left in the background shows that something arrived, and a dot
+ * on the favicon, red when a mention or a direct message is among it, which
+ * is visible even where tabs are too narrow for their titles.
+ */
+function unreadSummary(rooms: RoomUnread[]): { total: number; urgent: boolean } {
+  let total = 0;
+  let urgent = false;
+  for (const r of rooms) {
+    total += r.count;
+    if (isUrgent(r)) urgent = true;
+  }
+  return { total, urgent };
 }
 
 function roomLink(u: RoomUnread, glyph: Html | string, active?: string): Html {
@@ -81,11 +106,8 @@ function roomLink(u: RoomUnread, glyph: Html | string, active?: string): Html {
   return html`<li><a class="${cls}" href="${u.url}" data-room="${u.url}"><span class="room-glyph">${glyph}</span><span class="room-name">${label}</span>${badge(u)}</a></li>`;
 }
 
-function sidebar(opts: PageOpts): Html {
-  const viewer = opts.viewer!;
+function sidebar(opts: PageOpts, rooms: RoomUnread[]): Html {
   const root = opts.root;
-  const auth = viewer.auth;
-  const rooms = unreadRooms(root, auth);
   const privateNames = new Set(listChannels(root).filter((c) => c.private).map((c) => `/c/${encodeURIComponent(c.name)}`));
   const wsName = loadConfig(root).name;
   return html`<nav class="app-side">
@@ -106,21 +128,27 @@ export function layout(title: string, main: Html, opts: PageOpts): string {
   const theme = activeTheme().name;
   const sheet = styleSheet(activeTheme()).tag;
   const script = pageScript().tag;
+  const rooms = opts.viewer ? unreadRooms(opts.root, opts.viewer.auth) : [];
+  const unread = unreadSummary(rooms);
+  const baseTitle = opts.viewer ? `${title} \u00b7 ${loadConfig(opts.root).name}` : title;
+  const fullTitle = unread.total > 0 ? `(${unread.total > UNREAD_CAP ? `${UNREAD_CAP}+` : unread.total}) ${baseTitle}` : baseTitle;
+  const iconHref =
+    `/favicon.svg?t=${encodeURIComponent(theme)}` + (unread.total > 0 ? `&unread=${unread.urgent ? 'urgent' : 'some'}` : '');
   // The frame says which room it shows and who is looking, for the page
   // script: the count stream marks the current room read as messages arrive,
   // and the composer's @-completion needs to know whom not to suggest.
   const body = opts.viewer
-    ? html`<div class="app ${opts.roomsPage ? 'rooms-page' : ''}" data-viewer="${opts.viewer.auth.username}" data-current-room="${opts.active ?? ''}" data-csrf="${opts.viewer.csrf}">${sidebar(opts)}<div class="app-main">${main}</div></div>`
+    ? html`<div class="app ${opts.roomsPage ? 'rooms-page' : ''}" data-viewer="${opts.viewer.auth.username}" data-current-room="${opts.active ?? ''}" data-csrf="${opts.viewer.csrf}">${sidebar(opts, rooms)}<div class="app-main">${main}</div></div>`
     : html`<main class="container" style="padding-top: 48px">${main}</main>`;
   return html`<!doctype html>
 <html lang="en" data-theme-vault="${theme}" data-theme-dark="${darkFor(activeTheme())}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title data-title="${title}">${title}</title>
+<title data-title="${baseTitle}">${fullTitle}</title>
 <link rel="stylesheet" href="/assets/style.css?t=${encodeURIComponent(theme)}&amp;v=${sheet}">
 <link rel="stylesheet" href="/assets/katex/katex.css">
-<link rel="icon" href="/favicon.svg?t=${encodeURIComponent(theme)}" type="image/svg+xml">
+<link rel="icon" href="${iconHref}" type="image/svg+xml">
 <script src="/assets/page.js?v=${script}"></script>
 </head>
 <body>
@@ -297,7 +325,7 @@ export function homePage(root: string, viewer: Viewer): string {
   const wsName = loadConfig(root).name;
   const rows = channels.map((c) => {
     const url = `/c/${encodeURIComponent(c.name)}`;
-    const u = unread.get(url) ?? { count: 0, mentions: 0 };
+    const u = unread.get(url) ?? { url, count: 0, mentions: 0 };
     return html`<li style="margin-bottom:6px"><a href="${url}" data-room="${url}">${c.private ? icon('lock') : '#'} ${c.name} ${badge(u)}</a>${
       c.topic ? html` <span class="muted">- ${c.topic}</span>` : ''
     }</li>`;

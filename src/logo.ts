@@ -11,8 +11,16 @@ export const MARK = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"
  * The favicon: the mark on a tile coloured from the active theme, so it
  * changes with the workspace's appearance, exactly as mochiforge's does.
  */
-export function faviconSvg(theme: Theme = activeTheme()): string {
+export function faviconSvg(theme: Theme = activeTheme(), unread: 'some' | 'urgent' | null = null): string {
   const bg = theme.vars.surface;
   const fg = theme.vars.fg;
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="${bg}"/><g stroke="${fg}" stroke-width="6" stroke-linecap="round"><path d="M14 50L50 14"/></g><g fill="${bg}" stroke="${fg}" stroke-width="6"><circle cx="22" cy="42" r="9"/><circle cx="32" cy="32" r="9"/><circle cx="42" cy="22" r="9"/></g></svg>`;
+  // Unread news puts a dot in the top right corner, where the skewer leaves
+  // room for one: the theme's accent for anything, its danger colour when a
+  // mention or a direct message is waiting. It is ringed in the tile's own
+  // colour so it reads against any tab bar.
+  const dot =
+    unread === null
+      ? ''
+      : `<circle cx="50" cy="14" r="13" fill="${unread === 'urgent' ? theme.vars.danger : theme.vars.accent}" stroke="${bg}" stroke-width="4"/>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="${bg}"/><g stroke="${fg}" stroke-width="6" stroke-linecap="round"><path d="M14 50L50 14"/></g><g fill="${bg}" stroke="${fg}" stroke-width="6"><circle cx="22" cy="42" r="9"/><circle cx="32" cy="32" r="9"/><circle cx="42" cy="22" r="9"/></g>${dot}</svg>`;
 }
