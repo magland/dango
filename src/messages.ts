@@ -23,6 +23,25 @@ import { OpError } from '../../mochiforge/src/ops';
 // decides that, and a racing writer moves to the next one.
 
 export const MAX_MESSAGE = 16 * 1024;
+
+/**
+ * The most one message's attachments may come to, together. The server holds
+ * a whole upload in memory while it arrives, so this bounds what one send can
+ * cost a small machine, and it caps any single file at the same size.
+ */
+export const MAX_ATTACHMENTS_BYTES = 20 * 1024 * 1024;
+
+/**
+ * How far back a send's nonce is looked for among its author's messages. A
+ * retry arrives within seconds of the attempt it repeats, so a short look
+ * back finds it, and a nonce that is not found is simply a new message.
+ */
+const NONCE_LOOKBACK = 50;
+
+/** What a client may send as a nonce: an opaque id of its own making. */
+export function isValidNonce(v: unknown): v is string {
+  return typeof v === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(v);
+}
 export const MAX_REACTION = 32;
 
 export interface Attachment {
@@ -155,13 +174,32 @@ export function checkBody(body: string): string {
   return b;
 }
 
+/**
+ * The message this author already sent with this nonce, if there is one. A
+ * client sends the same nonce again when it retries a send whose outcome it
+ * could not see (the upload arrived, the answer was lost), and that retry has
+ * to find the first message rather than post a second.
+ */
+export function findByNonce(room: string, author: string, nonce: string): Message | null {
+  const ids = messageIds(room).slice(-NONCE_LOOKBACK).reverse();
+  for (const id of ids) {
+    const doc = readDoc(messageFile(room, id));
+    if (doc && doc.meta.nonce === nonce && doc.meta.author === author) return readMessage(room, id);
+  }
+  return null;
+}
+
 export function addMessage(
   room: string,
-  input: { author: string; body: string; files?: Attachment[] }
+  input: { author: string; body: string; files?: Attachment[]; nonce?: string }
 ): Message {
   const body = checkBody(input.body);
   if (body.trim() === '' && !(input.files ?? []).length) {
     throw new OpError('A message needs something in it.');
+  }
+  const total = (input.files ?? []).reduce((n, f) => n + f.size, 0);
+  if (total > MAX_ATTACHMENTS_BYTES) {
+    throw new OpError(`Attachments may come to at most ${MAX_ATTACHMENTS_BYTES / (1024 * 1024)} MB per message.`);
   }
   const dir = messagesDir(room);
   fs.mkdirSync(dir, { recursive: true });
@@ -177,6 +215,7 @@ export function addMessage(
     }
     const meta: Record<string, unknown> = { author: input.author, created: now };
     if (input.files?.length) meta.files = input.files;
+    if (input.nonce) meta.nonce = input.nonce;
     writeDoc(file, meta, body);
     return {
       id,

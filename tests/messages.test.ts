@@ -6,6 +6,8 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import {
   addMessage,
+  findByNonce,
+  isValidNonce,
   deleteMessage,
   editMessage,
   lastMessageId,
@@ -94,4 +96,22 @@ test('attachments ride in the frontmatter and survive a read', () => {
   const m = addMessage(room, { author: 'a', body: 'with a file', files: [{ name: 'x.png', size: 10 }] });
   const read = readMessage(room, m.id)!;
   assert.deepStrictEqual(read.files, [{ name: 'x.png', size: 10 }]);
+});
+
+test('attachments over 20 MB together are refused', () => {
+  const room = tmpRoom();
+  const mb = 1024 * 1024;
+  assert.doesNotThrow(() => addMessage(room, { author: 'a', body: '', files: [{ name: 'x', size: 20 * mb }] }));
+  assert.throws(() => addMessage(room, { author: 'a', body: '', files: [{ name: 'x', size: 12 * mb }, { name: 'y', size: 9 * mb }] }), /20 MB/);
+});
+
+test('a nonce finds the author’s earlier message, and only theirs', () => {
+  const room = tmpRoom();
+  const first = addMessage(room, { author: 'alice', body: 'once', nonce: 'abcdefgh12' });
+  assert.strictEqual(findByNonce(room, 'alice', 'abcdefgh12')?.id, first.id);
+  assert.strictEqual(findByNonce(room, 'bob', 'abcdefgh12'), null);
+  assert.strictEqual(findByNonce(room, 'alice', 'zzzzzzzz99'), null);
+  assert.ok(isValidNonce('abcdefgh12'));
+  assert.ok(!isValidNonce('short'));
+  assert.ok(!isValidNonce('has space in it'));
 });

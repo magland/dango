@@ -152,8 +152,10 @@ await new Promise((resolve, reject) => {
 });
 let nextId = 1;
 const pending = new Map();
+const listeners = [];
 ws.onmessage = (ev) => {
   const msg = JSON.parse(ev.data);
+  if (msg.method) for (const fn of listeners) fn(msg);
   if (msg.id && pending.has(msg.id)) {
     const { resolve, reject } = pending.get(msg.id);
     pending.delete(msg.id);
@@ -179,6 +181,28 @@ async function openPage(cookie) {
     await send('Network.setCookie', { name: 'dango_session', value: cookie, url: base }, sessionId);
   }
   const page = {
+    sessionId,
+    /** Answer every JavaScript dialog (confirm, alert) this page opens from now on, recording its text. */
+    answerDialogs(accept) {
+      const seen = [];
+      listeners.push((msg) => {
+        if (msg.method === 'Page.javascriptDialogOpening' && msg.sessionId === sessionId) {
+          seen.push(msg.params.message);
+          send('Page.handleJavaScriptDialog', { accept }, sessionId);
+        }
+      });
+      return seen;
+    },
+    async setFiles(selector, files) {
+      const { root } = await send('DOM.getDocument', {}, sessionId);
+      const { nodeId } = await send('DOM.querySelector', { nodeId: root.nodeId, selector }, sessionId);
+      await send('DOM.setFileInputFiles', { nodeId, files }, sessionId);
+      await page.eval(`document.querySelector('${selector}').dispatchEvent(new Event('change', { bubbles: true })); true`);
+    },
+    async network(conditions) {
+      await send('Network.enable', {}, sessionId);
+      await send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1, ...conditions }, sessionId);
+    },
     async go(p) {
       await send('Page.navigate', { url: base + p }, sessionId);
       await waitFor(`${p} to load`, () => page.eval("document.readyState === 'complete'"));
@@ -211,13 +235,13 @@ const a1 = await openPage(aliceCookie);
 await a1.go('/c/random');
 if (!(await a1.eval("!!document.querySelector('.app')"))) fail('alice is not signed in');
 const title0 = await a1.eval('document.title');
-if (!/^#random · /.test(title0)) fail(`the tab title does not name the room and workspace: ${title0}`);
-ok('the tab title names the room and the workspace');
+if (title0 !== 'dango') fail(`the tab title is not the workspace's name alone: ${title0}`);
+ok('the tab title is the workspace’s name, not the room’s');
 
 await api(bob, 'POST', '/channels/general/messages', { body: 'news in general' });
 await waitFor('the #general badge to show 1', async () => (await a1.eval(badgeOf('/c/general'))) === '1');
 ok('a new message in another channel updates its badge live');
-await waitFor('the title to count it', async () => /^\(1\) #random/.test(await a1.eval('document.title')));
+await waitFor('the title to count it', async () => (await a1.eval('document.title')) === '(1) dango');
 await waitFor('the favicon to carry a dot', async () =>
   /unread=some/.test(await a1.eval("document.querySelector('link[rel=icon]').getAttribute('href')"))
 );
@@ -253,13 +277,13 @@ await a2.eval(
   "Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }); document.dispatchEvent(new Event('visibilitychange')); true"
 );
 await api(bob, 'POST', '/channels/general/messages', { body: 'while alice is away' });
-await waitFor('the hidden tab’s title to count it', async () => /^\(1\) #general/.test(await a2.eval('document.title')));
+await waitFor('the hidden tab’s title to count it', async () => (await a2.eval('document.title')) === '(1) dango');
 if (!(await api(alice, 'GET', '/unread')).rooms.some((r) => r.url === '/c/general')) fail('a hidden tab reported a message read');
 ok('a hidden tab counts what arrives in its own room, in its title');
 await a2.eval(
   "Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' }); document.dispatchEvent(new Event('visibilitychange')); true"
 );
-await waitFor('the returning tab’s title to clear', async () => /^#general/.test(await a2.eval('document.title')));
+await waitFor('the returning tab’s title to clear', async () => (await a2.eval('document.title')) === 'dango');
 await waitFor('the server to hear it was read', async () => !(await api(alice, 'GET', '/unread')).rooms.some((r) => r.url === '/c/general'));
 ok('coming back to the tab reads it, and clears the title');
 
@@ -283,6 +307,98 @@ const box = await a2.eval(
 );
 if (!box.open || box.top < 0 || box.bottom > box.h) fail(`the account menu is not on screen: ${JSON.stringify(box)}`);
 ok('clicking your name opens the account menu, entirely on screen');
+
+// ---- sending: one message per send, however often the button is pressed ----
+
+const s1 = await openPage(await sessionCookie(bob));
+await s1.go('/c/random');
+const lastId = async () => (await api(bob, 'GET', '/channels/random/messages?limit=1')).messages[0]?.id ?? 0;
+const beforeSend = await lastId();
+const bigFile = path.join(tmp, 'recording.bin');
+fs.writeFileSync(bigFile, Buffer.alloc(3 * 1024 * 1024, 7));
+await s1.eval("document.querySelector('.composer textarea').value = 'a slow upload'; true");
+await s1.setFiles('.composer input[type=file]', [bigFile]);
+if (!/3\.0 MB/.test(await s1.eval("document.querySelector('[data-file-total]').textContent"))) fail('the composer does not show the chosen files’ size');
+ok('choosing files shows their total size beside the picker');
+// About a megabyte a second, so the upload lasts long enough to press again.
+await s1.network({ uploadThroughput: 1024 * 1024 });
+await s1.eval("document.querySelector('.composer button[type=submit]').click(); true");
+await waitFor('the composer to lock and show progress', async () =>
+  s1.eval("document.querySelector('.composer button[type=submit]').disabled && /Uploading/.test(document.querySelector('[data-send-status]').textContent)")
+);
+ok('while sending, the button is disabled and the upload’s progress is shown');
+await s1.eval("document.querySelector('form[data-composer]').requestSubmit(); true");
+await s1.eval("document.querySelector('.composer textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); true");
+await waitFor('the send to finish', async () => s1.eval("!document.querySelector('form[data-composer]').hasAttribute('data-busy')"), 20000);
+await s1.network({});
+if ((await lastId()) !== beforeSend + 1) fail(`pressing Send again during an upload sent more than once (${beforeSend} -> ${await lastId()})`);
+if ((await s1.eval("document.querySelector('.composer textarea').value")) !== '') fail('the composer was not cleared after sending');
+ok('submitting and pressing Enter again during the upload still sends once');
+await waitFor('the attachment’s size to show on the message', async () =>
+  /3\.0 MB/.test(await s1.eval("document.getElementById('msg-list').lastElementChild.textContent"))
+);
+ok('the sent attachment shows its size');
+
+await s1.eval("document.querySelector('.composer textarea').value = 'sent while offline'; true");
+await s1.network({ offline: true });
+await s1.eval("document.querySelector('.composer button[type=submit]').click(); true");
+await waitFor('the failure to be shown', async () =>
+  /Not sent: the connection/.test(await s1.eval("document.querySelector('[data-send-status]').textContent"))
+);
+if ((await s1.eval("document.querySelector('.composer textarea').value")) !== 'sent while offline') fail('a failed send lost the text');
+if (await s1.eval("document.querySelector('.composer button[type=submit]').disabled")) fail('a failed send left the button disabled');
+ok('a send that fails keeps the message, says why, and can be sent again');
+await s1.network({});
+const beforeRetry = await lastId();
+await s1.eval("document.querySelector('.composer button[type=submit]').click(); true");
+await waitFor('the retry to go through', async () => (await lastId()) === beforeRetry + 1);
+ok('sending again after the failure delivers it once');
+
+fs.writeFileSync(path.join(tmp, 'huge.bin'), Buffer.alloc(21 * 1024 * 1024));
+await s1.eval("document.querySelector('.composer textarea').value = 'too big'; true");
+await s1.setFiles('.composer input[type=file]', [path.join(tmp, 'huge.bin')]);
+const beforeHuge = await lastId();
+await s1.eval("document.querySelector('.composer button[type=submit]').click(); true");
+await waitFor('the size refusal', async () => /at most 20\.0 MB/.test(await s1.eval("document.querySelector('[data-send-status]').textContent")));
+await sleep(300);
+if ((await lastId()) !== beforeHuge) fail('an oversized attachment was sent');
+ok('attachments over 20 MB are refused before any of it is uploaded');
+await s1.setFiles('.composer input[type=file]', []);
+
+// ---- deleting asks first ----
+
+const doomed = (await api(bob, 'POST', '/channels/random/messages', { body: 'delete me' })).id;
+await waitFor('the message to arrive', async () => s1.eval(`!!document.getElementById('msg-${doomed}')`));
+const declined = s1.answerDialogs(false);
+await s1.eval(`document.querySelector('#msg-${doomed} a[data-delete-message]').click(); true`);
+await waitFor('the confirmation to be asked', async () => declined.length === 1);
+await sleep(500);
+if ((await api(bob, 'GET', `/channels/random/messages/${doomed}`)).deleted) fail('a declined confirmation still deleted the message');
+ok('deleting a message asks first, and declining keeps it');
+listeners.length = 0;
+s1.answerDialogs(true);
+await s1.eval(`document.querySelector('#msg-${doomed} a[data-delete-message]').click(); true`);
+await waitFor('the message to be deleted', async () => (await api(bob, 'GET', `/channels/random/messages/${doomed}`)).deleted === true);
+await waitFor('the page to show it deleted', async () => /This message was deleted/.test(await s1.eval(`document.getElementById('msg-${doomed}').textContent`)));
+ok('accepting deletes it, without leaving the room');
+
+// ---- pinning, live on another page ----
+
+const pinned = (await api(bob, 'POST', '/channels/random/messages', { body: 'pin me, and see https://example.com/page' })).id;
+const watcher = await openPage(aliceCookie);
+await watcher.go('/c/random');
+await waitFor('the message to show', async () => s1.eval(`!!document.getElementById('msg-${pinned}')`));
+await s1.eval(`document.querySelector('#msg-${pinned} form[action$="/pin"] button').click(); true`);
+await waitFor('the pinned marker on the pinner’s page', async () => /Pinned by bob/.test(await s1.eval(`document.getElementById('msg-${pinned}').textContent`)));
+await waitFor('the pinned marker on another page, live', async () => /Pinned by bob/.test(await watcher.eval(`document.getElementById('msg-${pinned}').textContent`)));
+await waitFor('the header count on another page, live', async () => (await watcher.eval("document.querySelector('[data-pin-count]').textContent")) === '1');
+ok('pinning marks the message and counts it in the header, live on every open page');
+await watcher.eval(`document.querySelector('#msg-${pinned} form[action$="/unpin"] button').click(); true`);
+await waitFor('the unpin to reach the other page', async () => (await s1.eval("document.querySelector('[data-pin-count]').textContent")) === '');
+ok('anyone in the room can unpin, and every page hears it');
+const link = await watcher.eval(`(() => { const a = document.querySelector('#msg-${pinned} .msg-body a[href^="https://example.com"]'); return a ? a.target + ' ' + a.rel : ''; })()`);
+if (!/^_blank .*noopener/.test(link)) fail(`a link out of the workspace does not open in a new tab: ${link}`);
+ok('a link out of the workspace opens in a new tab');
 
 // ---- an invite link ----
 

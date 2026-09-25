@@ -1,6 +1,6 @@
 import { loadVault } from '../../mochiforge/src/vault';
 import { listeningUsers, publish, publishToUser } from './events';
-import { Attachment, Message, addMessage, readMessage } from './messages';
+import { Attachment, Message, addMessage, findByNonce, readMessage } from './messages';
 import { Room } from './rooms';
 import { audienceOf, isNewsFor, markRead, unreadIn } from './reads';
 
@@ -13,12 +13,25 @@ import { audienceOf, isNewsFor, markRead, unreadIn } from './reads';
 export function postMessage(
   root: string,
   room: Room,
-  input: { author: string; body: string; files?: Attachment[] },
-  /** Work to do with the new id before anyone is told: writing the attachments. */
-  settle?: (id: number) => void
+  input: { author: string; body: string; files?: Attachment[]; nonce?: string },
+  opts: {
+    /** Charge the sender's rate limits; throws when they are spent. A retry found by its nonce is not charged. */
+    charge?: () => void;
+    /** Work to do with the new id before anyone is told: writing the attachments. */
+    settle?: (id: number) => void;
+  } = {}
 ): Message {
+  // A retry of a send that already arrived answers with the message it made,
+  // and nothing is written or announced again. The look and the write below
+  // are one synchronous stretch, so two copies of one request racing in this
+  // process cannot both miss and both write.
+  if (input.nonce) {
+    const earlier = findByNonce(room.dir, input.author, input.nonce);
+    if (earlier) return earlier;
+  }
+  opts.charge?.();
   const m = addMessage(room.dir, input);
-  settle?.(m.id);
+  opts.settle?.(m.id);
   markRead(root, input.author, room.url, m.id);
   publish(room.url, { type: 'message', message: m });
   if (room.kind === 'thread') {

@@ -37,12 +37,14 @@ The same command deploys updates, and `dango backup ~/backups/chat --snapshot` k
 
 ## What it does
 
-- **Channels,** public to every member or private to a member list. Messages are markdown with KaTeX and emoji.
+- **Channels,** public to every member or private to a member list. Messages are markdown with KaTeX and emoji; links out of the workspace open in a new tab.
 - **@mentions,** completed as you type; a message naming you is marked in the room and counted in the sidebar.
-- **Unread counts** in the sidebar and the tab title, kept on the server per person, so reading a room on one device clears it on the others.
-- **Threads** hung off any message, **reactions** toggled per person, **editing and deleting** your own messages (a deletion leaves a tombstone, so a thread keeps its anchor).
+- **Unread counts** in the sidebar, the tab title, and a dot on the tab's icon, kept on the server per person, so reading a room on one device clears it on the others.
+- **Threads** hung off any message, **reactions** toggled per person, **pinned messages** per room, **editing** your own messages for two hours after sending them, and **deleting** them after a confirmation (a deletion leaves a tombstone, so a thread keeps its anchor).
 - **Direct messages,** one conversation per set of up to nine people.
-- **File attachments,** stored in the workspace and served only to who could read the message. Images, audio, and video show or play in place; everything else is a download, under a sandbox policy so an uploaded page is never a page of ours.
+- **File attachments,** up to 20 MB per message, stored in the workspace and served only to who could read the message, each shown with its size. Images, audio, and video show or play in place; everything else is a download, under a sandbox policy so an uploaded page is never a page of ours.
+- **Sending that survives trouble:** an upload shows its progress, the composer locks until it finishes, and a send that fails keeps the message and says why. Each send carries a nonce, so sending again after a failure whose outcome was unclear never makes a second message.
+- **Rate limits per person,** sized for someone typing: 20 messages a minute, 300 an hour, 200 MB of uploads an hour, and 60 other writes (reactions, edits, deletions, new rooms) a minute. A refusal says how long to wait. They are settings in `config.json` (`limits.messagesPerMinute`, `messagesPerHour`, `uploadMbPerHour`, `actionsPerMinute`; 0 turns one off) and apply to the API as well, so a script cannot go around them.
 - **Live delivery** over server-sent events. Every form also works with no script at all; the page script only makes things quieter.
 - **Search** across everything you can read, walked from the files when asked.
 - **Invite links:** adding someone gives a link that signs them in with one press of a button, the token carried in its fragment so it never reaches a server log.
@@ -66,6 +68,7 @@ A workspace is one directory. No database, no state outside it; backup is `cp -a
   dms/
     1/
       conversation.json   participants, and the same layout as a channel
+                          (each room also keeps pins.json, its pinned messages)
   users/
     alice/
       read.json           the newest message she has seen in each room

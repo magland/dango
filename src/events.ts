@@ -21,6 +21,8 @@ export interface RoomEvent {
    * reactions, deletions-as-tombstones, and reply counts are all this). */
   type: 'message' | 'update';
   message: Message;
+  /** The room's pinned count, when this update pinned or unpinned the message. */
+  pins?: number;
 }
 
 type Listener = (event: RoomEvent) => void;
@@ -121,7 +123,12 @@ export function serveEvents(
 ): void {
   const stream = openStream(res);
   const send = (event: RoomEvent) => {
-    stream.write(String(event.message.id), { type: event.type, id: event.message.id, html: render(event) });
+    stream.write(String(event.message.id), {
+      type: event.type,
+      id: event.message.id,
+      html: render(event),
+      ...(event.pins !== undefined ? { pins: event.pins } : {}),
+    });
   };
   // Catch-up first: messages that arrived between the page render and this
   // stream opening. The client replaces any element it already has, so a

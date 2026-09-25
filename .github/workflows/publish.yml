@@ -120,7 +120,9 @@ jobs:
         working-directory: dango
         run: |
           version="${{ steps.plan.outputs.version }}"
-          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+          # Asked of the remote: the checkout fetches no tags, so a local
+          # look would call every existing tag new and fail pushing it.
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
             echo "Tag v$version already exists; leaving it alone."
             exit 0
           fi

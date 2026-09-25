@@ -2,7 +2,7 @@ import { avatar } from '../../mochiforge/src/avatar';
 import { Html, html, joinHtml, raw } from '../../mochiforge/src/html';
 import { IconName, icon } from '../../mochiforge/src/icons';
 import { renderMarkdown } from '../../mochiforge/src/markdown';
-import { formatDay, timeTag } from '../../mochiforge/src/render';
+import { formatDay, formatSize, timeTag } from '../../mochiforge/src/render';
 import { Viewer } from '../../mochiforge/src/session';
 import { THEMES, activeTheme, darkFor } from '../../mochiforge/src/themes';
 import { UserProfile, Vault, loadVault, userExists } from '../../mochiforge/src/vault';
@@ -10,9 +10,10 @@ import { ChannelInfo, listChannels } from './channels';
 import { loadConfig } from './config';
 import { DmInfo, dmTitle } from './dms';
 import { MARK } from './logo';
-import { Attachment, Message } from './messages';
+import { Attachment, MAX_ATTACHMENTS_BYTES, Message } from './messages';
 import { pageScript } from './pagescript';
 import { canDeleteMessage, canEditMessage, canSeeChannel, isSiteAdmin } from './perms';
+import { Pin, pinOf, readPins } from './pins';
 import { RoomUnread, UNREAD_CAP, mentionsUser, unreadRooms } from './reads';
 import { Room } from './rooms';
 import { styleSheet } from './style';
@@ -130,7 +131,9 @@ export function layout(title: string, main: Html, opts: PageOpts): string {
   const script = pageScript().tag;
   const rooms = opts.viewer ? unreadRooms(opts.root, opts.viewer.auth) : [];
   const unread = unreadSummary(rooms);
-  const baseTitle = opts.viewer ? `${title} \u00b7 ${loadConfig(opts.root).name}` : title;
+  // The workspace's name, not the page's: a tab is a workspace, and the room
+  // in view changes too often to be what a tab is known by.
+  const baseTitle = opts.viewer ? loadConfig(opts.root).name : title;
   const fullTitle = unread.total > 0 ? `(${unread.total > UNREAD_CAP ? `${UNREAD_CAP}+` : unread.total}) ${baseTitle}` : baseTitle;
   const iconHref =
     `/favicon.svg?t=${encodeURIComponent(theme)}` + (unread.total > 0 ? `&unread=${unread.urgent ? 'urgent' : 'some'}` : '');
@@ -174,30 +177,51 @@ const VIDEO_RE = /\.(mp4|m4v|webm|ogv|mov)$/i;
 
 function bodyHtml(root: string, body: string): Html {
   return raw(
-    renderMarkdown(body, {
-      rawBase: '',
-      blobBase: '',
-      mentions: (name) => userExists(root, name),
-    })
+    externalLinksInNewTab(
+      renderMarkdown(body, {
+        rawBase: '',
+        blobBase: '',
+        mentions: (name) => userExists(root, name),
+      })
+    )
   );
 }
+
+/**
+ * A link out of the workspace opens in a new tab, so following one does not
+ * leave the conversation; a link within it (an @mention, a room) opens in
+ * place. The renderer's output is sanitized, with every attribute quoted, so
+ * a pattern over its <a> tags is exact; a target the message's own HTML set
+ * is replaced rather than kept. The renderer already gives these links
+ * rel="noopener noreferrer", which is what makes a new tab safe to open.
+ */
+export function externalLinksInNewTab(rendered: string): string {
+  return rendered.replace(/<a (href="https?:\/\/[^"]*"[^>]*)>/gi, (_m, attrs: string) => `<a ${attrs.replace(/\s+target="[^"]*"/gi, '')} target="_blank">`);
+}
+
+/** A pushpin, drawn in the icon set's manner: a 16px box, currentColor, one stroke weight. */
+const PIN_ICON = raw(
+  '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2h4M7 2v4L4.5 9h7L9 6V2M8 9v5"/></svg>'
+);
 
 function fileRows(roomUrl: string, id: number, files: Attachment[]): Html | '' {
   if (!files.length) return '';
   const rows = files.map((f) => {
     const href = `${roomUrl}/files/${id}/${encodeURIComponent(f.name)}`;
+    // The approximate size, quietly, so a large file is known before it is opened.
+    const size = html`<span class="file-size">${formatSize(f.size)}</span>`;
     if (IMAGE_RE.test(f.name)) {
-      return html`<li><a href="${href}"><img class="msg-img" src="${href}" alt="${f.name}"></a></li>`;
+      return html`<li class="msg-media"><a href="${href}" target="_blank" rel="noopener"><img class="msg-img" src="${href}" alt="${f.name}"></a><span class="file-caption">${f.name} ${size}</span></li>`;
     }
     // The name links to the file above its player, so it can still be saved.
     // Audio is not fetched until played; a video fetches enough for a poster.
     if (AUDIO_RE.test(f.name)) {
-      return html`<li class="msg-media"><a href="${href}">${icon('file')} ${f.name}</a><audio controls preload="none" src="${href}"></audio></li>`;
+      return html`<li class="msg-media"><a href="${href}" target="_blank" rel="noopener">${icon('file')} ${f.name} ${size}</a><audio controls preload="none" src="${href}"></audio></li>`;
     }
     if (VIDEO_RE.test(f.name)) {
-      return html`<li class="msg-media"><a href="${href}">${icon('file')} ${f.name}</a><video class="msg-video" controls preload="metadata" src="${href}"></video></li>`;
+      return html`<li class="msg-media"><a href="${href}" target="_blank" rel="noopener">${icon('file')} ${f.name} ${size}</a><video class="msg-video" controls preload="metadata" src="${href}"></video></li>`;
     }
-    return html`<li><a href="${href}">${icon('file')} ${f.name}</a></li>`;
+    return html`<li><a href="${href}" target="_blank" rel="noopener">${icon('file')} ${f.name} ${size}</a></li>`;
   });
   return html`<ul class="msg-files">${joinHtml(rows)}</ul>`;
 }
@@ -205,7 +229,7 @@ function fileRows(roomUrl: string, id: number, files: Attachment[]): Html | '' {
 const QUICK_REACTIONS = ['\u{1F44D}', '✅', '\u{1F440}', '\u{1F389}', '❤️', '\u{1F604}'];
 
 function reactForm(roomUrl: string, id: number, emoji: string, viewer: Viewer, mine: boolean, count?: number): Html {
-  return html`<form data-react method="post" action="${roomUrl}/m/${id}/react">${csrfField(viewer)}<input type="hidden" name="emoji" value="${emoji}"><button class="${count === undefined ? 'dd-item' : `react-pill ${mine ? 'mine' : ''}`}" type="submit" title="${mine ? 'Remove your reaction' : 'React'}">${emoji}${count !== undefined ? html` <span>${count}</span>` : ''}</button></form>`;
+  return html`<form data-quiet method="post" action="${roomUrl}/m/${id}/react">${csrfField(viewer)}<input type="hidden" name="emoji" value="${emoji}"><button class="${count === undefined ? 'dd-item' : `react-pill ${mine ? 'mine' : ''}`}" type="submit" title="${mine ? 'Remove your reaction' : 'React'}">${emoji}${count !== undefined ? html` <span>${count}</span>` : ''}</button></form>`;
 }
 
 function msgTools(room: Room, m: Message, viewer: Viewer): Html {
@@ -217,14 +241,18 @@ function msgTools(room: Room, m: Message, viewer: Viewer): Html {
   );
   if (room.kind !== 'thread') {
     parts.push(html`<a href="${room.url}/t/${m.id}" title="Reply in thread">${icon('comment')}</a>`);
+    const pinned = pinOf(room.dir, m.id) !== null;
+    parts.push(
+      html`<form data-quiet method="post" action="${room.url}/m/${m.id}/${pinned ? 'unpin' : 'pin'}">${csrfField(viewer)}<button type="submit" title="${pinned ? 'Unpin' : 'Pin to the room'}" class="${pinned ? 'is-pinned' : ''}">${PIN_ICON}</button></form>`
+    );
   }
-  if (canEditMessage(viewer.auth, m.author)) {
+  if (canEditMessage(viewer.auth, m)) {
     parts.push(html`<a href="${room.url}/m/${m.id}/edit" title="Edit">${icon('pencil')}</a>`);
   }
+  // A link to a page that asks first. With script, the page script asks in a
+  // dialog instead and deletes without leaving the room.
   if (canDeleteMessage(viewer.auth, m.author)) {
-    parts.push(
-      html`<form method="post" action="${room.url}/m/${m.id}/delete">${csrfField(viewer)}<button type="submit" title="Delete">${icon('trash')}</button></form>`
-    );
+    parts.push(html`<a href="${room.url}/m/${m.id}/delete" data-delete-message title="Delete">${icon('trash')}</a>`);
   }
   return html`<span class="msg-tools">${joinHtml(parts)}</span>`;
 }
@@ -252,8 +280,9 @@ export function messageHtml(root: string, room: Room, m: Message, viewer: Viewer
   // A message that names the viewer is marked down its left side, so it can be
   // found in a scroll the way a flagged line can be found on a page.
   const mine = mentionsUser(m.body, viewer.auth.username) ? 'mentions-me' : '';
-  return html`<li class="msg ${mine}" id="msg-${m.id}" data-mid="${m.id}">${avatar(m.author, 32)}<div class="msg-main">
-<div class="msg-head"><a class="author" href="/${encodeURIComponent(m.author)}">${m.author}</a>${timeTag(m.created)}${m.edited ? html`<span class="msg-edited">(edited)</span>` : ''}</div>
+  const pin = room.kind === 'thread' ? null : pinOf(room.dir, m.id);
+  return html`<li class="msg ${mine} ${pin ? 'pinned' : ''}" id="msg-${m.id}" data-mid="${m.id}">${avatar(m.author, 32)}<div class="msg-main">
+${pin ? html`<div class="pinned-by">${PIN_ICON} Pinned by ${pin.by}</div>` : ''}<div class="msg-head"><a class="author" href="/${encodeURIComponent(m.author)}">${m.author}</a>${timeTag(m.created)}${m.edited ? html`<span class="msg-edited">(edited)</span>` : ''}</div>
 <div class="msg-body markdown-body">${bodyHtml(root, m.body)}</div>
 ${fileRows(room.url, m.id, m.files)}${below}
 </div>${msgTools(room, m, viewer)}</li>`;
@@ -278,11 +307,19 @@ function messageList(root: string, room: Room, messages: Message[], viewer: View
   return html`<div class="msgs"><ul id="msg-list" data-stream="${room.url}/events" data-last="${last}">${joinHtml(items)}</ul></div>`;
 }
 
+/**
+ * The composer. data-max-bytes is the attachments' cap, so the page script
+ * can refuse an oversized send before uploading any of it; the nonce is
+ * filled by the page script, once per message, and sent again on a retry so
+ * the server can tell a retry from a second message.
+ */
 function composer(room: Room, viewer: Viewer, placeholder: string): Html {
-  return html`<div class="composer"><form data-composer method="post" action="${room.url}/messages" enctype="multipart/form-data">${csrfField(viewer)}<div class="composer-box">
+  return html`<div class="composer"><form data-composer data-max-bytes="${MAX_ATTACHMENTS_BYTES}" method="post" action="${room.url}/messages" enctype="multipart/form-data">${csrfField(viewer)}<input type="hidden" name="nonce" value=""><div class="composer-box">
 <div class="mention-list" data-mention-list hidden role="listbox"></div>
+<div class="send-progress" data-send-progress hidden><div></div></div>
 <textarea name="body" rows="1" placeholder="${placeholder}" aria-label="${placeholder}"></textarea>
-<div class="composer-row"><input type="file" name="files" multiple aria-label="Attach files"><span class="hint">Enter sends, Shift+Enter is a new line, markdown works</span><button class="btn btn-primary" type="submit">Send</button></div>
+<div class="send-status" data-send-status role="status" aria-live="polite" hidden></div>
+<div class="composer-row"><input type="file" name="files" multiple aria-label="Attach files"><span class="file-size" data-file-total></span><span class="hint">Enter sends, Shift+Enter is a new line, markdown works</span><button class="btn btn-primary" type="submit">Send</button></div>
 </div></form></div>`;
 }
 
@@ -290,9 +327,20 @@ function composer(room: Room, viewer: Viewer, placeholder: string): Html {
 
 function roomHead(room: Room, tools: Html | '' = ''): Html {
   const topic = room.channel?.topic;
+  const pins = readPins(room.dir).length;
+  const pinsLink = html`<a class="topbar-icon pins-link" href="${room.url}/pins" title="Pinned messages" aria-label="Pinned messages, ${pins}">${PIN_ICON}<span data-pin-count>${pins || ''}</span></a>`;
   return html`<header class="room-head"><a class="back-link topbar-icon" href="/" aria-label="All rooms">&#8592;</a><h1>${room.title}</h1>${
     topic ? html`<span class="room-topic">${topic}</span>` : ''
-  }<div class="room-tools">${tools}</div></header>`;
+  }<div class="room-tools">${pinsLink}${tools}</div></header>`;
+}
+
+/** A room's pinned messages, most recently pinned first, each whole. */
+export function pinsPage(root: string, room: Room, pinned: { pin: Pin; message: Message }[], viewer: Viewer): string {
+  const content = html`<h1>Pinned in ${room.title}</h1>
+<p><a href="${room.url}">Back to ${room.title}</a></p>
+${pinned.length === 0 ? html`<p class="muted">Nothing is pinned here yet. Pin a message from its tools, the pushpin that appears when you point at it.</p>` : ''}
+<ul class="pins-list" style="list-style:none;margin:0;padding:0" data-pins>${joinHtml(pinned.map(({ message }) => messageHtml(root, room, message, viewer)))}</ul>`;
+  return doc(`Pinned in ${room.title}`, content, { viewer, root, active: room.url });
 }
 
 export function channelPage(root: string, room: Room, messages: Message[], viewer: Viewer): string {
@@ -390,7 +438,7 @@ export function channelSettingsPage(
     ? joinHtml(
         c.members.map(
           (m) => html`<li style="display:flex;align-items:center;gap:8px;margin-bottom:4px">${avatar(m, 20)} <a href="/${encodeURIComponent(m)}">${m}</a>
-<form method="post" action="${room.url}/members/remove" style="margin-left:auto">${csrfField(viewer)}<input type="hidden" name="user" value="${m}"><button class="btn-link" type="submit">${m === viewer.auth.username ? 'Leave' : 'Remove'}</button></form></li>`
+<form method="post" action="${room.url}/members/remove" style="margin-left:auto" data-confirm="${m === viewer.auth.username ? `Leave #${c.name}? You will need to be added back.` : `Remove ${m} from #${c.name}?`}">${csrfField(viewer)}<input type="hidden" name="user" value="${m}"><button class="btn-link" type="submit">${m === viewer.auth.username ? 'Leave' : 'Remove'}</button></form></li>`
         )
       )
     : '';
@@ -405,7 +453,7 @@ export function channelSettingsPage(
   const danger = admin
     ? html`<div class="danger-zone"><h3>Delete this channel</h3>
 <p>Everything said in it goes with it. There is no undo.</p>
-<form method="post" action="${room.url}/delete">${csrfField(viewer)}<button class="btn btn-danger" type="submit">Delete #${c.name}</button></form></div>`
+<form method="post" action="${room.url}/delete" data-confirm="Delete #${c.name} and everything said in it? There is no undo.">${csrfField(viewer)}<button class="btn btn-danger" type="submit">Delete #${c.name}</button></form></div>`
     : '';
   const content = html`<h1>${room.title}</h1>
 ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.flash ? html`<div class="flash">${opts.flash}</div>` : ''}
@@ -496,7 +544,7 @@ export function adminPage(root: string, viewer: Viewer, vault: Vault, opts: { fl
 <td class="muted">${u.tokens.length} ${u.tokens.length === 1 ? 'token' : 'tokens'}</td>
 <td style="text-align:right;white-space:nowrap">
 <form method="post" action="/admin/users/token" style="display:inline">${csrfField(viewer)}<input type="hidden" name="user" value="${name}"><button class="btn-link" type="submit">New token</button></form>
-${isSelf ? '' : html` · <form method="post" action="/admin/users/admin" style="display:inline">${csrfField(viewer)}<input type="hidden" name="user" value="${name}"><input type="hidden" name="value" value="${u.siteAdmin ? '0' : '1'}"><button class="btn-link" type="submit">${u.siteAdmin ? 'Revoke admin' : 'Make admin'}</button></form> · <form method="post" action="/admin/users/remove" style="display:inline">${csrfField(viewer)}<input type="hidden" name="user" value="${name}"><button class="btn-link" type="submit">Remove</button></form>`}
+${isSelf ? '' : html` · <form method="post" action="/admin/users/admin" style="display:inline">${csrfField(viewer)}<input type="hidden" name="user" value="${name}"><input type="hidden" name="value" value="${u.siteAdmin ? '0' : '1'}"><button class="btn-link" type="submit">${u.siteAdmin ? 'Revoke admin' : 'Make admin'}</button></form> · <form method="post" action="/admin/users/remove" style="display:inline" data-confirm="Remove ${name} and every token they hold?">${csrfField(viewer)}<input type="hidden" name="user" value="${name}"><button class="btn-link" type="submit">Remove</button></form>`}
 </td></tr>`;
   });
   const content = html`<h1>Admin</h1>
@@ -563,6 +611,17 @@ ${signedInAs ? html`<div class="flash">This browser is signed in as <strong>${si
 <button class="btn btn-primary" type="submit">Join the workspace</button>
 </form></div>`;
   return layout('Invite', content, { viewer: null, root: '' });
+}
+
+export function deleteMessagePage(root: string, room: Room, m: Message, viewer: Viewer): string {
+  const content = html`<h1>Delete this message?</h1>
+<ul class="thread-anchor" style="list-style:none;margin:0 0 16px;padding:0">${messageHtml(root, room, m, viewer)}</ul>
+<p>It will read "This message was deleted." for everyone, and its attachments are removed. There is no undo.</p>
+<form method="post" action="${room.url}/m/${m.id}/delete">${csrfField(viewer)}
+<button class="btn btn-danger" type="submit">Delete message</button>
+<a class="btn" href="${room.url}">Cancel</a>
+</form>`;
+  return doc('Delete message', content, { viewer, root, active: room.parent?.url ?? room.url });
 }
 
 export function editMessagePage(root: string, room: Room, m: Message, viewer: Viewer, error?: string): string {

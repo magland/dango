@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { AuthResult } from '../../mochiforge/src/vault';
 import { addMember, createChannel, deleteChannel, listChannels, removeMember } from '../src/channels';
 import { dmTitle, listDmsFor, openDm } from '../src/dms';
-import { canDeleteMessage, canEditMessage, canSeeChannel, canSeeDm } from '../src/perms';
+import { EDIT_WINDOW_MS, canDeleteMessage, canEditMessage, canSeeChannel, canSeeDm } from '../src/perms';
 import { channelRoom, dmRoom, threadRoom } from '../src/rooms';
 import { addMessage } from '../src/messages';
 import { isValidChannelName, isValidWorkspaceUserName } from '../src/workspace';
@@ -64,9 +64,14 @@ test('conversations belong to their participants and reuse one per set', () => {
   assert.strictEqual(dmTitle(dm, 'alice'), 'bob');
 });
 
-test('editing is the author’s; deleting is the author’s or a site admin’s', () => {
-  assert.strictEqual(canEditMessage(auth('alice'), 'alice'), true);
-  assert.strictEqual(canEditMessage(auth('root', true), 'alice'), false);
+test('editing is the author’s, for two hours; deleting is the author’s or a site admin’s', () => {
+  const now = Date.now();
+  const fresh = { author: 'alice', created: new Date(now - 60_000).toISOString() };
+  const old = { author: 'alice', created: new Date(now - EDIT_WINDOW_MS - 1000).toISOString() };
+  assert.strictEqual(canEditMessage(auth('alice'), fresh, now), true);
+  assert.strictEqual(canEditMessage(auth('root', true), fresh, now), false);
+  assert.strictEqual(canEditMessage(auth('alice'), old, now), false);
+  assert.strictEqual(canEditMessage(auth('alice'), { author: 'alice', created: 'garbled' }, now), false);
   assert.strictEqual(canDeleteMessage(auth('alice'), 'alice'), true);
   assert.strictEqual(canDeleteMessage(auth('bob'), 'alice'), false);
   assert.strictEqual(canDeleteMessage(auth('root', true), 'alice'), true);

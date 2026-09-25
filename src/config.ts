@@ -15,6 +15,13 @@ export interface LimitsConfig {
   requestsPerMinute: number;
   /** Failed credential checks per address per username, per 15 minutes. 0 disables. */
   authFailures: number;
+  /** Messages one person may send per minute, and per hour. 0 disables either. */
+  messagesPerMinute: number;
+  messagesPerHour: number;
+  /** Megabytes of attachments one person may upload per hour. 0 disables. */
+  uploadMbPerHour: number;
+  /** Reactions, edits, deletions, and new rooms, together, per person per minute. 0 disables. */
+  actionsPerMinute: number;
 }
 
 export interface NetworkConfig {
@@ -34,7 +41,16 @@ const DEFAULTS: WorkspaceConfig = {
   name: 'dango',
   theme: DEFAULT_THEME,
   network: { trustProxy: false },
-  limits: { requestsPerMinute: 600, authFailures: 10 },
+  // Sized for people using the interface: a burst of quick messages passes,
+  // a sustained stream at a pace nobody types does not.
+  limits: {
+    requestsPerMinute: 600,
+    authFailures: 10,
+    messagesPerMinute: 20,
+    messagesPerHour: 300,
+    uploadMbPerHour: 200,
+    actionsPerMinute: 60,
+  },
 };
 
 export function configFilePath(root: string): string {
@@ -65,6 +81,10 @@ function normalize(parsed: unknown): WorkspaceConfig {
     const l = limits as Record<string, unknown>;
     out.limits.requestsPerMinute = num(l.requestsPerMinute, DEFAULTS.limits.requestsPerMinute);
     out.limits.authFailures = num(l.authFailures, DEFAULTS.limits.authFailures);
+    out.limits.messagesPerMinute = num(l.messagesPerMinute, DEFAULTS.limits.messagesPerMinute);
+    out.limits.messagesPerHour = num(l.messagesPerHour, DEFAULTS.limits.messagesPerHour);
+    out.limits.uploadMbPerHour = num(l.uploadMbPerHour, DEFAULTS.limits.uploadMbPerHour);
+    out.limits.actionsPerMinute = num(l.actionsPerMinute, DEFAULTS.limits.actionsPerMinute);
   }
   return out;
 }

@@ -10,6 +10,8 @@ import { registerBackupRoutes } from '../../mochiforge/src/api/backup';
 import { registerApi } from './api';
 import { workspaceLayout } from './backup';
 import { loadConfig } from './config';
+import { createWriteLimits } from './limits';
+import { MAX_ATTACHMENTS_BYTES } from './messages';
 import { faviconSvg } from './logo';
 import { pageScript } from './pagescript';
 import { styleSheet } from './style';
@@ -162,8 +164,11 @@ export function createApp(root: string) {
   // paths of up to 1024 characters, which is what the body limit allows for.
   app.use('/api/backup/fetch', express.json({ limit: '4mb' }));
   registerBackupRoutes(app, root, authLimiter, workspaceLayout(root));
-  registerApi(app, root, authLimiter);
-  registerWeb(app, root, authLimiter);
+  // Per-person limits on writing, shared by the web and the API, so that a
+  // script cannot go around the interface's limits by going through /api.
+  const writeLimits = createWriteLimits(config.limits);
+  registerApi(app, root, authLimiter, writeLimits);
+  registerWeb(app, root, authLimiter, writeLimits);
 
   app.use((req, res) => {
     res.status(404).type('html').send(views.errorPage(404, 'Page not found', { viewer: getViewer(req, root), root }));
@@ -186,8 +191,14 @@ export function createApp(root: string) {
     if (typeof status === 'number' && status >= 400 && status < 500) {
       const message =
         (err as Error & { type?: unknown }).type === 'entity.too.large'
-          ? 'What you submitted is larger than this form accepts.'
+          ? `That is larger than a message may be: attachments may come to at most ${MAX_ATTACHMENTS_BYTES / (1024 * 1024)} MB.`
           : 'The request could not be read; go back and try again.';
+      // The composer sends through script and asks for JSON, so that a
+      // refusal lands beside the message it refused instead of replacing the page.
+      if ((req.get('accept') ?? '').includes('application/json')) {
+        res.status(status).json({ error: message });
+        return;
+      }
       res.status(status).type('html').send(views.errorPage(status, message, { viewer, root }));
       return;
     }

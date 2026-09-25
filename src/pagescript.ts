@@ -129,6 +129,11 @@ function openStream(list) {
     var existing = document.getElementById('msg-' + msg.id);
     var pane = scrollPane();
     var follow = pane ? nearBottom(pane) : false;
+    // A pin or an unpin carries the room's new count, for the header.
+    if (typeof msg.pins === 'number') {
+      var pinCount = document.querySelector('[data-pin-count]');
+      if (pinCount) pinCount.textContent = msg.pins ? String(msg.pins) : '';
+    }
     if (existing) {
       existing.outerHTML = msg.html;
     } else if (msg.type === 'message') {
@@ -399,42 +404,199 @@ function mentionKey(e, ta) {
   }
   return false;
 }
-// Posting through fetch keeps the page: the message comes back through the
-// event stream. The form still posts normally where fetch is missing or the
-// send fails, so nothing is lost with the script.
+// Sending. The form is sent with XMLHttpRequest rather than fetch, for the one
+// thing fetch cannot say: how much of an upload has gone. While a send is in
+// flight the composer is locked (the button, the text, the file picker) so
+// that a second press, a second Enter, or an edit cannot make a second
+// message. If the send fails, for whatever reason, nothing is lost: the text
+// and the files stay where they were, the reason is shown beside them, and
+// Send tries again.
+//
+// Each message carries a nonce, made when it is first sent and kept until it
+// succeeds. A retry sends the same nonce, and the server answers a nonce it
+// has already seen with the message it already made; so a send whose upload
+// arrived but whose answer was lost, and is then sent again, still makes one
+// message.
+function sendStatus(form, kind, text) {
+  var el = form.querySelector('[data-send-status]');
+  if (!el) return;
+  el.className = 'send-status' + (kind ? ' ' + kind : '');
+  el.textContent = text || '';
+  el.hidden = !text;
+}
+function sendProgress(form, fraction) {
+  var bar = form.querySelector('[data-send-progress]');
+  if (!bar) return;
+  if (fraction === null) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.firstElementChild.style.width = Math.round(Math.max(0.03, Math.min(1, fraction)) * 100) + '%';
+}
+function lockComposer(form, locked) {
+  var controls = form.querySelectorAll('textarea, input[type="file"], button[type="submit"]');
+  for (var i = 0; i < controls.length; i++) {
+    if (controls[i].tagName === 'TEXTAREA') controls[i].readOnly = locked;
+    else controls[i].disabled = locked;
+  }
+  if (locked) form.setAttribute('data-busy', '1');
+  else form.removeAttribute('data-busy');
+}
+function humanSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+function selectedBytes(form) {
+  var file = form.querySelector('input[type="file"]');
+  var total = 0;
+  if (file && file.files) for (var i = 0; i < file.files.length; i++) total += file.files[i].size;
+  return total;
+}
+function newNonce() {
+  var bytes = new Uint8Array(12);
+  (window.crypto || window.msCrypto).getRandomValues(bytes);
+  var out = '';
+  for (var i = 0; i < bytes.length; i++) out += ('0' + bytes[i].toString(16)).slice(-2);
+  return out;
+}
 function sendComposer(form) {
-  if (!window.fetch || form.getAttribute('data-busy')) { form.submit(); return; }
+  // Already sending: this press is ignored, never turned into a second send.
+  if (form.getAttribute('data-busy')) return;
+  if (!window.XMLHttpRequest || !window.FormData) { form.submit(); return; }
   var ta = form.querySelector('textarea');
   var file = form.querySelector('input[type="file"]');
-  var hasFiles = file && file.files && file.files.length > 0;
+  var bytes = selectedBytes(form);
+  var hasFiles = bytes > 0 || (file && file.files && file.files.length > 0);
   if ((!ta || ta.value.trim() === '') && !hasFiles) return;
-  form.setAttribute('data-busy', '1');
-  fetch(form.getAttribute('action'), { method: 'POST', body: new FormData(form) })
-    .then(function (r) {
-      form.removeAttribute('data-busy');
-      if (!r.ok) { form.submit(); return; }
+  var max = parseInt(form.getAttribute('data-max-bytes') || '0', 10);
+  if (max && bytes > max) {
+    sendStatus(form, 'error', 'Not sent: attachments may come to at most ' + humanSize(max) + ', and these are ' + humanSize(bytes) + '. Remove some and send again.');
+    return;
+  }
+  var nonceField = form.querySelector('input[name="nonce"]');
+  if (nonceField && !nonceField.value) nonceField.value = newNonce();
+  // Read the form before locking it: a disabled field is left out of FormData.
+  var data = new FormData(form);
+  lockComposer(form, true);
+  sendStatus(form, 'pending', hasFiles ? 'Uploading ' + humanSize(bytes) + '…' : 'Sending…');
+  sendProgress(form, hasFiles ? 0 : null);
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', form.getAttribute('action'));
+  xhr.setRequestHeader('Accept', 'application/json');
+  if (hasFiles) {
+    xhr.upload.onprogress = function (e) {
+      if (!e.lengthComputable) return;
+      sendProgress(form, e.loaded / e.total);
+      sendStatus(form, 'pending', e.loaded >= e.total
+        ? 'Uploaded; saving…'
+        : 'Uploading ' + humanSize(e.loaded) + ' of ' + humanSize(e.total) + '…');
+    };
+  }
+  function failed(reason) {
+    lockComposer(form, false);
+    sendProgress(form, null);
+    sendStatus(form, 'error', 'Not sent: ' + reason + ' Your message is still here; press Send to try again.');
+  }
+  xhr.onload = function () {
+    if (xhr.status >= 200 && xhr.status < 300) {
+      lockComposer(form, false);
+      sendProgress(form, null);
+      sendStatus(form, '', '');
       if (ta) { ta.value = ''; autosize(ta); }
       if (file) file.value = '';
+      if (nonceField) nonceField.value = '';
+      showFileTotal(form);
       scrollToBottom();
-    })
-    .catch(function () { form.removeAttribute('data-busy'); form.submit(); });
+      if (ta) ta.focus();
+      return;
+    }
+    var reason = '';
+    try { reason = JSON.parse(xhr.responseText).error || ''; } catch (e) {}
+    if (!reason) reason = xhr.status === 413 ? 'the attachments are too large.' : 'the server answered ' + xhr.status + '.';
+    if (!/[.!?]$/.test(reason)) reason += '.';
+    // A refusal is final for this content (too large, empty, rate limited):
+    // a new nonce, so that sending it again once fixed is a new attempt.
+    if (xhr.status === 400 || xhr.status === 413 || xhr.status === 429) {
+      if (nonceField) nonceField.value = '';
+    }
+    failed(reason);
+  };
+  xhr.onerror = function () {
+    failed('the connection to the workspace failed.');
+  };
+  xhr.onabort = function () {
+    failed('the send was interrupted.');
+  };
+  xhr.send(data);
 }
-document.addEventListener('submit', function (e) {
-  var form = e.target;
-  if (form.matches && form.matches('form[data-composer]')) {
-    e.preventDefault();
-    sendComposer(form);
+// The total of the files chosen, quietly, beside the picker.
+function showFileTotal(form) {
+  var el = form.querySelector('[data-file-total]');
+  if (!el) return;
+  var bytes = selectedBytes(form);
+  var max = parseInt(form.getAttribute('data-max-bytes') || '0', 10);
+  el.textContent = bytes > 0 ? humanSize(bytes) + (max && bytes > max ? ' (over the ' + humanSize(max) + ' limit)' : '') : '';
+  el.className = 'file-size' + (max && bytes > max ? ' over' : '');
+}
+document.addEventListener('change', function (e) {
+  var t = e.target;
+  if (t.matches && t.matches('form[data-composer] input[type="file"]')) {
+    var form = t.closest('form');
+    showFileTotal(form);
+    sendStatus(form, '', '');
   }
 });
+// Leaving the page mid-send would drop the upload; the browser asks first.
+window.addEventListener('beforeunload', function (e) {
+  if (document.querySelector('form[data-composer][data-busy]')) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+document.addEventListener('submit', function (e) {
+  var form = e.target;
+  if (!form.matches) return;
+  if (form.matches('form[data-composer]')) {
+    e.preventDefault();
+    sendComposer(form);
+    return;
+  }
+  // Forms that destroy something say what, and are asked about first.
+  var question = form.getAttribute('data-confirm');
+  if (question && !window.confirm(question)) e.preventDefault();
+});
+
+// Deleting a message asks first, then deletes without leaving the room; the
+// event stream repaints the message as deleted. Without script the trash
+// button is a link to a page that asks the same question.
+function deleteMessage(link) {
+  if (!window.confirm('Delete this message? It will read "This message was deleted." for everyone, and its attachments are removed. There is no undo.')) return;
+  var f = frame();
+  var body = new FormData();
+  body.append('csrf', f ? f.csrf : '');
+  fetch(link.getAttribute('href'), { method: 'POST', body: body, headers: { Accept: 'application/json' } })
+    .then(function (r) {
+      if (r.ok) return;
+      return r.json().then(function (d) { window.alert('The message was not deleted: ' + (d.error || 'the server answered ' + r.status)); },
+        function () { window.alert('The message was not deleted: the server answered ' + r.status); });
+    }, function () {
+      window.alert('The message was not deleted: the connection to the workspace failed.');
+    });
+}
 
 // ---- clicks, delegated ----
-// Reaction pills and the quick-react menu post through fetch and let the
-// event stream repaint the message; without script the same elements are
-// buttons in forms and the page reloads.
+// Reactions and pins post through fetch and let the event stream repaint the
+// message; without script the same elements are buttons in forms and the
+// page reloads. A refusal (going too fast, most likely) is said, not dropped.
 document.addEventListener('click', function (e) {
   var t = e.target;
   var theme = closestOf(t, '[data-theme-name]');
   if (theme) { setTheme(theme.getAttribute('data-theme-name')); return; }
+  var del = closestOf(t, 'a[data-delete-message]');
+  if (del && window.fetch) {
+    e.preventDefault();
+    deleteMessage(del);
+    return;
+  }
   var copy = closestOf(t, '[data-copy]');
   if (copy) { copyText(copy, copy.getAttribute('data-copy')); return; }
   var mention = closestOf(t, '[data-mention]');
@@ -443,12 +605,19 @@ document.addEventListener('click', function (e) {
     takeMention(ta, mention.getAttribute('data-mention'));
     return;
   }
-  var react = closestOf(t, 'form[data-react] button');
-  if (react && window.fetch) {
-    var form = react.closest('form');
+  var quiet = closestOf(t, 'form[data-quiet] button');
+  if (quiet && window.fetch) {
+    var form = quiet.closest('form');
     e.preventDefault();
     closeMenus(null);
-    fetch(form.getAttribute('action'), { method: 'POST', body: new FormData(form) });
+    fetch(form.getAttribute('action'), { method: 'POST', body: new FormData(form), headers: { Accept: 'application/json' } })
+      .then(function (r) {
+        if (r.ok) return;
+        return r.json().then(function (d) { window.alert(d.error || 'That did not work: the server answered ' + r.status + '.'); },
+          function () { window.alert('That did not work: the server answered ' + r.status + '.'); });
+      }, function () {
+        window.alert('That did not work: the connection to the workspace failed.');
+      });
     return;
   }
   closeMenus(t);

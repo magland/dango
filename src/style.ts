@@ -187,6 +187,30 @@ const CHAT_CSS = `
   border: 1px solid var(--border); border-radius: var(--radius); background: var(--input-bg);
 }
 .composer-box:focus-within { border-color: var(--accent); }
+/* Sending: a thin bar along the top of the box for an upload's progress, and
+   a line under the text saying what is happening, or, in the error colour,
+   why a message was not sent. A locked box is dimmed so it reads as busy. */
+.send-progress { height: 3px; background: var(--border-soft); border-radius: var(--radius) var(--radius) 0 0; overflow: hidden; }
+.send-progress > div { height: 100%; width: 0; background: var(--accent); transition: width 0.2s; }
+.send-status { padding: 2px 12px 4px; font-size: var(--t-sm); color: var(--fg-muted); }
+.send-status.error { color: var(--danger); }
+form[data-busy] textarea { color: var(--fg-muted); }
+form[data-busy] button[type="submit"] { opacity: 0.6; cursor: progress; }
+
+/* Pinned messages: a quiet line above the message saying who pinned it, and
+   the pin tool filled in the accent when the message is pinned. The header's
+   pin link carries the room's count beside it. */
+.pinned-by { display: flex; align-items: center; gap: 4px; font-size: var(--t-xs); color: var(--fg-muted); margin-bottom: 2px; }
+.pinned-by .icon { color: var(--accent); }
+.msg-tools button.is-pinned { color: var(--accent); }
+.pins-link { width: auto; gap: 4px; padding: 0 8px; font-size: var(--t-sm); }
+
+/* Sizes: an attachment's, beside its name, and the files chosen in the
+   composer, beside the picker. Quiet, in the subtle colour. */
+.file-size { color: var(--fg-subtle); font-size: var(--t-xs); }
+.file-size.over { color: var(--danger); }
+.file-caption { font-size: var(--t-xs); color: var(--fg-muted); }
+
 /* Completing an @: a list above the text, in the dropdown's clothes, with
    the chosen row filled as a hovered one would be. */
 .composer-box { position: relative; }

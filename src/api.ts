@@ -26,12 +26,15 @@ import {
   Message,
   deleteMessage,
   editMessage,
+  isValidNonce,
   lastMessageId,
   readMessage,
   readMessages,
   toggleReaction,
 } from './messages';
-import { canDeleteMessage, canEditMessage, canSeeChannel, isSiteAdmin } from './perms';
+import { RateLimited, WriteLimits, refusalStatus } from './limits';
+import { EDIT_WINDOW_PASSED, canDeleteMessage, canEditMessage, canSeeChannel, isSiteAdmin } from './perms';
+import { pinMessage, pinOf, readPins, unpinMessage } from './pins';
 import { noteRead, postMessage } from './post';
 import { unreadRooms } from './reads';
 import { Room, channelRoom, dmRoom, threadRoom } from './rooms';
@@ -68,7 +71,8 @@ function messageJson(m: Message): Record<string, unknown> {
 }
 
 function sendOpError(res: Response, e: unknown): void {
-  if (e instanceof OpError) apiError(res, opErrorStatus(e.kind), e.message);
+  if (e instanceof RateLimited) res.setHeader('Retry-After', String(e.retryAfter));
+  if (e instanceof OpError) apiError(res, refusalStatus(e, opErrorStatus), e.message);
   else throw e;
 }
 
@@ -82,7 +86,7 @@ function intParam(raw: string): number {
   return Number.isInteger(n) && n >= 1 ? n : 0;
 }
 
-export function registerApi(app: Express, root: string, authLimiter: AuthLimiter): void {
+export function registerApi(app: Express, root: string, authLimiter: AuthLimiter, limits: WriteLimits): void {
   const json = express.json({ limit: '256kb' });
 
   const withAuth = (req: Request, res: Response, fn: (auth: AuthResult) => void): void => {
@@ -115,6 +119,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
   app.post('/api/channels', json, (req, res) =>
     withAuth(req, res, (auth) => {
       const b = body(req);
+      limits.action(auth.username);
       const c = createChannel(root, String(b.name ?? '').toLowerCase(), {
         topic: typeof b.topic === 'string' ? b.topic : '',
         private: b.private === true,
@@ -214,6 +219,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
           return;
         }
       }
+      limits.action(auth.username);
       res.status(201).json(dmJson(openDm(root, [auth.username, ...users])));
     })
   );
@@ -263,7 +269,13 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         apiError(res, 400, 'send {"body": "..."}');
         return;
       }
-      const m = postMessage(root, room, { author: auth.username, body: text });
+      const nonce = body(req).nonce;
+      const m = postMessage(
+        root,
+        room,
+        { author: auth.username, body: text, ...(isValidNonce(nonce) ? { nonce } : {}) },
+        { charge: () => limits.message(auth.username, 0) }
+      );
       res.status(201).json(messageJson(m));
     })
   );
@@ -280,8 +292,12 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
     withRoom(req, res, (auth, room) => {
       const id = intParam(req.params.mid);
       const m = readMessage(room.dir, id);
-      if (!m || !canEditMessage(auth, m.author)) {
+      if (!m || m.author !== auth.username) {
         apiError(res, m ? 403 : 404, m ? 'only the author may edit a message' : 'no such message');
+        return;
+      }
+      if (!canEditMessage(auth, m)) {
+        apiError(res, 403, EDIT_WINDOW_PASSED);
         return;
       }
       const text = body(req).body;
@@ -289,6 +305,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         apiError(res, 400, 'send {"body": "..."}');
         return;
       }
+      limits.action(auth.username);
       const edited = editMessage(room.dir, id, text);
       publish(room.url, { type: 'update', message: edited });
       res.json(messageJson(edited));
@@ -303,8 +320,10 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         apiError(res, m ? 403 : 404, m ? 'only the author or a site admin may delete a message' : 'no such message');
         return;
       }
+      limits.action(auth.username);
       const deleted = deleteMessage(room.dir, id);
-      publish(room.url, { type: 'update', message: deleted });
+      const pins = pinOf(room.dir, id) ? unpinMessage(room.dir, id).length : undefined;
+      publish(room.url, { type: 'update', message: deleted, ...(pins !== undefined ? { pins } : {}) });
       res.json(messageJson(deleted));
     })
   );
@@ -316,9 +335,55 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         apiError(res, 400, 'send {"emoji": "..."}');
         return;
       }
+      limits.action(auth.username);
       const m = toggleReaction(room.dir, intParam(req.params.mid), emoji, auth.username);
       publish(room.url, { type: 'update', message: m });
       res.json(messageJson(m));
+    })
+  );
+
+  // ---- pins: a room's own messages, not a thread's replies ----
+
+  const ROOM_ONLY = (suffix: string) => BASES.map((b) => `${b}${suffix}`);
+
+  app.get(ROOM_ONLY('/pins'), (req, res) =>
+    withRoom(req, res, (_auth, room) => {
+      res.json({
+        pins: readPins(room.dir)
+          .map((pin) => ({ ...pin, message: readMessage(room.dir, pin.id) }))
+          .filter((p) => p.message && !p.message.deleted)
+          .map((p) => ({ id: p.id, by: p.by, at: p.at, message: messageJson(p.message!) })),
+      });
+    })
+  );
+
+  app.put(ROOM_ONLY('/pins/:mid'), (req, res) =>
+    withRoom(req, res, (auth, room) => {
+      const id = intParam(req.params.mid);
+      const m = readMessage(room.dir, id);
+      if (!m || m.deleted) {
+        apiError(res, 404, 'no such message');
+        return;
+      }
+      limits.action(auth.username);
+      const pins = pinMessage(room.dir, id, auth.username);
+      publish(room.url, { type: 'update', message: m, pins: pins.length });
+      res.json({ pinned: true, pins: pins.length });
+    })
+  );
+
+  app.delete(ROOM_ONLY('/pins/:mid'), (req, res) =>
+    withRoom(req, res, (auth, room) => {
+      const id = intParam(req.params.mid);
+      const m = readMessage(room.dir, id);
+      if (!m) {
+        apiError(res, 404, 'no such message');
+        return;
+      }
+      limits.action(auth.username);
+      const pins = unpinMessage(room.dir, id);
+      publish(room.url, { type: 'update', message: m, pins: pins.length });
+      res.json({ pinned: false, pins: pins.length });
     })
   );
 

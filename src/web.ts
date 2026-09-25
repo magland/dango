@@ -37,12 +37,16 @@ import {
   deleteMessage,
   editMessage,
   filesDir,
+  MAX_ATTACHMENTS_BYTES,
+  isValidNonce,
   lastMessageId,
   readMessage,
   readMessages,
   toggleReaction,
 } from './messages';
-import { canDeleteMessage, canEditMessage, isSiteAdmin } from './perms';
+import { RateLimited, WriteLimits, refusalStatus } from './limits';
+import { EDIT_WINDOW_PASSED, canDeleteMessage, canEditMessage, isSiteAdmin } from './perms';
+import { Pin, pinMessage, pinOf, readPins, unpinMessage } from './pins';
 import { noteRead, postMessage } from './post';
 import { Room, channelRoom, dmRoom, threadRoom } from './rooms';
 import { searchMessages } from './search';
@@ -59,7 +63,15 @@ import { isValidWorkspaceUserName } from './workspace';
 // API uses, publish the event, redirect back. Forms work without script; the
 // page script only makes them quieter.
 
-const MAX_UPLOAD_TOTAL = 25 * 1024 * 1024;
+/**
+ * Whether the page script sent this request and wants an answer it can act
+ * on, rather than a page to show. The composer sends through script and
+ * asks for JSON, so a refusal comes back as a sentence it can put beside the
+ * message instead of a page that would replace everything.
+ */
+function wantsJson(req: Request): boolean {
+  return (req.get('accept') ?? '').includes('application/json');
+}
 
 // The composer posts multipart (it may carry files, and the page script sends
 // FormData for every intercepted form), while a plain form posts urlencoded.
@@ -72,7 +84,8 @@ interface FormRequest extends Request {
 
 function formBody(req: FormRequest, res: Response, next: NextFunction): void {
   const urlenc = express.urlencoded({ extended: false, limit: '128kb' });
-  const raw = express.raw({ type: 'multipart/form-data', limit: MAX_UPLOAD_TOTAL + 1024 * 1024 });
+  // The attachments' cap and a megabyte for the text fields and the framing.
+  const raw = express.raw({ type: 'multipart/form-data', limit: MAX_ATTACHMENTS_BYTES + 1024 * 1024 });
   const boundary = boundaryOf(req.headers['content-type']);
   if (!boundary) {
     urlenc(req, res, next);
@@ -113,11 +126,12 @@ function nextPath(raw: unknown): string {
   return n.startsWith('/') && !n.startsWith('//') ? n : '/';
 }
 
-export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter): void {
+export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter, limits: WriteLimits): void {
   const urlenc = express.urlencoded({ extended: false, limit: '128kb' });
 
   const fail = (res: Response, viewer: Viewer | null, status: number, message: string) => {
-    res.status(status).type('html').send(views.errorPage(status, message, { viewer, root }));
+    if (wantsJson(res.req)) res.status(status).json({ error: message });
+    else res.status(status).type('html').send(views.errorPage(status, message, { viewer, root }));
   };
 
   /** The signed-in viewer, or null having already redirected to /login. */
@@ -144,7 +158,10 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
   };
 
   const sendOpError = (res: Response, viewer: Viewer | null, e: unknown) => {
-    if (e instanceof OpError) fail(res, viewer, opErrorStatus(e.kind), e.message);
+    if (e instanceof RateLimited) {
+      res.setHeader('Retry-After', String(e.retryAfter));
+      fail(res, viewer, 429, e.message);
+    } else if (e instanceof OpError) fail(res, viewer, opErrorStatus(e.kind), e.message);
     else throw e;
   };
 
@@ -216,6 +233,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     const body = req.body as Record<string, unknown>;
     const name = String(body.name ?? '').trim().toLowerCase();
     try {
+      limits.action(viewer.auth.username);
       const c = createChannel(root, name, {
         topic: String(body.topic ?? ''),
         private: body.private === '1',
@@ -224,7 +242,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       res.redirect(303, `/c/${encodeURIComponent(c.name)}`);
     } catch (e) {
       if (e instanceof OpError) {
-        res.status(opErrorStatus(e.kind)).type('html').send(views.newChannelPage(root, viewer, e.message));
+        res.status(refusalStatus(e, opErrorStatus)).type('html').send(views.newChannelPage(root, viewer, e.message));
         return;
       }
       throw e;
@@ -272,11 +290,12 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       .filter((u): u is string => typeof u === 'string' && u !== '')
       .filter((u) => userExists(root, u));
     try {
+      limits.action(viewer.auth.username);
       const dm = openDm(root, [viewer.auth.username, ...users]);
       res.redirect(303, `/d/${dm.id}`);
     } catch (e) {
       if (e instanceof OpError) {
-        res.status(opErrorStatus(e.kind)).type('html').send(views.newDmPage(root, viewer, e.message));
+        res.status(refusalStatus(e, opErrorStatus)).type('html').send(views.newDmPage(root, viewer, e.message));
         return;
       }
       throw e;
@@ -405,7 +424,8 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
   ): void => {
     const viewer = getViewer(req, root);
     if (!viewer) {
-      res.redirect(303, `/login?next=${encodeURIComponent(req.originalUrl)}`);
+      if (wantsJson(req)) res.status(401).json({ error: 'You are signed out. Sign in again, then send.' });
+      else res.redirect(303, `/login?next=${encodeURIComponent(req.originalUrl)}`);
       return;
     }
     if (opts.form) {
@@ -530,10 +550,6 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         const parts = partFiles((req as FormRequest).fileParts ?? [], 'files').filter(
           (p) => p.filename && p.data.length > 0
         );
-        const total = parts.reduce((n, p) => n + p.data.length, 0);
-        if (total > MAX_UPLOAD_TOTAL) {
-          throw new OpError('Attachments may total at most 25 MB per message.');
-        }
         const files: Attachment[] = [];
         const names = new Set<string>();
         for (const p of parts) {
@@ -544,15 +560,23 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
           names.add(unique);
           files.push({ name: unique, size: p.data.length });
         }
+        const rawNonce = (req.body as Record<string, unknown>).nonce;
+        const nonce = isValidNonce(rawNonce) ? rawNonce : undefined;
         // The files are written before anyone is told about the message, so
-        // a page that renders it on the event finds them there.
-        postMessage(root, room, { author: viewer.auth.username, body, files }, (id) => {
-          if (!files.length) return;
-          const dir = filesDir(room.dir, id);
-          fs.mkdirSync(dir, { recursive: true });
-          parts.forEach((p, i) => fs.writeFileSync(path.join(dir, files[i].name), p.data, { mode: 0o600 }));
+        // a page that renders it on the event finds them there. addMessage
+        // refuses attachments over the cap before any of this runs.
+        const bytes = files.reduce((n, f) => n + f.size, 0);
+        const m = postMessage(root, room, { author: viewer.auth.username, body, files, nonce }, {
+          charge: () => limits.message(viewer.auth.username, bytes),
+          settle: (id) => {
+            if (!files.length) return;
+            const dir = filesDir(room.dir, id);
+            fs.mkdirSync(dir, { recursive: true });
+            parts.forEach((p, i) => fs.writeFileSync(path.join(dir, files[i].name), p.data, { mode: 0o600 }));
+          },
         });
-        res.redirect(303, room.url);
+        if (wantsJson(req)) res.status(201).json({ id: m.id });
+        else res.redirect(303, room.url);
       },
       { form: true }
     )
@@ -562,8 +586,12 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
   app.get(ROOM_PATHS('/m/:mid/edit'), (req, res) =>
     withRoom(req, res, (viewer, room) => {
       const m = readMessage(room.dir, parseInt(req.params.mid, 10));
-      if (!m || m.deleted || !canEditMessage(viewer.auth, m.author)) {
+      if (!m || m.deleted || m.author !== viewer.auth.username) {
         fail(res, viewer, 404, 'Page not found');
+        return;
+      }
+      if (!canEditMessage(viewer.auth, m)) {
+        fail(res, viewer, 403, EDIT_WINDOW_PASSED);
         return;
       }
       res.type('html').send(views.editMessagePage(root, room, m, viewer));
@@ -577,16 +605,37 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       (viewer, room) => {
         const id = parseInt(req.params.mid, 10);
         const m = readMessage(room.dir, id);
-        if (!m || !canEditMessage(viewer.auth, m.author)) {
+        if (!m || m.author !== viewer.auth.username) {
           fail(res, viewer, 404, 'Page not found');
           return;
         }
+        // Checked on the save, not only when the form was opened: a form
+        // opened inside the window can be submitted outside it.
+        if (!canEditMessage(viewer.auth, m)) {
+          fail(res, viewer, 403, EDIT_WINDOW_PASSED);
+          return;
+        }
+        limits.action(viewer.auth.username);
         const edited = editMessage(room.dir, id, String((req.body as Record<string, unknown>).body ?? ''));
         publish(room.url, { type: 'update', message: edited });
         res.redirect(303, room.url);
       },
       { form: true }
     )
+  );
+
+  // Deleting asks first. With script, the page asks in a dialog and posts
+  // below; without it, the trash button is a link to this page, which shows
+  // the message and asks the same question.
+  app.get(ROOM_PATHS('/m/:mid/delete'), (req, res) =>
+    withRoom(req, res, (viewer, room) => {
+      const m = readMessage(room.dir, parseInt(req.params.mid, 10));
+      if (!m || m.deleted || !canDeleteMessage(viewer.auth, m.author)) {
+        fail(res, viewer, 404, 'Page not found');
+        return;
+      }
+      res.type('html').send(views.deleteMessagePage(root, room, m, viewer));
+    })
   );
 
   app.post(ROOM_PATHS('/m/:mid/delete'), formBody, (req, res) =>
@@ -600,9 +649,13 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
           fail(res, viewer, 404, 'Page not found');
           return;
         }
+        limits.action(viewer.auth.username);
         const deleted = deleteMessage(room.dir, id);
-        publish(room.url, { type: 'update', message: deleted });
-        res.redirect(303, room.url);
+        // A deleted message has nothing left to pin.
+        const pins = pinOf(room.dir, id) ? unpinMessage(room.dir, id).length : undefined;
+        publish(room.url, { type: 'update', message: deleted, ...(pins !== undefined ? { pins } : {}) });
+        if (wantsJson(req)) res.json({ deleted: true });
+        else res.redirect(303, room.url);
       },
       { form: true }
     )
@@ -615,12 +668,50 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       (viewer, room) => {
         const id = parseInt(req.params.mid, 10);
         const emoji = String((req.body as Record<string, unknown>).emoji ?? '');
+        limits.action(viewer.auth.username);
         const m = toggleReaction(room.dir, id, emoji, viewer.auth.username);
         publish(room.url, { type: 'update', message: m });
-        res.redirect(303, room.url);
+        if (wantsJson(req)) res.json({ ok: true });
+        else res.redirect(303, room.url);
       },
       { form: true }
     )
+  );
+
+  // Pinning. A room's own messages only: a thread's replies are not pinned,
+  // though the message a thread hangs from can be. The room's open pages hear
+  // the message repainted, with the new count for the header.
+  const pinRoute = (action: 'pin' | 'unpin') =>
+    app.post(BASES.map((b) => `${b}/m/:mid/${action}`), formBody, (req, res) =>
+      withRoom(
+        req,
+        res,
+        (viewer, room) => {
+          const id = parseInt(req.params.mid, 10);
+          const m = readMessage(room.dir, id);
+          if (!m || m.deleted) {
+            fail(res, viewer, 404, 'Page not found');
+            return;
+          }
+          limits.action(viewer.auth.username);
+          const pins = action === 'pin' ? pinMessage(room.dir, id, viewer.auth.username) : unpinMessage(room.dir, id);
+          publish(room.url, { type: 'update', message: m, pins: pins.length });
+          if (wantsJson(req)) res.json({ pins: pins.length });
+          else res.redirect(303, req.get('referer')?.includes('/pins') ? `${room.url}/pins` : room.url);
+        },
+        { form: true }
+      )
+    );
+  pinRoute('pin');
+  pinRoute('unpin');
+
+  app.get(BASES.map((b) => `${b}/pins`), (req, res) =>
+    withRoom(req, res, (viewer, room) => {
+      const pinned = readPins(room.dir)
+        .map((pin) => ({ pin, message: readMessage(room.dir, pin.id) }))
+        .filter((p): p is { pin: Pin; message: Message } => p.message !== null && !p.message.deleted);
+      res.type('html').send(views.pinsPage(root, room, pinned, viewer));
+    })
   );
 
   // Attached files. Served with a sandbox policy so a file is a download or a
