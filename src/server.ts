@@ -11,10 +11,12 @@ import { registerApi } from './api';
 import { workspaceLayout } from './backup';
 import { loadConfig } from './config';
 import { createWriteLimits } from './limits';
+import { ICON_SIZES, appIconPng, badgePng } from './appicon';
 import { MAX_ATTACHMENTS_BYTES } from './messages';
 import { faviconSvg } from './logo';
 import { pageScript } from './pagescript';
 import { styleSheet } from './style';
+import { serviceWorker } from './sw';
 import * as views from './views';
 import { registerWeb } from './web';
 
@@ -46,7 +48,14 @@ const APP_CSP = [
 ].join('; ');
 
 function isRateExempt(req: Request): boolean {
-  return req.path.startsWith('/assets/') || req.path === '/favicon.svg' || req.path === '/favicon.ico';
+  return (
+    req.path.startsWith('/assets/') ||
+    req.path.startsWith('/icon/') ||
+    req.path === '/favicon.svg' ||
+    req.path === '/favicon.ico' ||
+    req.path === '/sw.js' ||
+    req.path === '/manifest.webmanifest'
+  );
 }
 
 // The event streams must reach the client as they are written: compression
@@ -150,6 +159,52 @@ export function createApp(root: string) {
   });
   app.get('/favicon.ico', (_req, res) => {
     res.status(204).end();
+  });
+  // The same mark as PNG, for home screens and notifications (see appicon.ts).
+  app.get('/icon/:file', (req, res) => {
+    const m = /^(\d+|badge)\.png$/.exec(req.params.file);
+    const size = m && m[1] !== 'badge' ? parseInt(m[1], 10) : 0;
+    if (!m || (m[1] !== 'badge' && !ICON_SIZES.includes(size))) {
+      res.status(404).end();
+      return;
+    }
+    res.type('image/png').set('Cache-Control', 'public, max-age=86400').send(m[1] === 'badge' ? badgePng() : appIconPng(size));
+  });
+
+  // The service worker, at the root so its scope is every page. Never cached
+  // for long: a browser checks for a new worker by fetching this URL, and a
+  // stale one would keep an old worker running after a deploy.
+  app.get('/sw.js', (_req, res) => {
+    res.type('text/javascript').set('Cache-Control', 'no-cache').send(serviceWorker().body);
+  });
+
+  // What makes the workspace installable: "Add to Home Screen" on iOS, which
+  // is what lets a web page receive notifications there, and the install
+  // prompt elsewhere. It names the workspace only to someone signed in (pages
+  // link it with crossorigin="use-credentials" so the cookie comes along),
+  // keeping to the rule that a workspace tells a stranger nothing.
+  app.get('/manifest.webmanifest', (req, res) => {
+    const theme = activeTheme();
+    const name = getViewer(req, root) ? loadConfig(root).name : 'dango';
+    const icons = [192, 512].flatMap((size) =>
+      ['any', 'maskable'].map((purpose) => ({ src: `/icon/${size}.png?t=${encodeURIComponent(theme.name)}`, sizes: `${size}x${size}`, type: 'image/png', purpose }))
+    );
+    res
+      .type('application/manifest+json')
+      .set('Cache-Control', 'private, no-cache')
+      .send(
+        JSON.stringify({
+          id: '/',
+          name,
+          short_name: name,
+          start_url: '/',
+          scope: '/',
+          display: 'standalone',
+          background_color: theme.vars.bg,
+          theme_color: theme.vars.surface,
+          icons,
+        })
+      );
   });
 
   // Sliding sessions, after the cacheable assets for the reason mochiforge

@@ -27,6 +27,8 @@ import { isValidUserName } from '../../mochiforge/src/scan';
  *   users/
  *     alice/
  *       read.json           the newest message she has seen in each room
+ *       notify.json         what she wants to be notified of
+ *       push.json           the devices her notifications go to
  * ```
  *
  * Channels and conversations sit one level down in fixed directories for the
@@ -36,7 +38,7 @@ import { isValidUserName } from '../../mochiforge/src/scan';
  */
 export const CHANNELS_DIR = 'channels';
 export const DMS_DIR = 'dms';
-/** Per-user state that is not identity: today, what each person has read. */
+/** Per-user state that is not identity: what each person has read, and their notifications. */
 export const USERS_DIR = 'users';
 
 export function usersDir(root: string): string {
@@ -90,12 +92,16 @@ const RESERVED_USER_NAMES = new Set([
   'events',
   'favicon.ico',
   'favicon.svg',
+  'icon',
   'invite',
   'login',
   'logout',
+  'manifest.webmanifest',
   'new',
+  'push',
   'search',
   'settings',
+  'sw.js',
 ]);
 
 export function isValidWorkspaceUserName(name: string): boolean {

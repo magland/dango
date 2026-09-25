@@ -10,11 +10,12 @@ import { ChannelInfo, listChannels } from './channels';
 import { loadConfig } from './config';
 import { DmInfo, dmTitle } from './dms';
 import { MARK } from './logo';
+import { Device, NotifyPrefs } from './notify';
 import { Attachment, MAX_ATTACHMENTS_BYTES, Message } from './messages';
 import { pageScript } from './pagescript';
 import { canDeleteMessage, canEditMessage, canSeeChannel, isSiteAdmin } from './perms';
 import { Pin, pinOf, readPins } from './pins';
-import { RoomUnread, UNREAD_CAP, mentionsUser, unreadRooms } from './reads';
+import { RoomUnread, UNREAD_CAP, mentionsUser, readKey, unreadRooms } from './reads';
 import { Room } from './rooms';
 import { styleSheet } from './style';
 
@@ -152,7 +153,10 @@ export function layout(title: string, main: Html, opts: PageOpts): string {
 <link rel="stylesheet" href="/assets/style.css?t=${encodeURIComponent(theme)}&amp;v=${sheet}">
 <link rel="stylesheet" href="/assets/katex/katex.css">
 <link rel="icon" href="${iconHref}" type="image/svg+xml">
-<script src="/assets/page.js?v=${script}"></script>
+<link rel="apple-touch-icon" href="/icon/180.png?t=${encodeURIComponent(theme)}">
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
+${opts.viewer ? html`<meta name="apple-mobile-web-app-title" content="${baseTitle}">
+` : ''}<script src="/assets/page.js?v=${script}"></script>
 </head>
 <body>
 ${body}
@@ -519,7 +523,14 @@ ${
   return doc(username, content, { viewer, root });
 }
 
-export function accountPage(root: string, viewer: Viewer, opts: { flash?: string; error?: string } = {}): string {
+export interface AccountNotifications {
+  prefs: NotifyPrefs;
+  devices: Device[];
+  /** The workspace's VAPID public key, which a browser subscribes under. */
+  vapidKey: string;
+}
+
+export function accountPage(root: string, viewer: Viewer, notify: AccountNotifications, opts: { flash?: string; error?: string } = {}): string {
   const profile = viewer.auth.user.profile;
   const content = html`<h1>Account</h1>
 ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.flash ? html`<div class="flash">${opts.flash}</div>` : ''}
@@ -528,8 +539,52 @@ ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.fla
 <div class="field"><label for="bio">Bio</label><input type="text" id="bio" name="bio" value="${profile?.bio ?? ''}"></div>
 <button class="btn btn-primary" type="submit">Save</button>
 </form>
+${notificationsSection(root, viewer, notify)}
 <p class="muted" style="margin-top:24px">Signed in as <strong>${viewer.auth.username}</strong>. Tokens are minted by an administrator; ask one for a new token if you need to sign in elsewhere or use the API.</p>`;
   return doc('Account', content, { viewer, root });
+}
+
+/**
+ * Notifications, in two parts. This device: turning them on is the browser's
+ * business (a permission, then a push subscription), so it is done by the
+ * page script, which fills in the status line and shows the buttons that
+ * apply; without script the section says so. Then what to be told about,
+ * which is an ordinary form and applies to every device at once.
+ */
+function notificationsSection(root: string, viewer: Viewer, notify: AccountNotifications): Html {
+  const { prefs, devices } = notify;
+  const rooms = unreadRooms(root, viewer.auth);
+  const level = (value: string, label: string, hint: string) =>
+    html`<label class="checkbox" style="display:block;margin-bottom:6px"><input type="radio" name="level" value="${value}" ${prefs.level === value ? raw('checked') : ''}> ${label}<br><span class="muted">${hint}</span></label>`;
+  const muteBox = (r: RoomUnread) =>
+    html`<label class="checkbox" style="display:block;margin-bottom:4px"><input type="checkbox" name="mute" value="${readKey(r.url)}" ${prefs.muted.includes(readKey(r.url)) ? raw('checked') : ''}> ${r.title}</label>`;
+  const deviceRows = devices.map(
+    (d) => html`<li style="display:flex;align-items:center;gap:8px;margin-bottom:4px" data-device="${d.id}"><span>${d.label}</span>${d.created ? html`<span class="muted">added ${timeTag(d.created)}</span>` : ''}
+<form method="post" action="/account/push/remove" style="margin-left:auto">${csrfField(viewer)}<input type="hidden" name="id" value="${d.id}"><button class="btn-link" type="submit">Remove</button></form></li>`
+  );
+  return html`<h2 id="notifications">Notifications</h2>
+<div class="push-device" data-push data-vapid="${notify.vapidKey}" style="max-width:520px">
+<p data-push-status>Turning notifications on for a device needs script.</p>
+<p><button class="btn btn-primary" type="button" data-push-on hidden>Turn on for this device</button> <button class="btn" type="button" data-push-off hidden>Turn off for this device</button> <button class="btn" type="button" data-push-test hidden>Send a test notification</button></p>
+</div>
+${
+    devices.length
+      ? html`<h3>Devices that receive them</h3><ul style="list-style:none;padding:0;max-width:520px">${joinHtml(deviceRows)}</ul>`
+      : html`<p class="muted">No device receives your notifications yet.</p>`
+  }
+<form method="post" action="/account/notifications" style="max-width:520px">${csrfField(viewer)}
+<h3>What to be told about</h3>
+${level('direct', 'Direct messages, mentions, and replies in my threads', 'Messages addressed to you: your direct conversations, messages that @mention you, and replies in threads you started or replied in.')}
+${level('all', 'Everything', 'All of the above, and every message in every channel you can read.')}
+${level('none', 'Nothing', 'No notifications on any device. Unread counts still show in the sidebar.')}
+<label class="checkbox" style="display:block;margin:12px 0"><input type="checkbox" name="preview" value="1" ${prefs.preview ? raw('checked') : ''}> Show who wrote what<br><span class="muted">Otherwise a notification only says that something arrived. The text is encrypted for your device on its way through your browser's push service (Google, Apple, Mozilla, or Microsoft), which sees when a notification is sent but not what it says; it does show on your lock screen.</span></label>
+${
+    rooms.length
+      ? html`<h3>Muted rooms</h3><p class="muted">Nothing from a muted room is notified, mentions included; its unread count still shows.</p>${joinHtml(rooms.map(muteBox))}`
+      : ''
+  }
+<div style="margin-top:12px"><button class="btn btn-primary" type="submit">Save</button></div>
+</form>`;
 }
 
 // ---- admin ----

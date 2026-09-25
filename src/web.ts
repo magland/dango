@@ -28,7 +28,7 @@ import {
   removeMember,
   setTopic,
 } from './channels';
-import { updateConfig } from './config';
+import { loadConfig, updateConfig } from './config';
 import { openDm } from './dms';
 import { RoomEvent, publish, serveEvents, serveUserEvents } from './events';
 import {
@@ -47,7 +47,21 @@ import {
 import { RateLimited, WriteLimits, refusalStatus } from './limits';
 import { EDIT_WINDOW_PASSED, canDeleteMessage, canEditMessage, isSiteAdmin } from './perms';
 import { Pin, pinMessage, pinOf, readPins, unpinMessage } from './pins';
+import {
+  NotifyLevel,
+  addDevice,
+  deviceId,
+  deviceLabel,
+  parseSubscription,
+  pushToUser,
+  readDevices,
+  readPrefs,
+  removeDevice,
+  renewDevice,
+  writePrefs,
+} from './notify';
 import { noteRead, postMessage } from './post';
+import { vapidKeys } from './push';
 import { Room, channelRoom, dmRoom, threadRoom } from './rooms';
 import { searchMessages } from './search';
 import * as views from './views';
@@ -206,9 +220,17 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     res.set('Cache-Control', 'no-store').type('html').send(views.invitePage(viewer ? viewer.auth.username : null));
   });
 
-  app.post('/logout', urlenc, (_req, res) => {
+  app.post('/logout', urlenc, (req, res) => {
     // No CSRF requirement to sign out: the only thing a forged sign-out costs
     // is signing in again, and a stale form must always be able to leave.
+    // The page script sends the browser's push endpoint along, having dropped
+    // the subscription itself, so a shared computer that is signed out of
+    // stops showing that person's notifications. Only the signed-in person's
+    // own devices can be named, so a forged sign-out removes nothing of
+    // anyone else's.
+    const viewer = getViewer(req, root);
+    const endpoint = (req.body as Record<string, unknown>)?.push;
+    if (viewer && typeof endpoint === 'string' && endpoint) removeDevice(root, viewer.auth.username, deviceId(endpoint));
     clearSessionCookie(res);
     res.redirect(303, '/login');
   });
@@ -260,7 +282,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
   app.get('/account', (req, res) => {
     const viewer = requireViewer(req, res);
     if (!viewer) return;
-    res.type('html').send(views.accountPage(root, viewer));
+    res.type('html').send(views.accountPage(root, viewer, accountNotifications(viewer)));
   });
 
   app.post('/account', urlenc, (req, res) => {
@@ -272,6 +294,97 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       bio: String(body.bio ?? ''),
     });
     res.redirect(303, '/account');
+  });
+
+  // ---- notifications ----
+  //
+  // What a person wants to hear about is a plain form. The device routes are
+  // spoken to by the page script in JSON, because a push subscription only
+  // exists in script: the browser makes it and hands it over.
+
+  const json = express.json({ limit: '16kb' });
+
+  const accountNotifications = (viewer: Viewer): views.AccountNotifications => ({
+    prefs: readPrefs(root, viewer.auth.username),
+    devices: readDevices(root, viewer.auth.username),
+    vapidKey: vapidKeys(root).publicKey,
+  });
+
+  app.post('/account/notifications', urlenc, (req, res) => {
+    const viewer = requireForm(req, res);
+    if (!viewer) return;
+    const body = req.body as Record<string, unknown>;
+    const level: NotifyLevel = body.level === 'all' || body.level === 'none' ? body.level : 'direct';
+    const muted = (Array.isArray(body.mute) ? body.mute : [body.mute]).filter((k): k is string => typeof k === 'string' && k !== '');
+    writePrefs(root, viewer.auth.username, { level, preview: body.preview === '1', muted });
+    res.redirect(303, '/account#notifications');
+  });
+
+  app.post('/account/push/subscribe', json, (req, res) => {
+    const viewer = requireForm(req, res);
+    if (!viewer) return;
+    const sub = parseSubscription((req.body as Record<string, unknown>).subscription);
+    if (!sub) {
+      fail(res, viewer, 400, 'This browser offered a push service the workspace does not send to.');
+      return;
+    }
+    const device = addDevice(root, viewer.auth.username, sub, {
+      origin: originOf(req),
+      label: deviceLabel(req.get('user-agent') ?? ''),
+    });
+    res.json({ id: device.id, label: device.label });
+  });
+
+  // Removing names the device by its id (the device list's buttons) or by
+  // its endpoint (the page script, turning this browser off).
+  app.post('/account/push/remove', express.urlencoded({ extended: false, limit: '16kb' }), json, (req, res) => {
+    const viewer = requireForm(req, res);
+    if (!viewer) return;
+    const body = req.body as Record<string, unknown>;
+    const id = typeof body.endpoint === 'string' ? deviceId(body.endpoint) : String(body.id ?? '');
+    const removed = removeDevice(root, viewer.auth.username, id);
+    if (wantsJson(req)) res.json({ removed });
+    else res.redirect(303, '/account#notifications');
+  });
+
+  // A test notification to this browser, answering with what the push
+  // service said, so a device that stays silent can be told apart from a
+  // push that was refused.
+  app.post('/account/push/test', json, async (req, res, next) => {
+    const viewer = requireForm(req, res);
+    if (!viewer) return;
+    try {
+      const endpoint = (req.body as Record<string, unknown>).endpoint;
+      const only = typeof endpoint === 'string' ? deviceId(endpoint) : undefined;
+      if (only && !readDevices(root, viewer.auth.username).some((d) => d.id === only)) {
+        fail(res, viewer, 404, 'The workspace does not know this browser; turn notifications off and on again.');
+        return;
+      }
+      const result = await pushToUser(
+        root,
+        viewer.auth.username,
+        { title: loadConfig(root).name, body: 'Notifications work on this device.', tag: 'test', url: '/account#notifications', time: Date.now() },
+        { urgency: 'high', only }
+      );
+      res.json(result);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // The service worker, when the browser has replaced its subscription by
+  // itself. No session and no CSRF token: the worker has neither, and what
+  // it presents instead is the old subscription's auth secret.
+  app.post('/push/renew', json, (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const old = body.old as Record<string, unknown> | undefined;
+    const sub = parseSubscription(body.subscription);
+    if (!sub || typeof old?.endpoint !== 'string' || typeof old?.auth !== 'string') {
+      res.status(400).json({ error: 'That is not a subscription.' });
+      return;
+    }
+    const renewed = renewDevice(root, { endpoint: old.endpoint, auth: old.auth }, sub);
+    res.status(renewed ? 204 : 404).end();
   });
 
   // ---- direct conversations ----

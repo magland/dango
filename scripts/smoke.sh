@@ -370,13 +370,52 @@ curl -s -b "$CJAR" -D - -o /dev/null "$BASE/c/general/files/$CLIP/clip.wav" | gr
 curl -s -b "$CJAR" -D - -o /dev/null -H 'range: bytes=0-3' "$BASE/c/general/files/$CLIP/clip.wav" | grep_all -q '^HTTP/1.1 206' || fail "a range request on a .wav was not answered, so a player cannot seek"
 ok "a .wav plays in place, and can be seeked"
 
+# ---- notifications ----
+
+curl -s -D - -o "$TMP/sw.js" "$BASE/sw.js" | grep_all -qi '^content-type: text/javascript' || fail "/sw.js is not served as a script"
+grep -q showNotification "$TMP/sw.js" || fail "the service worker does not show notifications"
+[ "$(curl -s "$BASE/manifest.webmanifest" | jget name)" = "dango" ] || fail "the manifest named the workspace to someone not signed in"
+[ "$(curl -s -b "$JAR" "$BASE/manifest.webmanifest" | jget display)" = "standalone" ] || fail "the manifest does not make an app"
+curl -s "$BASE/icon/192.png" | head -c 4 | od -An -tx1 | grep_all -q '89 50 4e 47' || fail "the app icon is not a PNG"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/icon/193.png")" = "404" ] || fail "an icon of any size was drawn on request"
+ok "the service worker, the manifest, and the app icon are served, and the manifest names nothing to a stranger"
+
+NJAR="$TMP/alice-notify.jar"
+curl -s -c "$NJAR" -o /dev/null -d "token=$ALICE&next=/" "$BASE/login"
+PAGE="$(curl -s -b "$NJAR" "$BASE/account")"
+echo "$PAGE" | grep_all -q 'data-vapid="B' || fail "the account page does not carry the workspace's push key"
+NCSRF="$(csrf_in <<< "$PAGE")"
+curl -s -b "$NJAR" -o /dev/null -d "csrf=$NCSRF&level=all&mute=c/general" "$BASE/account/notifications"
+PAGE="$(curl -s -b "$NJAR" "$BASE/account")"
+echo "$PAGE" | grep_all -q 'value="all" checked' || fail "the notification level was not saved"
+echo "$PAGE" | grep_all -q 'value="c/general" checked' || fail "muting a room was not saved"
+echo "$PAGE" | grep_all -q 'name="preview" value="1" checked' && fail "unticking the preview did not stick"
+ok "what to be notified of is saved from the account page"
+
+P256="$(node -e 'const c=require("crypto").createECDH("prime256v1");c.generateKeys();console.log(c.getPublicKey().toString("base64url"))')"
+AUTH="$(node -e 'console.log(require("crypto").randomBytes(16).toString("base64url"))')"
+sub_json() { printf '{"csrf":"%s","subscription":{"endpoint":"%s","keys":{"p256dh":"%s","auth":"%s"}}}' "$NCSRF" "$1" "$P256" "$AUTH"; }
+CODE="$(curl -s -b "$NJAR" -o /dev/null -w '%{http_code}' -H 'content-type: application/json' "${JSON_ACCEPT[@]}" --data "$(sub_json 'https://169.254.169.254/latest')" "$BASE/account/push/subscribe")"
+[ "$CODE" = "400" ] || fail "a subscription pointing somewhere other than a push service was accepted ($CODE)"
+ok "a push endpoint that is not a push service is refused"
+ENDPOINT="https://fcm.googleapis.com/fcm/send/smoke-$RANDOM"
+curl -s -b "$NJAR" -H 'content-type: application/json' "${JSON_ACCEPT[@]}" -A 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0' \
+  --data "$(sub_json "$ENDPOINT")" "$BASE/account/push/subscribe" | jget label | grep_all -q 'Firefox on Linux' || fail "subscribing a device failed"
+curl -s -b "$NJAR" "$BASE/account" | grep_all -q 'data-device=' || fail "the subscribed device is not listed"
+ok "a browser's subscription is kept, and listed as a device"
+curl -s -b "$NJAR" -o /dev/null -d "push=$ENDPOINT" "$BASE/logout"
+curl -s -c "$NJAR" -o /dev/null -d "token=$ALICE&next=/" "$BASE/login"
+curl -s -b "$NJAR" "$BASE/account" | grep_all -q 'data-device=' && fail "signing out did not remove the browser's subscription"
+ok "signing out removes that browser's subscription"
+
 # ---- backup ----
 
 BK="$TMP/backup"
 "${DANGO[@]}" backup "$BK" --snapshot --quiet || fail "the backup failed"
 [ -f "$BK/current/workspace.json" ] || fail "the backup has no workspace.json"
 [ -f "$BK/current/users/alice/read.json" ] || fail "the backup left out users/ (read markers)"
-ok "dango backup copies the workspace, read markers included"
+[ -f "$BK/current/.vapid" ] || fail "the backup left out .vapid, which every push subscription depends on"
+ok "dango backup copies the workspace, read markers and push keys included"
 AGAIN="$("${DANGO[@]}" backup "$BK" --json)"
 [ "$(echo "$AGAIN" | jget files.fetched)" = "0" ] || fail "an unchanged workspace was fetched again: $AGAIN"
 ok "a second backup fetches nothing"

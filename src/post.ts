@@ -1,14 +1,16 @@
 import { loadVault } from '../../mochiforge/src/vault';
 import { listeningUsers, publish, publishToUser } from './events';
 import { Attachment, Message, addMessage, findByNonce, readMessage } from './messages';
+import { queueNotifications } from './notify';
 import { Room } from './rooms';
 import { audienceOf, isNewsFor, markRead, unreadIn } from './reads';
 
 // Sending a message, whichever door it came through. The web and the JSON
-// API both did the same four things after writing the file, and one of them
-// was bound to forget the fourth: the file, the read marker for the author
-// (you have seen what you just said), the event to the room's open pages,
-// and the count change to everyone the room reaches.
+// API both did the same things after writing the file, and one of them was
+// bound to forget one: the file, the read marker for the author (you have
+// seen what you just said), the event to the room's open pages, the count
+// change to everyone the room reaches, and the notifications for whoever is
+// not looking.
 
 export function postMessage(
   root: string,
@@ -34,6 +36,7 @@ export function postMessage(
   opts.settle?.(m.id);
   markRead(root, input.author, room.url, m.id);
   publish(room.url, { type: 'message', message: m });
+  queueNotifications(root, room, m);
   if (room.kind === 'thread') {
     // The parent message's reply count changed, so the parent room repaints it.
     const parent = readMessage(room.parent!.dir, room.threadOf!);

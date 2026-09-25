@@ -9,8 +9,8 @@ import { createHash } from 'crypto';
 // It is written to be unnecessary: every form here posts and every page
 // renders without it. What it adds is the live half of a chat: the event
 // stream that appends messages as they arrive, Enter sending the composer,
-// reactions posting without a page reload, and the theme applied before
-// first paint.
+// reactions posting without a page reload, the theme applied before first
+// paint, and turning notifications on for a device, which only script can do.
 
 const PAGE_JS = `
 // ---- appearance (the pattern from mochiforge, under dango's own key) ----
@@ -229,6 +229,17 @@ function applyTitle() {
     var href = f.iconBase + (total > 0 ? '&unread=' + (anyUrgent ? 'urgent' : 'some') : '');
     if (f.icon.getAttribute('href') !== href) f.icon.setAttribute('href', href);
   }
+  // The same total on the app's icon, where the workspace is installed as an
+  // app (the home screen on iOS, the dock or taskbar elsewhere). A browser tab
+  // has no such icon, and the call is refused there, quietly.
+  setAppBadge(total);
+}
+function setAppBadge(total) {
+  if (!navigator.setAppBadge) return;
+  try {
+    var p = total > 0 ? navigator.setAppBadge(total) : navigator.clearAppBadge();
+    if (p && p.catch) p.catch(function () {});
+  } catch (e) {}
 }
 function setCount(url, count, mentions) {
   counts[url] = count;
@@ -249,13 +260,18 @@ function seedCounts() {
   }
   applyTitle();
 }
+// The room whose messages are on screen: the list's own stream says, which
+// on a thread page is the thread rather than the room the sidebar marks.
 function markReadHere(id) {
   var f = frame();
   if (!f || !f.room || !window.fetch) return;
+  var list = msgList();
+  var stream = list ? list.getAttribute('data-stream') || '' : '';
+  var room = stream.slice(-7) === '/events' ? stream.slice(0, -7) : f.room;
   var body = new FormData();
   body.append('csrf', f.csrf);
   body.append('id', String(id));
-  fetch(f.room + '/read', { method: 'POST', body: body });
+  fetch(room + '/read', { method: 'POST', body: body });
 }
 function openUserStream() {
   var f = frame();
@@ -285,6 +301,169 @@ document.addEventListener('visibilitychange', function () {
   var last = parseInt(list.getAttribute('data-last') || '0', 10);
   if (last > 0) markReadHere(last);
   setCount(f.room, 0, 0);
+});
+
+// ---- notifications ----
+// The service worker is registered on every signed-in page: it is what shows
+// a push, and what makes the workspace installable. It does nothing else (see
+// src/sw.ts), so registering it changes nothing about how pages load.
+document.addEventListener('DOMContentLoaded', function () {
+  if (frame() && navigator.serviceWorker && window.isSecureContext) {
+    navigator.serviceWorker.register('/sw.js').catch(function () {});
+  }
+  var box = document.querySelector('[data-push]');
+  if (box) pushSetup(box);
+});
+function isIos() {
+  return /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+}
+function isStandalone() {
+  return navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
+}
+function pushSupported() {
+  return window.isSecureContext && navigator.serviceWorker && window.PushManager && window.Notification;
+}
+function keyBytes(b64) {
+  var s = atob(b64.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((b64.length + 3) % 4));
+  var out = new Uint8Array(s.length);
+  for (var i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+// Whether a subscription was made under this workspace's key. One made under
+// other keys (the workspace's were replaced) cannot be pushed to, and has to
+// be dropped before subscribing again.
+function sameKey(sub, want) {
+  var have = sub.options && sub.options.applicationServerKey;
+  if (!have) return true;
+  have = new Uint8Array(have);
+  if (have.length !== want.length) return false;
+  for (var i = 0; i < want.length; i++) if (have[i] !== want[i]) return false;
+  return true;
+}
+function pushPost(path, payload) {
+  var f = frame();
+  payload.csrf = f ? f.csrf : '';
+  return fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(payload)
+  }).then(function (r) {
+    return r.json().catch(function () { return {}; }).then(function (d) {
+      if (!r.ok) throw new Error(d.error || 'the workspace answered ' + r.status + '.');
+      return d;
+    });
+  });
+}
+function currentSubscription() {
+  return navigator.serviceWorker.getRegistration('/').then(function (reg) {
+    return reg ? reg.pushManager.getSubscription() : null;
+  });
+}
+function pushSetup(box) {
+  var status = box.querySelector('[data-push-status]');
+  var on = box.querySelector('[data-push-on]');
+  var off = box.querySelector('[data-push-off]');
+  var test = box.querySelector('[data-push-test]');
+  var key = keyBytes(box.getAttribute('data-vapid') || '');
+  function show(text, state) {
+    status.textContent = text;
+    on.hidden = state !== 'off';
+    off.hidden = state !== 'on';
+    test.hidden = state !== 'on';
+  }
+  if (!pushSupported()) {
+    if (isIos() && !isStandalone()) {
+      show('On iPhone and iPad, notifications come to the workspace as a Home Screen app. In Safari, tap Share, then Add to Home Screen; open the workspace from its new icon, sign in there, and come back to this page.', '');
+    } else if (!window.isSecureContext) {
+      show('Notifications need the workspace to be served over HTTPS.', '');
+    } else {
+      show('This browser cannot receive notifications from a web page.', '');
+    }
+    return;
+  }
+  function refresh() {
+    if (Notification.permission === 'denied') {
+      show("Notifications are blocked for this workspace in the browser's settings. Allow them there, then reload this page.", '');
+      return;
+    }
+    currentSubscription().then(function (sub) {
+      if (sub && sameKey(sub, key)) {
+        show('Notifications are on for this device.', 'on');
+        // Offered again on each visit, which keeps the workspace's copy of
+        // the keys current and restores a device removed from another one.
+        pushPost('/account/push/subscribe', { subscription: sub.toJSON() }).catch(function () {});
+      } else {
+        show('Notifications are off for this device.', 'off');
+      }
+    }, function () { show('Notifications are off for this device.', 'off'); });
+  }
+  on.addEventListener('click', function () {
+    on.disabled = true;
+    // Asked from the press itself: Safari grants the prompt only to a gesture.
+    Promise.resolve(Notification.requestPermission()).then(function (permission) {
+      if (permission !== 'granted') { on.disabled = false; refresh(); return; }
+      return navigator.serviceWorker.register('/sw.js')
+        .then(function () { return navigator.serviceWorker.ready; })
+        .then(function (reg) {
+          return reg.pushManager.getSubscription().then(function (old) {
+            if (old && !sameKey(old, key)) return old.unsubscribe().then(function () { return null; });
+            return old;
+          }).then(function (sub) {
+            return sub || reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+          });
+        })
+        .then(function (sub) { return pushPost('/account/push/subscribe', { subscription: sub.toJSON() }); })
+        .then(function () { location.reload(); });
+    }).catch(function (e) {
+      on.disabled = false;
+      show('Notifications could not be turned on: ' + (e && e.message ? e.message : e), 'off');
+    });
+  });
+  off.addEventListener('click', function () {
+    off.disabled = true;
+    currentSubscription().then(function (sub) {
+      if (!sub) return;
+      return pushPost('/account/push/remove', { endpoint: sub.endpoint }).catch(function () {}).then(function () { return sub.unsubscribe(); });
+    }).then(function () { location.reload(); }, function (e) {
+      off.disabled = false;
+      show('Notifications could not be turned off: ' + (e && e.message ? e.message : e), 'on');
+    });
+  });
+  test.addEventListener('click', function () {
+    test.disabled = true;
+    currentSubscription().then(function (sub) {
+      return pushPost('/account/push/test', { endpoint: sub ? sub.endpoint : '' });
+    }).then(function (r) {
+      if (r.sent) show('Sent. It should appear in a moment; if it does not, check that the system allows notifications from this browser.', 'on');
+      else if (r.gone) show("The push service says this browser's subscription has ended. Turn notifications on again.", 'off');
+      else show('The push service refused it' + (r.failed && r.failed[0] ? ' (' + r.failed[0].status + (r.failed[0].detail ? ': ' + r.failed[0].detail : '') + ')' : '') + '.', 'on');
+    }, function (e) {
+      show('The test was not sent: ' + (e && e.message ? e.message : e), 'on');
+    }).then(function () { test.disabled = false; });
+  });
+  refresh();
+}
+// Signing out drops this browser's subscription and tells the workspace, so
+// a shared computer stops showing the notifications of whoever left it. The
+// form still posts if any of this fails or takes too long.
+document.addEventListener('submit', function (e) {
+  var form = e.target;
+  if (!form.matches || !form.matches('form[action="/logout"]') || form.getAttribute('data-leaving')) return;
+  if (!pushSupported()) return;
+  e.preventDefault();
+  form.setAttribute('data-leaving', '1');
+  var sent = false;
+  function go() { if (sent) return; sent = true; setAppBadge(0); form.submit(); }
+  setTimeout(go, 2000);
+  currentSubscription().then(function (sub) {
+    if (!sub) return;
+    var field = document.createElement('input');
+    field.type = 'hidden';
+    field.name = 'push';
+    field.value = sub.endpoint;
+    form.appendChild(field);
+    return sub.unsubscribe();
+  }).then(go, go);
 });
 
 // ---- the composer ----

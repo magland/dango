@@ -3,6 +3,7 @@ import * as path from 'path';
 import { BackupLayout } from '../../mochiforge/src/api/backup';
 import { BackupProfile } from '../../mochiforge/src/cli/backup-cmd';
 import { CONFIG_FILE } from './config';
+import { VAPID_FILE } from './push';
 import { channelsDir, dmsDir, usersDir } from './workspace';
 
 // Backing up a workspace, with mochi's protocol and mochi's client. A
@@ -13,11 +14,16 @@ import { channelsDir, dmsDir, usersDir } from './workspace';
 // directory's current/ is a servable workspace, exactly as a vault backup's
 // is a servable vault.
 
-/** The state files at the workspace root. Nothing else there belongs to a workspace. */
-const ROOT_FILES = ['workspace.json', CONFIG_FILE, '.secret'];
+/**
+ * The state files at the workspace root. Nothing else there belongs to a
+ * workspace. .vapid is the key pair notifications are signed with; a restore
+ * without it would make new keys, and every browser's subscription, made
+ * under the old ones, would be refused.
+ */
+const ROOT_FILES = ['workspace.json', CONFIG_FILE, '.secret', VAPID_FILE];
 
 /** Which of those `--no-secrets` leaves out. config.json holds no credential. */
-const SECRET_FILES = new Set(['workspace.json', '.secret']);
+const SECRET_FILES = new Set(['workspace.json', '.secret', VAPID_FILE]);
 
 /**
  * An uploads directory: a `files/` that sits beside a `messages/`, which is
@@ -49,7 +55,7 @@ export function workspaceLayout(root: string): BackupLayout {
 export const DANGO_BACKUP: BackupProfile = {
   exclusions: [
     { category: 'files', summary: 'Leave out uploaded attachments (each room’s files/)' },
-    { category: 'secrets', summary: 'Leave out workspace.json and .secret' },
+    { category: 'secrets', summary: 'Leave out workspace.json, .secret, and .vapid' },
   ],
   repos: false,
   description: `A workspace is a directory, so a backup of one is a directory too, and this makes

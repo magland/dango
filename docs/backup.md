@@ -35,7 +35,7 @@ What the manifest covers: `workspace.json`, `config.json`, and `.secret` at the 
 
 `--snapshot` takes a hardlinked snapshot after a successful sync and prunes old ones under the retention policy (`--keep-daily`, `--keep-weekly`, `--keep-monthly`; 7, 4, and 6 by default). A snapshot costs inodes rather than bytes, since nothing in the backup is ever modified in place.
 
-`--no-files` leaves out uploaded attachments, which are usually most of a workspace's bytes, and backs up the conversation alone. `--no-secrets` leaves out `workspace.json` and `.secret`; a backup made that way is not directly servable, since it has no users, but it is safe to keep somewhere less trusted. Exclusions are remembered in `backup.json`, so a cron entry is the command and the directory.
+`--no-files` leaves out uploaded attachments, which are usually most of a workspace's bytes, and backs up the conversation alone. `--no-secrets` leaves out `workspace.json`, `.secret`, and `.vapid` (the key pair notifications are signed with); a backup made that way is not directly servable, since it has no users, and a workspace restored from it makes new push keys, so everyone turns notifications on again, but it is safe to keep somewhere less trusted. Exclusions are remembered in `backup.json`, so a cron entry is the command and the directory.
 
 `dango backup verify <dir>` asks the workspace for hashes of every file and reports anything missing, extra, or different. `dango backup list <dir>` shows the snapshots and how the last run went, and `dango backup prune <dir>` applies the retention policy without syncing.
 

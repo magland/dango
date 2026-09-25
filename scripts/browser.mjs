@@ -6,7 +6,7 @@
 // workspace, launches headless Chrome, and drives real pages over the
 // DevTools protocol (Node's built-in WebSocket; no dependencies): live
 // unread badges, the tab title and favicon, reading across pages,
-// @-completion, the account menu, and invite links.
+// @-completion, the account menu, notifications, and invite links.
 //
 // Run from the repository root after a build: node scripts/browser.mjs
 // Needs Node 22 or newer, and Chrome or Chromium (CHROME=<path> to choose).
@@ -182,6 +182,7 @@ async function openPage(cookie) {
   }
   const page = {
     sessionId,
+    contextId: browserContextId,
     /** Answer every JavaScript dialog (confirm, alert) this page opens from now on, recording its text. */
     answerDialogs(accept) {
       const seen = [];
@@ -399,6 +400,42 @@ ok('anyone in the room can unpin, and every page hears it');
 const link = await watcher.eval(`(() => { const a = document.querySelector('#msg-${pinned} .msg-body a[href^="https://example.com"]'); return a ? a.target + ' ' + a.rel : ''; })()`);
 if (!/^_blank .*noopener/.test(link)) fail(`a link out of the workspace does not open in a new tab: ${link}`);
 ok('a link out of the workspace opens in a new tab');
+
+// ---- notifications ----
+// No push service is reachable from here, so the push itself is handed to
+// the service worker over the DevTools protocol, which is the same event a
+// push service's message raises: what is checked is the worker's own code.
+
+const n1 = await openPage(aliceCookie);
+await send('Browser.grantPermissions', { permissions: ['notifications'], origin: base, browserContextId: n1.contextId });
+const registrations = [];
+listeners.push((msg) => {
+  if (msg.method === 'ServiceWorker.workerRegistrationUpdated' && msg.sessionId === n1.sessionId) registrations.push(...msg.params.registrations);
+});
+await send('ServiceWorker.enable', {}, n1.sessionId);
+await n1.go('/account');
+await waitFor('the service worker to be active', () => n1.eval("navigator.serviceWorker.getRegistration('/').then((r) => !!(r && r.active))"));
+ok('a signed-in page registers the service worker');
+await waitFor('the device status', async () => /off for this device/.test(await n1.eval("document.querySelector('[data-push-status]').textContent")));
+if (await n1.eval("document.querySelector('[data-push-on]').hidden")) fail('the account page offers no way to turn notifications on');
+ok('the account page says notifications are off here, and offers to turn them on');
+const reg = await waitFor('the registration to be reported', async () => registrations.find((r) => r.scopeURL === base + '/' && !r.isDeleted));
+await send(
+  'ServiceWorker.deliverPushMessage',
+  {
+    origin: base,
+    registrationId: reg.registrationId,
+    data: JSON.stringify({ title: '#general', body: 'bob: lunch?', tag: '/c/general', url: '/c/general', unread: 2, time: Date.now() }),
+  },
+  n1.sessionId
+);
+const shown = await waitFor('the notification to show', () =>
+  n1.eval(
+    "navigator.serviceWorker.getRegistration('/').then((r) => r.getNotifications()).then((ns) => (ns.length ? ns.map((n) => [n.title, n.body, n.tag, n.data && n.data.url].join('|')) : null))"
+  )
+);
+if (shown[0] !== '#general|bob: lunch?|/c/general|/c/general') fail(`the notification was not what the push said: ${JSON.stringify(shown)}`);
+ok('a push shows a notification naming the room and the message, and where pressing it goes');
 
 // ---- an invite link ----
 
