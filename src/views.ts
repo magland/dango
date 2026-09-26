@@ -419,6 +419,7 @@ function composer(room: Room, viewer: Viewer, placeholder: string): Html {
 <div class="mention-list" data-mention-list hidden role="listbox"></div>
 <div class="send-progress" data-send-progress hidden><div></div></div>
 <textarea name="body" rows="1" placeholder="${placeholder}" aria-label="${placeholder}"></textarea>
+<ul class="file-list" data-file-list hidden></ul>
 <div class="send-status" data-send-status role="status" aria-live="polite" hidden></div>
 <div class="composer-row"><label class="attach topbar-icon" title="Attach files">${PAPERCLIP_ICON}<input type="file" name="files" multiple aria-label="Attach files"></label><span class="file-size" data-file-total></span><span class="hint">Enter sends, Shift+Enter is a new line, markdown works</span><button class="btn btn-primary" type="submit">Send</button></div>
 </div></form></div>`;

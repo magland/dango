@@ -928,7 +928,7 @@ function sendProgress(form, fraction) {
   bar.firstElementChild.style.width = Math.round(Math.max(0.03, Math.min(1, fraction)) * 100) + '%';
 }
 function lockComposer(form, locked) {
-  var controls = form.querySelectorAll('textarea, input[type="file"], button[type="submit"]');
+  var controls = form.querySelectorAll('textarea, input[type="file"], button[type="submit"], [data-remove-file]');
   for (var i = 0; i < controls.length; i++) {
     if (controls[i].tagName === 'TEXTAREA') controls[i].readOnly = locked;
     else controls[i].disabled = locked;
@@ -998,9 +998,8 @@ function sendComposer(form) {
       sendProgress(form, null);
       sendStatus(form, '', '');
       if (ta) { ta.value = ''; autosize(ta); }
-      if (file) file.value = '';
       if (nonceField) nonceField.value = '';
-      showFileTotal(form);
+      if (file) { if (canEditFiles) setFiles(form, []); else { file.value = ''; showFiles(form); } }
       scrollToBottom();
       if (ta) ta.focus();
       return;
@@ -1024,27 +1023,148 @@ function sendComposer(form) {
   };
   xhr.send(data);
 }
-// What was chosen, quietly, beside the picker: the file's name, or how many
-// there are, and their total size. The picker itself is a paperclip, which
-// says nothing about what it holds.
-function showFileTotal(form) {
-  var el = form.querySelector('[data-file-total]');
-  if (!el) return;
+// What was chosen, under the text: each file by name and size, an image as a
+// small picture of itself, and a button that takes that one file out. Beside
+// the picker, how many there are and their total, once there is more than
+// one, and the limit when they are over it.
+//
+// The chosen files live in the picker, so that the form, with script or
+// without, sends what is shown. Where the browser can say what a picker holds
+// (a DataTransfer, which is everywhere but very old browsers), choosing more
+// adds to what was chosen, as pasting does, and a file can be taken out;
+// elsewhere a new choice replaces the old one, as a picker does by itself.
+var canEditFiles = (function () { try { new DataTransfer(); return true; } catch (e) { return false; } })();
+var REMOVE_ICON = '<svg class="glyph" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
+function listFiles(input) {
+  return input && input.files ? Array.prototype.slice.call(input.files) : [];
+}
+function setFiles(form, files) {
+  var input = form.querySelector('input[type="file"]');
+  var dt = new DataTransfer();
+  for (var i = 0; i < files.length; i++) dt.items.add(files[i]);
+  input.files = dt.files;
+  form.dangoFiles = files;
+  showFiles(form);
+}
+function showFiles(form) {
   var file = form.querySelector('input[type="file"]');
-  var n = file && file.files ? file.files.length : 0;
+  var files = listFiles(file);
+  var n = files.length;
   var bytes = selectedBytes(form);
   var max = parseInt(form.getAttribute('data-max-bytes') || '0', 10);
-  var what = n === 1 ? file.files[0].name + ', ' : n + ' files, ';
-  el.textContent = n > 0 ? what + humanSize(bytes) + (max && bytes > max ? ' (over the ' + humanSize(max) + ' limit)' : '') : '';
-  el.className = 'file-size' + (max && bytes > max ? ' over' : '');
+  var over = max && bytes > max;
+  var el = form.querySelector('[data-file-total]');
+  if (el) {
+    el.textContent = (n > 1 ? n + ' files, ' + humanSize(bytes) : '') + (over ? (n > 1 ? ' (over the ' : 'Over the ') + humanSize(max) + ' limit' + (n > 1 ? ')' : '') : '');
+    el.className = 'file-size' + (over ? ' over' : '');
+  }
+  var box = form.querySelector('[data-file-list]');
+  if (!box) return;
+  (form.dangoThumbs || []).forEach(function (u) { URL.revokeObjectURL(u); });
+  form.dangoThumbs = [];
+  box.innerHTML = '';
+  box.hidden = n === 0;
+  files.forEach(function (f, i) {
+    var li = document.createElement('li');
+    li.className = 'file-chip';
+    if (/^image[/]/.test(f.type) && window.URL && URL.createObjectURL) {
+      var img = document.createElement('img');
+      img.alt = '';
+      img.src = URL.createObjectURL(f);
+      form.dangoThumbs.push(img.src);
+      li.appendChild(img);
+    }
+    var name = document.createElement('span');
+    name.className = 'file-name';
+    name.textContent = f.name;
+    name.title = f.name;
+    li.appendChild(name);
+    var size = document.createElement('span');
+    size.className = 'file-size';
+    size.textContent = humanSize(f.size);
+    li.appendChild(size);
+    if (canEditFiles) {
+      var rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'file-remove';
+      rm.setAttribute('data-remove-file', String(i));
+      rm.setAttribute('aria-label', 'Remove ' + f.name);
+      rm.title = 'Remove';
+      rm.innerHTML = REMOVE_ICON;
+      li.appendChild(rm);
+    }
+    box.appendChild(li);
+  });
 }
 document.addEventListener('change', function (e) {
   var t = e.target;
   if (t.matches && t.matches('form[data-composer] input[type="file"]')) {
     var form = t.closest('form');
-    showFileTotal(form);
+    // A picker closed without choosing leaves what was there, and a file
+    // already held (the same change told twice) is not added again.
+    if (canEditFiles) {
+      var kept = (form.dangoFiles || []).slice();
+      listFiles(t).forEach(function (f) { if (kept.indexOf(f) < 0) kept.push(f); });
+      setFiles(form, kept);
+    } else showFiles(form);
     sendStatus(form, '', '');
   }
+});
+document.addEventListener('click', function (e) {
+  var rm = e.target.closest && e.target.closest('form[data-composer] [data-remove-file]');
+  if (!rm) return;
+  var form = rm.closest('form');
+  if (form.getAttribute('data-busy')) return;
+  var files = listFiles(form.querySelector('input[type="file"]'));
+  files.splice(parseInt(rm.getAttribute('data-remove-file'), 10), 1);
+  setFiles(form, files);
+  sendStatus(form, '', '');
+  var next = form.querySelectorAll('[data-remove-file]');
+  var ta = form.querySelector('textarea');
+  if (next.length) next[Math.min(parseInt(rm.getAttribute('data-remove-file'), 10), next.length - 1)].focus();
+  else if (ta) ta.focus();
+});
+// Pasting an image into the composer (or a file copied in a file manager)
+// attaches it, beside whatever the picker already holds. Only a paste with no
+// text in it: a copy from a spreadsheet or a word processor carries a picture
+// of the cells as well as their text, and the text is what was meant. A screenshot reaches the page named image.png
+// whatever it shows, so a pasted file with that sort of name is renamed for
+// the moment it was pasted, and two pastes are two names.
+function genericName(f) {
+  return !f.name || /^image[.]/i.test(f.name);
+}
+function pastedName(f, when, n) {
+  var ext = (f.type.split('/')[1] || 'png').split('+')[0];
+  function two(x) { return ('0' + x).slice(-2); }
+  var stamp = when.getFullYear() + '-' + two(when.getMonth() + 1) + '-' + two(when.getDate()) + ' ' + two(when.getHours()) + '.' + two(when.getMinutes()) + '.' + two(when.getSeconds());
+  return 'Pasted image ' + stamp + (n > 0 ? ' (' + (n + 1) + ')' : '') + '.' + ext;
+}
+document.addEventListener('paste', function (e) {
+  var ta = e.target;
+  if (!ta.matches || !ta.matches('.composer textarea')) return;
+  var form = ta.closest('form');
+  var input = form && form.querySelector('input[type="file"]');
+  var cd = e.clipboardData;
+  if (!input || !cd || !cd.files || cd.files.length === 0) return;
+  if (cd.getData('text/plain')) return;
+  e.preventDefault();
+  if (form.getAttribute('data-busy') || !canEditFiles) return;
+  var files = listFiles(input);
+  var taken = {};
+  for (var i = 0; i < files.length; i++) taken[files[i].name] = true;
+  var when = new Date();
+  for (i = 0; i < cd.files.length; i++) {
+    // A file copied from a file manager keeps its own name; the server tells
+    // two of the same name apart.
+    var f = cd.files[i];
+    if (!genericName(f)) { files.push(f); continue; }
+    var n = 0, name = pastedName(f, when, 0);
+    while (taken[name]) name = pastedName(f, when, ++n);
+    taken[name] = true;
+    files.push(new File([f], name, { type: f.type, lastModified: f.lastModified }));
+  }
+  setFiles(form, files);
+  sendStatus(form, '', '');
 });
 // Leaving the page mid-send would drop the upload; the browser asks first.
 window.addEventListener('beforeunload', function (e) {

@@ -326,6 +326,22 @@ form[data-busy] button[type="submit"] { opacity: 0.6; cursor: progress; }
 .composer-row { display: flex; align-items: center; gap: var(--s2); padding: 4px 8px 6px; }
 .composer-row .hint { color: var(--fg-subtle); font-size: var(--t-xs); margin-left: auto; text-align: right; }
 .composer-row [data-file-total] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The files about to be sent, under the text: a chip for each, an image as a
+   small picture of itself, with a button that takes that one out. */
+.file-list { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 0; padding: 0 8px 4px; }
+.file-list[hidden] { display: none; }
+.file-chip {
+  display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 280px; padding: 3px 3px 3px 8px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); font-size: var(--t-xs);
+}
+.file-chip:has(img) { padding-left: 3px; }
+.file-chip img { flex: none; width: 28px; height: 28px; object-fit: cover; border-radius: 3px; }
+.file-chip .file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.file-chip .file-size { flex: none; }
+.file-remove { flex: none; display: flex; border: none; background: none; padding: 3px; border-radius: 3px; color: var(--fg-subtle); cursor: pointer; }
+.file-remove:hover { background: var(--surface-hover); color: var(--fg); }
+.file-remove:disabled { opacity: 0.5; cursor: progress; }
+.file-remove .glyph { color: inherit; }
 /* The file picker is a paperclip. The input inside it is the real control,
    kept for the keyboard and the form but not drawn, so the browser's own
    "Choose Files" button does not sit in the composer. */
@@ -411,8 +427,11 @@ table.people td.actions { text-align: right; white-space: nowrap; }
   .composer textarea { grid-row: 2; grid-column: 2; padding: 9px 4px; min-height: 0; }
   .composer .attach { grid-row: 2; grid-column: 1; margin: 4px 0 4px 4px; }
   .composer button[type="submit"] { grid-row: 2; grid-column: 3; margin: 4px 4px 4px 0; }
-  .send-status { grid-row: 3; }
-  .composer-row [data-file-total] { grid-row: 4; padding: 0 12px 6px; }
+  .file-list { grid-row: 3; padding: 0 6px 6px; }
+  .file-chip { max-width: 100%; }
+  .file-remove { padding: 7px; }
+  .send-status { grid-row: 4; }
+  .composer-row [data-file-total] { grid-row: 5; grid-column: 1 / -1; padding: 0 12px 6px; }
   .composer-row [data-file-total]:empty { display: none; }
   .composer-row .hint { display: none; }
   .mention-list { left: 0; right: 0; width: auto; }

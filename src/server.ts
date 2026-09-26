@@ -31,14 +31,15 @@ import { registerWeb } from './web';
  * mochiforge's (see its src/server.ts): script-src 'self' and no inline
  * script anywhere, inline style allowed because the interface paints with
  * computed values and style cannot execute, img-src open because markdown
- * already references external images. form-action needs no second origin
+ * already references external images, and blob: for the composer's pictures
+ * of the images about to be sent, which the page script makes itself. form-action needs no second origin
  * here, since nothing posts anywhere else.
  */
 const APP_CSP = [
   "default-src 'self'",
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
-  'img-src * data:',
+  'img-src * data: blob:',
   "font-src 'self'",
   "connect-src 'self'",
   "object-src 'none'",

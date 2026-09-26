@@ -341,8 +341,8 @@ const bigFile = path.join(tmp, 'recording.bin');
 fs.writeFileSync(bigFile, Buffer.alloc(3 * 1024 * 1024, 7));
 await s1.eval("document.querySelector('.composer textarea').value = 'a slow upload'; true");
 await s1.setFiles('.composer input[type=file]', [bigFile]);
-if (!/3\.0 MB/.test(await s1.eval("document.querySelector('[data-file-total]').textContent"))) fail('the composer does not show the chosen files’ size');
-ok('choosing files shows their total size beside the picker');
+if (!/recording\.bin\s*3\.0 MB/.test(await s1.eval("document.querySelector('[data-file-list]').textContent"))) fail('the composer does not show the chosen file’s name and size');
+ok('choosing a file shows its name and size under the text');
 // About a megabyte a second, so the upload lasts long enough to press again.
 await s1.network({ uploadThroughput: 1024 * 1024 });
 await s1.eval("document.querySelector('.composer button[type=submit]').click(); true");
@@ -386,7 +386,44 @@ await waitFor('the size refusal', async () => /at most 20\.0 MB/.test(await s1.e
 await sleep(300);
 if ((await lastId()) !== beforeHuge) fail('an oversized attachment was sent');
 ok('attachments over 20 MB are refused before any of it is uploaded');
-await s1.setFiles('.composer input[type=file]', []);
+await s1.eval("document.querySelector('[data-remove-file]').click(); true");
+if ((await s1.eval("document.querySelector('.composer input[type=file]').files.length")) !== 0) fail('removing the only file left it chosen');
+if (!(await s1.eval("document.querySelector('[data-file-list]').hidden"))) fail('the file list stayed after its last file was removed');
+
+// A screenshot pasted into the composer becomes an attachment with a name of
+// its own; a paste that carries text as well stays text.
+const pasteInto = (withText) => s1.eval(`(() => {
+  const dt = new DataTransfer();
+  dt.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'image.png', { type: 'image/png' }));
+  ${withText ? "dt.setData('text/plain', 'cells');" : ''}
+  const ta = document.querySelector('.composer textarea');
+  return !ta.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+})()`);
+if (await pasteInto(true)) fail('a paste with text in it was taken as an attachment');
+if ((await s1.eval("document.querySelector('.composer input[type=file]').files.length")) !== 0) fail('a paste with text in it attached its picture');
+if (!(await pasteInto(false)) || !(await pasteInto(false))) fail('pasting an image was not taken as an attachment');
+const pasted = await s1.eval("Array.from(document.querySelector('.composer input[type=file]').files).map((f) => f.name)");
+if (pasted.length !== 2 || !pasted.every((n) => /^Pasted image .*\.png$/.test(n)) || pasted[0] === pasted[1]) fail(`pasted images were not attached under names of their own: ${JSON.stringify(pasted)}`);
+if (!/^2 files, /.test(await s1.eval("document.querySelector('[data-file-total]').textContent"))) fail('pasted images are not counted beside the picker');
+if ((await s1.eval("document.querySelectorAll('[data-file-list] img').length")) !== 2) fail('pasted images are not shown as pictures');
+// Choosing with the paperclip adds to what was pasted, and one file can be
+// taken out and leave the rest.
+const note = path.join(tmp, 'notes.txt');
+fs.writeFileSync(note, 'notes');
+await s1.setFiles('.composer input[type=file]', [note]);
+const chosen = async () => s1.eval("Array.from(document.querySelector('.composer input[type=file]').files).map((f) => f.name)");
+if ((await chosen()).join('|') !== [...pasted, 'notes.txt'].join('|')) fail(`choosing a file did not add it to the pasted ones: ${JSON.stringify(await chosen())}`);
+await s1.eval("document.querySelectorAll('[data-remove-file]')[1].click(); true");
+if ((await chosen()).join('|') !== [pasted[0], 'notes.txt'].join('|')) fail(`removing one file did not leave the others: ${JSON.stringify(await chosen())}`);
+if ((await s1.eval("document.querySelectorAll('[data-file-list] li').length")) !== 2) fail('the file list does not match what is chosen');
+ok('choosing adds to what is there, and one file can be removed, leaving the rest');
+const beforePaste = await lastId();
+await s1.eval("document.querySelector('.composer textarea').value = 'a screenshot'; document.querySelector('.composer button[type=submit]').click(); true");
+await waitFor('the pasted images to be sent', async () => (await lastId()) === beforePaste + 1);
+const sentFiles = ((await api(bob, 'GET', '/channels/random/messages?limit=1')).messages[0].files ?? []).map((f) => f.name);
+if (sentFiles.join('|') !== [pasted[0], 'notes.txt'].join('|')) fail(`what was sent is not what was shown: ${JSON.stringify(sentFiles)}`);
+if (!(await s1.eval("document.querySelector('[data-file-list]').hidden && document.querySelector('.composer input[type=file]').files.length === 0"))) fail('the files stayed chosen after sending');
+ok('pasting an image attaches it under its own name, and a paste with text stays text');
 
 // ---- deleting asks first ----
 
