@@ -392,16 +392,16 @@ if (!(await s1.eval("document.querySelector('[data-file-list]').hidden"))) fail(
 
 // A screenshot pasted into the composer becomes an attachment with a name of
 // its own; a paste that carries text as well stays text.
-const pasteInto = (withText) => s1.eval(`(() => {
+const pasteInto = (text, name = 'image.png', type = 'image/png') => s1.eval(`(() => {
   const dt = new DataTransfer();
-  dt.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'image.png', { type: 'image/png' }));
-  ${withText ? "dt.setData('text/plain', 'cells');" : ''}
+  dt.items.add(new File([new Uint8Array([137, 80, 78, 71])], ${JSON.stringify(name)}, { type: ${JSON.stringify(type)} }));
+  ${text ? `dt.setData('text/plain', ${JSON.stringify(text)});` : ''}
   const ta = document.querySelector('.composer textarea');
   return !ta.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
 })()`);
-if (await pasteInto(true)) fail('a paste with text in it was taken as an attachment');
+if (await pasteInto('A1\tB1\nA2\tB2')) fail('a paste with text in it was taken as an attachment');
 if ((await s1.eval("document.querySelector('.composer input[type=file]').files.length")) !== 0) fail('a paste with text in it attached its picture');
-if (!(await pasteInto(false)) || !(await pasteInto(false))) fail('pasting an image was not taken as an attachment');
+if (!(await pasteInto()) || !(await pasteInto())) fail('pasting an image was not taken as an attachment');
 const pasted = await s1.eval("Array.from(document.querySelector('.composer input[type=file]').files).map((f) => f.name)");
 if (pasted.length !== 2 || !pasted.every((n) => /^Pasted image .*\.png$/.test(n)) || pasted[0] === pasted[1]) fail(`pasted images were not attached under names of their own: ${JSON.stringify(pasted)}`);
 if (!/^2 files, /.test(await s1.eval("document.querySelector('[data-file-total]').textContent"))) fail('pasted images are not counted beside the picker');
@@ -424,6 +424,13 @@ const sentFiles = ((await api(bob, 'GET', '/channels/random/messages?limit=1')).
 if (sentFiles.join('|') !== [pasted[0], 'notes.txt'].join('|')) fail(`what was sent is not what was shown: ${JSON.stringify(sentFiles)}`);
 if (!(await s1.eval("document.querySelector('[data-file-list]').hidden && document.querySelector('.composer input[type=file]').files.length === 0"))) fail('the files stayed chosen after sending');
 ok('pasting an image attaches it under its own name, and a paste with text stays text');
+// A file copied in a file manager arrives with its path as the text; the
+// file is what was meant, under its own name.
+if (!(await pasteInto('/home/someone/Downloads/cymbal (1).gif', 'cymbal (1).gif', 'image/gif'))) fail('a file pasted with its path was taken as text');
+if ((await chosen()).join('|') !== 'cymbal (1).gif') fail(`a file pasted with its path was not attached under its name: ${JSON.stringify(await chosen())}`);
+if ((await s1.eval("document.querySelector('.composer textarea').value")) !== '') fail('a file pasted with its path also pasted the path');
+await s1.eval("document.querySelector('[data-remove-file]').click(); true");
+ok('a file copied in a file manager is attached, not pasted as its path');
 
 // ---- deleting asks first ----
 

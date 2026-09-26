@@ -1125,11 +1125,26 @@ document.addEventListener('click', function (e) {
   else if (ta) ta.focus();
 });
 // Pasting an image into the composer (or a file copied in a file manager)
-// attaches it, beside whatever the picker already holds. Only a paste with no
-// text in it: a copy from a spreadsheet or a word processor carries a picture
-// of the cells as well as their text, and the text is what was meant. A screenshot reaches the page named image.png
-// whatever it shows, so a pasted file with that sort of name is renamed for
-// the moment it was pasted, and two pastes are two names.
+// attaches it, beside whatever the picker already holds. A copy from a
+// spreadsheet or a word processor carries a picture of the cells as well as
+// their text, and the text is what was meant; so a paste with text in it is
+// left to be text, unless the text only names the files (a file manager's
+// copy comes with the file's path). A screenshot reaches the page named
+// image.png whatever it shows, so a pasted file with that sort of name is
+// renamed for the moment it was pasted, and two pastes are two names.
+function onlyNames(text, files) {
+  var names = {};
+  for (var i = 0; i < files.length; i++) names[files[i].name] = true;
+  var lines = text.split(/[\\r\\n]+/);
+  for (i = 0; i < lines.length; i++) {
+    var base = lines[i].trim().split(/[\\\\/]/).pop();
+    if (base && !names[base] && !names[decodeName(base)]) return false;
+  }
+  return true;
+}
+function decodeName(s) {
+  try { return decodeURIComponent(s); } catch (e) { return s; }
+}
 function genericName(f) {
   return !f.name || /^image[.]/i.test(f.name);
 }
@@ -1146,7 +1161,8 @@ document.addEventListener('paste', function (e) {
   var input = form && form.querySelector('input[type="file"]');
   var cd = e.clipboardData;
   if (!input || !cd || !cd.files || cd.files.length === 0) return;
-  if (cd.getData('text/plain')) return;
+  var text = cd.getData('text/plain');
+  if (text && !onlyNames(text, cd.files)) return;
   e.preventDefault();
   if (form.getAttribute('data-busy') || !canEditFiles) return;
   var files = listFiles(input);
