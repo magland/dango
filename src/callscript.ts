@@ -31,6 +31,16 @@ import { createHash } from 'crypto';
 // make calls at all (classes, async functions), since it is a port of
 // TypeScript classes and reads best kept close to them.
 //
+// Connections fail, and when they do there should be something to go on.
+// Each connection keeps the kinds of network candidate its browser found and
+// the errors ICE servers answered with; its path once open (direct or through
+// the relay, over which protocol) is read from the browser's statistics.
+// The dock's settings panel shows all of it, live, with a button that copies
+// it as text; and the page reports each connection's outcome to the workspace
+// (see src/calllog.ts), where a site admin can read it. The admin page also
+// runs a test of the workspace's STUN and TURN servers from here (test, at
+// the end), which is the one way to know from a browser that a relay works.
+//
 // What is drawn is one element, the dock. In the call's own room it sits
 // under the room's header as a strip of small tiles; anywhere else it floats
 // in a corner, small, and can be dragged; and either can be expanded to fill
@@ -94,13 +104,18 @@ class Peer {
     this.pendingCandidates = [];
     this.disconnectTimer = null;
     this.closed = false;
+    // What ICE found and what went wrong, for the diagnostics.
+    this.gathered = new Set();
+    this.iceErrors = [];
     // Both sides add their tracks up front: the initiator's one offer then
     // covers all media, and the answerer's tracks ride back in the answer.
     for (const track of localStream.getTracks()) this.pc.addTrack(track, localStream);
     this.pc.ontrack = (e) => { if (e.streams[0] && this.handlers.track) this.handlers.track(e.streams[0]); };
     this.pc.onicecandidate = (e) => {
+      if (e.candidate && e.candidate.type) this.gathered.add(e.candidate.type + '/' + (e.candidate.protocol || 'udp'));
       if (e.candidate && this.handlers.signal) this.handlers.signal({ type: 'candidate', candidate: e.candidate.toJSON() });
     };
+    this.pc.onicecandidateerror = (e) => noteIceError(this.iceErrors, e);
     this.pc.onconnectionstatechange = () => {
       const s = this.pc.connectionState;
       if (s === 'connected') {
@@ -245,6 +260,64 @@ function validSignal(s) {
   if (!s || typeof s !== 'object') return false;
   if (s.type === 'offer' || s.type === 'answer') return typeof s.sdp === 'string';
   return s.type === 'candidate' && !!s.candidate && typeof s.candidate === 'object';
+}
+
+// ---- diagnostics ----
+function noteIceError(list, e) {
+  const err = { url: e.url || '', code: e.errorCode || 0, text: e.errorText || '' };
+  if (list.length < 10 && !list.some((x) => x.url === err.url && x.code === err.code)) list.push(err);
+}
+
+function iceErrorText(e) {
+  if (e.code === 401) return 'refused the credentials (401)';
+  if (e.code === 701) return 'could not be reached (701)';
+  return 'answered ' + e.code + (e.text ? ' ' + e.text : '');
+}
+
+// The pair of candidates a connection is using, and what its media look
+// like, from the browser's statistics. Chrome names the pair on the
+// transport; Firefox marks it selected.
+async function readStats(pc) {
+  let report;
+  try { report = await pc.getStats(); } catch (e) { return null; }
+  const byId = new Map();
+  report.forEach((s) => byId.set(s.id, s));
+  let pair = null;
+  report.forEach((s) => { if (s.type === 'transport' && s.selectedCandidatePairId && byId.get(s.selectedCandidatePairId)) pair = byId.get(s.selectedCandidatePairId); });
+  if (!pair) report.forEach((s) => { if (!pair && s.type === 'candidate-pair' && s.state === 'succeeded' && (s.selected || s.nominated)) pair = s; });
+  const out = { path: null, url: '', inVideo: null, outVideo: null };
+  if (pair) {
+    const l = byId.get(pair.localCandidateId), r = byId.get(pair.remoteCandidateId);
+    if (l && r) {
+      out.path = { local: l.candidateType, remote: r.candidateType, protocol: l.protocol || '' };
+      if (l.relayProtocol) out.path.relayProtocol = l.relayProtocol;
+      if (typeof pair.currentRoundTripTime === 'number') out.path.rtt = pair.currentRoundTripTime;
+      if (l.candidateType === 'relay' && l.url) out.url = l.url;
+    }
+  }
+  report.forEach((s) => {
+    if (s.type === 'inbound-rtp' && s.kind === 'video') out.inVideo = { w: s.frameWidth || 0, h: s.frameHeight || 0, fps: s.framesPerSecond || 0, lost: s.packetsLost || 0, got: s.packetsReceived || 0, bytes: s.bytesReceived || 0 };
+    if (s.type === 'outbound-rtp' && s.kind === 'video') out.outVideo = { w: s.frameWidth || 0, h: s.frameHeight || 0, fps: s.framesPerSecond || 0, limit: s.qualityLimitationReason || 'none', bytes: s.bytesSent || 0 };
+  });
+  return out;
+}
+
+function pathText(p, url) {
+  if (!p) return 'by a path the browser does not report';
+  if (p.local === 'relay') return 'through the relay (TURN over ' + (p.relayProtocol || p.protocol || 'udp').toUpperCase() + (url ? ', ' + url : '') + ')';
+  if (p.remote === 'relay') return 'through their relay';
+  return 'directly (' + (p.protocol || 'udp').toUpperCase() + ')';
+}
+
+const KIND_WORDS = { host: 'its own addresses', srflx: 'its public address (STUN)', prflx: 'an address seen by the other side', relay: 'a relay address (TURN)' };
+function kindsText(gathered) {
+  const kinds = [];
+  for (const g of gathered) { const k = g.split('/')[0]; if (kinds.indexOf(k) < 0) kinds.push(k); }
+  return kinds.length ? kinds.map((k) => KIND_WORDS[k] || k).join(', ') : 'no addresses';
+}
+
+function hasRelay(ice) {
+  return !!ice && ice.iceServers.some((s) => s.urls.some((u) => u.indexOf('turn') === 0));
 }
 
 // ---- who is speaking ----
@@ -392,6 +465,10 @@ class Call {
     this.pendingRoster = null;
     this.pendingSignals = [];
     this.conns = new Map();
+    this.attempts = new Map();
+    this.diagTimer = null;
+    this.diagText = '';
+    this.lastBytes = new Map();
     this.localStream = null;
     this.screenStream = null;
     this.micAvailable = false;
@@ -468,6 +545,7 @@ class Call {
     for (const c of conns) c.peer.destroy();
     if (this.retryTimer) clearInterval(this.retryTimer);
     if (this.iceTimer) clearTimeout(this.iceTimer);
+    if (this.diagTimer) clearInterval(this.diagTimer);
     this.levels.stop();
     for (const s of [this.screenStream, this.localStream]) {
       if (s) for (const t of s.getTracks()) t.stop();
@@ -574,6 +652,7 @@ class Call {
       if (!conn.absentSince) conn.absentSince = now;
       if (!conn.connected || now - conn.absentSince > ROSTER_ABSENCE_MS) {
         this.conns.delete(id);
+        conn.quiet = true;
         conn.peer.destroy();
         this.levels.unwatch(id);
       }
@@ -613,8 +692,11 @@ class Call {
 
   createPeer(id, initiator) {
     const peer = new Peer(initiator, this.outgoingStream(), this.iceServers());
+    const attempt = (this.attempts.get(id) || 0) + 1;
+    this.attempts.set(id, attempt);
     const conn = {
       peer: peer, createdAt: Date.now(), connected: false, stream: null,
+      attempt: attempt, connectedAt: 0, quiet: false, reported: {}, path: null, url: '',
       audioMuted: true, videoMuted: true, screen: false,
       chain: Promise.resolve(), outbox: new Outbox(this, id)
     };
@@ -628,6 +710,10 @@ class Call {
       },
       connect: () => {
         conn.connected = true;
+        conn.connectedAt = Date.now();
+        this.attempts.set(id, 0);
+        // A moment for the browser to settle on the pair it uses.
+        setTimeout(() => this.report(id, conn, 'connected'), 2500);
         this.sendHello(conn);
         this.applyVideoParamsTo(conn);
         this.render();
@@ -635,6 +721,7 @@ class Call {
       data: (raw) => this.handleControl(id, conn, raw),
       close: () => {
         conn.outbox.close();
+        if (!conn.quiet && this.phase === 'in') this.report(id, conn, conn.connectedAt ? 'dropped' : 'failed');
         if (this.conns.get(id) === conn) {
           this.conns.delete(id);
           this.levels.unwatch(id);
@@ -664,6 +751,88 @@ class Call {
       if (!validSignal(s)) continue;
       conn.chain = conn.chain.then(() => conn.peer.signal(s));
     }
+  }
+
+  // ---- reports and diagnostics ----
+  // Each connection's outcome goes to the workspace once: open (with its
+  // path), an attempt given up, or an open connection dropped.
+  async report(id, conn, outcome) {
+    if (conn.reported[outcome] || this.phase !== 'in') return;
+    conn.reported[outcome] = true;
+    if (outcome === 'connected') {
+      const stats = await readStats(conn.peer.pc);
+      if (stats && stats.path) { conn.path = stats.path; conn.url = stats.url; }
+    }
+    const now = Date.now();
+    const known = this.known.get(id);
+    const report = {
+      outcome: outcome,
+      ms: outcome === 'connected' ? conn.connectedAt - conn.createdAt : outcome === 'dropped' ? now - conn.connectedAt : now - conn.createdAt,
+      attempt: conn.attempt,
+      path: conn.path || undefined,
+      gathered: Array.from(conn.peer.gathered),
+      errors: conn.peer.iceErrors,
+      relayOffered: hasRelay(this.ice)
+    };
+    this.post('report', { to: id, toUser: known ? known.user : '', report: report }).catch(() => {});
+  }
+
+  // The panel's list of connections, redrawn every two seconds while it is
+  // open, and the same as text for the copy button.
+  async renderDiag() {
+    if (!this.el) return;
+    const list = this.el.querySelector('[data-call-diag]');
+    const rows = [];
+    const text = [
+      'dango call details, ' + new Date().toISOString(),
+      'Room: ' + this.title + ' (' + location.origin + this.room + ')',
+      'Browser: ' + navigator.userAgent,
+      'ICE servers: ' + (this.ice ? this.ice.iceServers.map((s) => s.urls.join(' ') + (s.username ? ' (with credentials)' : '')).join('; ') || 'none' : 'not yet given')
+    ];
+    const gathered = new Set(), errors = [];
+    for (const c of this.conns.values()) {
+      for (const g of c.peer.gathered) gathered.add(g);
+      for (const e of c.peer.iceErrors) if (!errors.some((x) => x.url === e.url && x.code === e.code)) errors.push(e);
+    }
+    let mine = 'This browser found ' + kindsText(gathered) + '. ' + (hasRelay(this.ice) ? 'The workspace offers a relay.' : 'The workspace offers no relay.');
+    if (errors.length) mine += ' ICE servers answered with errors: ' + errors.map((e) => e.url + ' ' + iceErrorText(e)).join('; ') + '.';
+    rows.push(mine);
+    for (const p of (this.ice && this.ice.problems) || []) rows.push(p);
+    text.push(...rows);
+    const now = Date.now();
+    for (const [id, c] of this.conns) {
+      const who = this.known.get(id) ? this.known.get(id).user : 'someone';
+      const pc = c.peer.pc;
+      if (!c.connected) {
+        const line = who + ': connecting for ' + Math.round((now - c.createdAt) / 1000) + ' s' + (c.attempt > 1 ? ', attempt ' + c.attempt + ' (earlier ones failed)' : '') + '.';
+        rows.push(line);
+        text.push(line + ' State: ' + pc.connectionState + ', ICE ' + pc.iceConnectionState + ', gathering ' + pc.iceGatheringState + '. Found: ' + Array.from(c.peer.gathered).join(', ') + '.');
+        continue;
+      }
+      const s = await readStats(pc);
+      if (!this.el) return;
+      let line = who + ': connected ' + pathText(s && s.path, s && s.url);
+      if (s && s.path && typeof s.path.rtt === 'number') line += ', ' + Math.round(s.path.rtt * 1000) + ' ms round trip';
+      const prev = this.lastBytes.get(id);
+      const media = [];
+      if (s && s.inVideo) {
+        const v = s.inVideo;
+        const kbps = prev ? Math.round(((v.bytes - prev.inBytes) * 8) / (now - prev.at)) : 0;
+        const lost = v.got + v.lost ? (100 * v.lost) / (v.got + v.lost) : 0;
+        media.push('receiving ' + (v.w ? v.w + '×' + v.h + ' at ' + Math.round(v.fps) + ' fps, ' : '') + kbps + ' kb/s, ' + lost.toFixed(1) + '% lost');
+      }
+      if (s && s.outVideo) {
+        const v = s.outVideo;
+        const kbps = prev ? Math.round(((v.bytes - prev.outBytes) * 8) / (now - prev.at)) : 0;
+        media.push('sending ' + (v.w ? v.w + '×' + v.h + ', ' : '') + kbps + ' kb/s' + (v.limit !== 'none' ? ' (held back by ' + v.limit + ')' : ''));
+      }
+      if (s) this.lastBytes.set(id, { at: now, inBytes: s.inVideo ? s.inVideo.bytes : 0, outBytes: s.outVideo ? s.outVideo.bytes : 0 });
+      rows.push(line + '.' + (media.length ? ' ' + media.join('; ') + '.' : ''));
+      text.push(rows[rows.length - 1] + ' Found: ' + Array.from(c.peer.gathered).join(', ') + '.');
+    }
+    if (!this.conns.size) rows.push(this.phase === 'in' ? 'Nobody else is in the call yet.' : 'Joining…');
+    list.innerHTML = rows.map((r) => '<li>' + escapeHtml(r) + '</li>').join('');
+    this.diagText = text.join('\\n');
   }
 
   // ---- the control channel ----
@@ -700,6 +869,7 @@ class Call {
       conn.screen = msg.screen === true;
       this.render();
     } else if (msg.t === 'bye') {
+      conn.quiet = true;
       conn.peer.destroy();
     }
   }
@@ -910,11 +1080,13 @@ class Call {
       (canPickSpeaker ? '<label>Speaker <select data-call-device="speaker"></select></label>' : '') +
       '<label>Video quality <select data-call-quality>' + QUALITIES.map((q) => '<option value="' + q + '">' + QUALITY_LABELS[q] + '</option>').join('') + '</select></label>' +
       '<p class="muted">The quality is the whole call\\'s: changing it changes what everyone sends. Lower suits slower connections, since each person sends their video to each other one.</p>' +
+      '<div class="call-diag"><strong>Connections</strong><ul data-call-diag></ul>' +
+      '<button type="button" class="call-copy" data-call-act="copy">Copy the details</button> <span class="muted">to send to whoever looks after the workspace, if a call will not connect.</span></div>' +
       '</div>' +
       '<div class="call-controls">' +
       controlButton('mic', 'Microphone') + controlButton('cam', 'Camera') +
       (canShareScreen ? controlButton('screen', 'Share your screen') : '') +
-      controlButton('settings', 'Devices and quality') +
+      controlButton('settings', 'Devices, quality, and connections') +
       '<button type="button" class="call-leave" data-call-act="leave" title="Leave the call">' + ICONS.leave + '<span>Leave</span></button>' +
       '</div>';
     el.querySelector('.call-where').textContent = this.title;
@@ -944,6 +1116,7 @@ class Call {
       else if (act === 'settings') this.toggleSettings();
       else if (act === 'size') this.setFull(!this.full);
       else if (act === 'dismiss') this.setNotice('');
+      else if (act === 'copy') { if (this.diagText) copyText(b, this.diagText); }
       else if (act === 'leave') this.leave();
       return;
     }
@@ -969,7 +1142,12 @@ class Call {
   toggleSettings() {
     const box = this.el.querySelector('.call-settings');
     box.hidden = !box.hidden;
-    if (!box.hidden) this.fillDevices();
+    if (this.diagTimer) { clearInterval(this.diagTimer); this.diagTimer = null; }
+    if (!box.hidden) {
+      this.fillDevices();
+      this.renderDiag();
+      this.diagTimer = setInterval(() => this.renderDiag(), 2000);
+    }
     this.render();
   }
 
@@ -1207,6 +1385,10 @@ class Call {
       if (stream) v.play().catch(() => {});
     }
     if (id !== 'self' && canPickSpeaker && this.speaker && v.sinkId !== this.speaker) v.setSinkId(this.speaker).catch(() => {});
+    const c = id === 'self' ? null : this.conns.get(id);
+    const wait = tile.querySelector('.call-wait');
+    const waitText = c && c.attempt > 1 ? 'Still trying to connect…' : 'Connecting…';
+    if (wait.textContent !== waitText) wait.textContent = waitText;
     tile.classList.toggle('video-off', videoOff || connecting);
     tile.classList.toggle('connecting', connecting);
     tile.classList.toggle('mirror', mirror);
@@ -1217,6 +1399,134 @@ class Call {
     setHtml(label, text);
     tile.title = id === 'self' ? 'You' : name;
   }
+}
+
+// ---- testing the workspace's servers ----
+// For the admin page: each STUN server is asked for this browser's public
+// address, and a connection from this page to itself is made through each
+// TURN server alone, with relay candidates only, and a message sent round
+// it. A relay address coming back shows the server took the credentials; the
+// message coming back shows media can actually flow through it.
+
+// Candidates found through one set of servers, without connecting anywhere.
+function probe(servers, ms) {
+  return new Promise((resolve) => {
+    const pc = new RTCPeerConnection({ iceServers: servers });
+    const found = new Set(), errors = [];
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try { pc.close(); } catch (e) {}
+      resolve({ found: found, errors: errors });
+    };
+    const timer = setTimeout(finish, ms);
+    pc.onicecandidate = (e) => { if (e.candidate) { if (e.candidate.type) found.add(e.candidate.type); } else finish(); };
+    pc.onicecandidateerror = (e) => noteIceError(errors, e);
+    pc.createDataChannel('probe');
+    pc.createOffer().then((o) => pc.setLocalDescription(o)).catch(finish);
+  });
+}
+
+// A connection from this page to itself through the relay, and a message
+// sent round it.
+function relayLoop(servers, ms) {
+  return new Promise((resolve) => {
+    const cfg = { iceServers: servers, iceTransportPolicy: 'relay' };
+    const a = new RTCPeerConnection(cfg), b = new RTCPeerConnection(cfg);
+    const errors = [], found = new Set(), started = Date.now();
+    let done = false;
+    const finish = async (ok) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      const ms = Date.now() - started;
+      const stats = ok ? await readStats(a) : null;
+      a.close();
+      b.close();
+      resolve({ ok: ok, ms: ms, path: stats && stats.path, errors: errors, found: found });
+    };
+    const timer = setTimeout(() => finish(false), ms);
+    // Candidates wait for the other side to have a description to add them to.
+    const queue = new Map([[a, []], [b, []]]);
+    const ready = new Set();
+    const deliver = (to, cand) => { if (ready.has(to)) to.addIceCandidate(cand).catch(() => {}); else queue.get(to).push(cand); };
+    const opened = (pc) => { ready.add(pc); for (const c of queue.get(pc).splice(0)) pc.addIceCandidate(c).catch(() => {}); };
+    for (const [x, y] of [[a, b], [b, a]]) {
+      x.onicecandidate = (e) => { if (e.candidate) { if (e.candidate.type) found.add(e.candidate.type); deliver(y, e.candidate); } };
+      x.onicecandidateerror = (e) => noteIceError(errors, e);
+    }
+    b.ondatachannel = (e) => { e.channel.onmessage = (m) => e.channel.send(m.data); };
+    const ch = a.createDataChannel('relay-test');
+    ch.onopen = () => ch.send('ping');
+    ch.onmessage = () => finish(true);
+    a.createOffer()
+      .then((o) => a.setLocalDescription(o))
+      .then(() => b.setRemoteDescription(a.localDescription))
+      .then(() => { opened(b); return b.createAnswer(); })
+      .then((o) => b.setLocalDescription(o))
+      .then(() => a.setRemoteDescription(b.localDescription))
+      .then(() => opened(a))
+      .catch(() => finish(false));
+  });
+}
+
+function relayProtocolOf(url, path) {
+  if (path && path.relayProtocol) return path.relayProtocol.toUpperCase();
+  if (url.indexOf('turns:') === 0) return 'TLS';
+  return /transport=tcp/.test(url) ? 'TCP' : 'UDP';
+}
+
+async function testServers(box) {
+  const list = box.querySelector('[data-relay-results]');
+  const again = box.querySelector('[data-relay-run]');
+  const show = (lines) => {
+    list.innerHTML = lines.map((l) => '<li class="' + l[0] + '">' + escapeHtml(l[1]) + '</li>').join('');
+  };
+  again.hidden = true;
+  show([['info', 'Testing…']]);
+  let cfg;
+  try {
+    const f = frame();
+    const r = await fetch('/admin/calls/test', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ csrf: f ? f.csrf : '' })
+    });
+    cfg = await r.json();
+    if (!r.ok) throw new Error(cfg.error || 'the workspace answered ' + r.status + '.');
+  } catch (e) {
+    show([['fail', 'The test could not start: ' + e.message]]);
+    again.hidden = false;
+    return;
+  }
+  const lines = cfg.ice.problems.map((p) => ['fail', p]);
+  const stun = [], turn = [];
+  for (const s of cfg.ice.iceServers) {
+    for (const u of s.urls) (u.indexOf('stun') === 0 ? stun : turn).push(Object.assign({}, s, { urls: [u] }));
+  }
+  if (!stun.length) lines.push(['info', 'No STUN servers are set.']);
+  if (!turn.length && cfg.mode === 'none') lines.push(['info', 'No TURN relay is set, so a call connects only where the browsers find a direct path.']);
+  const tasks = stun.map((s) => probe([s], 6000).then((r) => {
+    const url = s.urls[0];
+    if (r.found.has('srflx')) return ['ok', url + ': found this browser\\'s public address.'];
+    const err = r.errors.find((e) => e.url === url) || r.errors[0];
+    return ['fail', url + ': no public address came back' + (err ? '; the server ' + iceErrorText(err) : '') + '.'];
+  }));
+  for (const s of turn) {
+    tasks.push(relayLoop([s], 12000).then((r) => {
+      const url = s.urls[0];
+      if (r.ok) return ['ok', url + ': the relay works. A test connection went through it and back, over ' + relayProtocolOf(url, r.path) + ', in ' + r.ms + ' ms.'];
+      if (r.found.has('relay')) return ['fail', url + ': the relay gave an address but nothing went through it in 12 seconds. Its relay ports (a UDP range, 49152 to 65535 by default) may be closed to this network, or the server may refuse to relay to its own addresses.'];
+      const err = r.errors.find((e) => e.url === url) || r.errors[0];
+      return ['fail', url + ': no relay address came back' + (err ? '; the server ' + iceErrorText(err) : ', and the server said nothing, which usually means it could not be reached from here') + '.'];
+    }));
+  }
+  lines.push(...(await Promise.all(tasks)));
+  show(lines);
+  again.hidden = false;
 }
 
 // ---- the page's handle on it ----
@@ -1241,6 +1551,13 @@ window.dangoCall = {
   park: function () { if (current) current.park(); },
   place: function () { if (current) current.place(); },
   active: function () { return current !== null; },
+  test: function (box) {
+    if (!box.dangoBound) {
+      box.dangoBound = true;
+      box.querySelector('[data-relay-run]').addEventListener('click', () => testServers(box));
+    }
+    testServers(box);
+  },
   room: function () { return current ? current.room : ''; }
 };
 // Closing the page, or leaving it for another site, is leaving the call.

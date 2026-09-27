@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { BackupLayout } from '../../mochiforge/src/api/backup';
 import { BackupProfile } from '../../mochiforge/src/cli/backup-cmd';
-import { CONFIG_FILE } from './config';
+import { CONFIG_FILE, TURN_SECRETS_FILE } from './config';
 import { VAPID_FILE } from './push';
 import { channelsDir, dmsDir, usersDir } from './workspace';
 
@@ -20,10 +20,10 @@ import { channelsDir, dmsDir, usersDir } from './workspace';
  * without it would make new keys, and every browser's subscription, made
  * under the old ones, would be refused.
  */
-const ROOT_FILES = ['workspace.json', CONFIG_FILE, '.secret', VAPID_FILE];
+const ROOT_FILES = ['workspace.json', CONFIG_FILE, '.secret', VAPID_FILE, TURN_SECRETS_FILE];
 
-/** Which of those `--no-secrets` leaves out. config.json holds no credential. */
-const SECRET_FILES = new Set(['workspace.json', '.secret', VAPID_FILE]);
+/** Which of those `--no-secrets` leaves out. config.json holds no credential; the TURN relay's are in .turn. */
+const SECRET_FILES = new Set(['workspace.json', '.secret', VAPID_FILE, TURN_SECRETS_FILE]);
 
 /**
  * An uploads directory: a `files/` that sits beside a `messages/`, which is
@@ -55,7 +55,7 @@ export function workspaceLayout(root: string): BackupLayout {
 export const DANGO_BACKUP: BackupProfile = {
   exclusions: [
     { category: 'files', summary: 'Leave out uploaded attachments (each room’s files/)' },
-    { category: 'secrets', summary: 'Leave out workspace.json, .secret, and .vapid' },
+    { category: 'secrets', summary: 'Leave out workspace.json, .secret, .vapid, and .turn' },
   ],
   repos: false,
   description: `A workspace is a directory, so a backup of one is a directory too, and this makes

@@ -23,6 +23,8 @@ export interface IceConfig {
   iceServers: { urls: string[]; username?: string; credential?: string }[];
   /** When the credentials stop working, epoch ms. */
   expiresAt: number;
+  /** Why the relay the workspace is set to use was left out, if it was. */
+  problems: string[];
 }
 
 /** How long a made credential lasts. A call longer than this refreshes. */
@@ -102,9 +104,12 @@ export async function iceFor(calls: CallsConfig, username: string, now = Date.no
   const stun = calls.stun.filter((u) => isIceUrl(u, 'stun'));
   if (stun.length) iceServers.push({ urls: stun });
   let expiresAt = now + CREDENTIAL_TTL_S * 1000;
+  const problems: string[] = [];
   const t = calls.turn;
   const urls = t.urls.filter((u) => isIceUrl(u, 'turn'));
-  if (turnProblem(calls) === null) {
+  const missing = turnProblem(calls);
+  if (missing) problems.push(`The relay is not used: ${missing}.`);
+  if (missing === null) {
     if (t.mode === 'static' && urls.length) {
       iceServers.push({ urls, username: t.username, credential: t.credential });
     } else if (t.mode === 'coturn' && urls.length) {
@@ -115,9 +120,11 @@ export async function iceFor(calls: CallsConfig, username: string, now = Date.no
       try {
         iceServers.push(...(await cloudflareServers(t.keyId, t.apiToken)));
       } catch (e) {
-        console.error(`calls: Cloudflare TURN credentials could not be made: ${e instanceof Error ? e.message : e}`);
+        const why = e instanceof Error ? e.message : String(e);
+        console.error(`calls: Cloudflare TURN credentials could not be made: ${why}`);
+        problems.push(`The relay is not used: Cloudflare's TURN credentials could not be made (${why}).`);
       }
     }
   }
-  return { iceServers, expiresAt };
+  return { iceServers, expiresAt, problems };
 }

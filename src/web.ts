@@ -28,6 +28,7 @@ import {
   removeMember,
   setTopic,
 } from './channels';
+import { allowReport, parseReport, recordReport } from './calllog';
 import { MAX_IN_CALL, joinCall, leaveCall, participantUser, pruneCalls, relaySignals } from './calls';
 import { CallsConfig, TurnMode, loadConfig, updateConfig } from './config';
 import { openDm } from './dms';
@@ -579,6 +580,21 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     res.redirect(303, '/admin#calls');
   });
 
+  // The ICE servers a call would be given now, for the admin page's test,
+  // which the page script runs from the admin's own browser.
+  app.post('/admin/calls/test', express.json({ limit: '16kb' }), (req, res) => {
+    const viewer = requireAdminForm(req, res);
+    if (!viewer) return;
+    const calls = loadConfig(root).calls;
+    iceFor(calls, viewer.auth.username).then(
+      (ice) => res.json({ ice, mode: calls.turn.mode }),
+      (e) => {
+        console.error(e);
+        fail(res, viewer, 500, 'The ICE servers could not be made.');
+      }
+    );
+  });
+
   // ---- rooms ----
   //
   // Channels, conversations, and the threads inside both share one set of
@@ -1020,6 +1036,36 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       (viewer, room) => {
         const peer = String((req.body as Record<string, unknown>).peer ?? '');
         if (participantUser(room.url, peer) === viewer.auth.username) leaveCall(room.url, peer);
+        res.status(204).end();
+      },
+      { form: true }
+    )
+  );
+
+  // What became of a connection, as the page saw it (see src/calllog.ts).
+  // The person on the other end is named by the workspace, not the page.
+  app.post(BASES.map((b) => `${b}/call/report`), callJson, (req, res) =>
+    withRoom(
+      req,
+      res,
+      (viewer, room) => {
+        const body = req.body as Record<string, unknown>;
+        const peer = String(body.peer ?? '');
+        const report = parseReport(body.report);
+        if (participantUser(room.url, peer) !== viewer.auth.username || !report || !allowReport(viewer.auth.username)) {
+          res.status(204).end();
+          return;
+        }
+        const other = isClientId(body.to) ? participantUser(room.url, body.to) : null;
+        const named = typeof body.toUser === 'string' && userExists(root, body.toUser) ? body.toUser : 'someone';
+        recordReport(root, {
+          at: new Date().toISOString(),
+          room: room.url,
+          user: viewer.auth.username,
+          with: other ?? named,
+          device: deviceLabel(req.get('user-agent') ?? ''),
+          ...report,
+        });
         res.status(204).end();
       },
       { form: true }

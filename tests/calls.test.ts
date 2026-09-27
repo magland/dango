@@ -9,7 +9,8 @@ import { Response } from 'express';
 import { AuthResult, addUserToken } from '../../mochiforge/src/vault';
 import { CLIENT_GRACE_MS, MAX_IN_CALL, joinCall, leaveCall, liveCall, pruneCalls, relaySignals, resetCalls } from '../src/calls';
 import { addMember, createChannel, removeMember } from '../src/channels';
-import { DEFAULT_STUN, CallsConfig, loadConfig } from '../src/config';
+import { DEFAULT_STUN, CallsConfig, TURN_SECRETS_FILE, loadConfig, updateConfig } from '../src/config';
+import { allowReport, describeReport, parseReport, readReports, recordReport } from '../src/calllog';
 import { openDm } from '../src/dms';
 import { ClientEvent, clientOwner, serveUserEvents } from '../src/events';
 import { coturnCredential, iceFor, sanitizeIceServers, turnProblem } from '../src/ice';
@@ -126,6 +127,71 @@ test('calls default to the public STUN servers, and config.json can say otherwis
   assert.deepStrictEqual(c.stun, []);
   assert.strictEqual(c.turn.mode, 'coturn');
   assert.strictEqual(c.turn.secret, 's');
+});
+
+test('the TURN credentials are kept in .turn, apart from config.json', () => {
+  const root = tmpRoot();
+  const c = calls({ mode: 'cloudflare', keyId: 'key', apiToken: 'tok', secret: 'shh', credential: 'pw' });
+  updateConfig(root, { calls: c });
+  const plain = fs.readFileSync(path.join(root, 'config.json'), 'utf8');
+  for (const secret of ['tok', 'shh', 'pw']) assert.ok(!plain.includes(`"${secret}"`), `${secret} is in config.json`);
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(root, TURN_SECRETS_FILE), 'utf8')), { credential: 'pw', secret: 'shh', apiToken: 'tok' });
+  assert.deepStrictEqual(loadConfig(root).calls.turn, c.turn);
+});
+
+test('a relay that cannot be used is said to be, and the call goes on without it', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => new globalThis.Response('{}', { status: 401 }));
+  const ice = await iceFor(calls({ mode: 'cloudflare', keyId: 'k', apiToken: 't' }), 'alice');
+  assert.deepStrictEqual(ice.iceServers, [{ urls: ['stun:stun.example.org:3478'] }]);
+  assert.match(ice.problems[0], /Cloudflare.*401/);
+  assert.deepStrictEqual((await iceFor(calls(), 'alice')).problems, []);
+});
+
+// ---- the connection log ----
+
+test('a connection report is reduced to its shape, addresses and all else left out', () => {
+  const r = parseReport({
+    outcome: 'connected',
+    ms: 1234.5,
+    attempt: 2,
+    path: { local: 'relay', remote: 'srflx', protocol: 'udp', relayProtocol: 'tls', rtt: 0.0421, address: '203.0.113.9' },
+    gathered: ['host/udp', 'relay/tcp', 'relay/tcp', '203.0.113.9'],
+    errors: [{ url: 'turn:t.example:3478', code: 401, text: 'Unauthorized', extra: 'x' }],
+    relayOffered: true,
+  })!;
+  assert.deepStrictEqual(r, {
+    outcome: 'connected',
+    ms: 1235,
+    attempt: 2,
+    path: { local: 'relay', remote: 'srflx', protocol: 'udp', relayProtocol: 'tls', rtt: 0.042 },
+    gathered: ['host/udp', 'relay/tcp'],
+    errors: [{ url: 'turn:t.example:3478', code: 401, text: 'Unauthorized' }],
+    relayOffered: true,
+  });
+  assert.strictEqual(parseReport({ outcome: 'exploded' }), null);
+  const full = { at: '', room: '/c/general', user: 'alice', with: 'bob', device: 'Chrome on macOS', ...r };
+  assert.strictEqual(describeReport(full), 'connected through the relay (TURN over TLS) in 1.2 s');
+  assert.strictEqual(describeReport({ ...full, outcome: 'failed', ms: 15000, path: undefined }), 'failed to connect after 15.0 s (attempt 2)');
+  assert.strictEqual(describeReport({ ...full, path: { local: 'host', remote: 'srflx', protocol: 'udp' } }), 'connected directly (UDP) in 1.2 s');
+});
+
+test('reports are kept, the newest few hundred, and one person cannot flood them', () => {
+  const root = tmpRoot();
+  const base = { at: '', room: '/c/general', user: 'alice', with: 'bob', device: 'x', outcome: 'failed' as const, ms: 1, attempt: 1, gathered: [], errors: [], relayOffered: false };
+  const log = console.log;
+  console.log = () => {};
+  try {
+    for (let i = 0; i < 305; i++) recordReport(root, { ...base, ms: i });
+  } finally {
+    console.log = log;
+  }
+  const kept = readReports(root);
+  assert.strictEqual(kept.length, 300);
+  assert.strictEqual(kept[kept.length - 1].ms, 304);
+  let allowed = 0;
+  for (let i = 0; i < 40; i++) if (allowReport('flooder', 1000)) allowed++;
+  assert.strictEqual(allowed, 30);
+  assert.ok(allowReport('flooder', 1000 + 61000), 'a minute later it is allowed again');
 });
 
 // ---- the call itself ----

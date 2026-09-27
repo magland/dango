@@ -10,6 +10,15 @@ import { DEFAULT_THEME, findTheme } from '../../mochiforge/src/themes';
 
 export const CONFIG_FILE = 'config.json';
 
+/**
+ * The TURN relay's credentials: its password, coturn's shared secret, and
+ * Cloudflare's API token. They are kept apart from config.json, which holds
+ * nothing secret and so goes into a backup made without secrets; this file,
+ * like .secret, does not.
+ */
+export const TURN_SECRETS_FILE = '.turn';
+const SECRET_FIELDS = ['credential', 'secret', 'apiToken'] as const;
+
 export interface LimitsConfig {
   /** Requests per minute per address, over everything not exempt. 0 disables. */
   requestsPerMinute: number;
@@ -167,8 +176,28 @@ const cache = fileCache<WorkspaceConfig>({
   missing: () => normalize(null),
 });
 
+type TurnSecrets = Pick<CallsConfig['turn'], (typeof SECRET_FIELDS)[number]>;
+
+const secretsCache = fileCache<Partial<TurnSecrets>>({
+  read: (file) => {
+    try {
+      const rec = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      const out: Partial<TurnSecrets> = {};
+      for (const k of SECRET_FIELDS) if (typeof rec[k] === 'string') out[k] = (rec[k] as string).trim();
+      return out;
+    } catch {
+      return {};
+    }
+  },
+  missing: () => ({}),
+});
+
+/** The workspace's settings, with the TURN credentials from their own file (a value hand-written into config.json is used where that file has none). */
 export function loadConfig(root: string): WorkspaceConfig {
-  return cache.get(configFilePath(root));
+  const config = cache.get(configFilePath(root));
+  const secrets = secretsCache.get(path.join(root, TURN_SECRETS_FILE));
+  if (!SECRET_FIELDS.some((k) => secrets[k])) return config;
+  return { ...config, calls: { ...config.calls, turn: { ...config.calls.turn, ...Object.fromEntries(SECRET_FIELDS.filter((k) => secrets[k]).map((k) => [k, secrets[k]])) } } };
 }
 
 /**
@@ -205,6 +234,13 @@ export function updateConfig(root: string, changes: Partial<WorkspaceConfig>): W
     limits: { ...current.limits, ...(changes.limits ?? {}) },
     calls: changes.calls ?? current.calls,
   };
-  writeFileAtomic(configFilePath(root), JSON.stringify(next, null, 2) + '\n', { mode: 0o600 });
+  const turn: Record<string, unknown> = { ...next.calls.turn };
+  const secrets: Record<string, string> = {};
+  for (const k of SECRET_FIELDS) {
+    secrets[k] = next.calls.turn[k];
+    delete turn[k];
+  }
+  writeFileAtomic(path.join(root, TURN_SECRETS_FILE), JSON.stringify(secrets, null, 2) + '\n', { mode: 0o600 });
+  writeFileAtomic(configFilePath(root), JSON.stringify({ ...next, calls: { ...next.calls, turn } }, null, 2) + '\n', { mode: 0o600 });
   return next;
 }

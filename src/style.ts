@@ -496,6 +496,28 @@ html.loading-page { cursor: progress; }
 .call-dock.full.spot .call-tile.spotlit { order: -1; flex: 1 1 100%; height: calc(100% - 104px); aspect-ratio: auto; }
 .call-dock.full.spot .call-tile.spotlit video { object-fit: contain; }
 
+/* The connections in the call's panel: one line each, the copy button
+   plainly a control. */
+.call-diag { flex-basis: 100%; font-size: var(--t-xs); color: var(--call-muted); }
+.call-diag strong { color: var(--call-fg); }
+.call-diag ul { margin: 4px 0 6px; padding-left: 18px; }
+.call-diag li { margin-bottom: 2px; overflow-wrap: anywhere; }
+.call-copy { border: 1px solid rgba(255, 255, 255, 0.25); border-radius: var(--radius); background: none; color: var(--call-fg); font: inherit; padding: 2px 8px; cursor: pointer; }
+.call-copy:hover { background: rgba(255, 255, 255, 0.1); }
+
+/* The admin page's test of how calls connect, each result marked as passed
+   or failed, and the log of connections, a failure in the error colour. */
+.relay-results { list-style: none; padding: 0; margin: var(--s2) 0; }
+.relay-results li { position: relative; padding-left: 22px; margin-bottom: 4px; overflow-wrap: anywhere; }
+.relay-results li::before { position: absolute; left: 0; font-weight: 700; }
+.relay-results li.ok::before { content: "✓"; color: var(--success, #2e7d32); }
+.relay-results li.fail::before { content: "✗"; color: var(--danger); }
+.relay-results li.info::before { content: "–"; color: var(--fg-subtle); }
+table.call-log { max-width: 920px; font-size: var(--t-sm); }
+table.call-log td { vertical-align: top; }
+table.call-log tr.failed td:nth-child(4), table.call-log tr.dropped td:nth-child(4) { color: var(--danger); }
+table.call-log td .muted { font-size: var(--t-xs); }
+
 /* --- touch ---
 
    A field set under 16px is one iOS zooms the page into on focus, and does

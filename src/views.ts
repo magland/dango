@@ -8,6 +8,7 @@ import { formatDay, formatSize, timeTag } from '../../mochiforge/src/render';
 import { Viewer } from '../../mochiforge/src/session';
 import { THEMES, activeTheme, darkFor } from '../../mochiforge/src/themes';
 import { UserProfile, Vault, loadVault, userExists } from '../../mochiforge/src/vault';
+import { ConnectionReport, describeReport, readReports } from './calllog';
 import { liveCall, liveCallsByRoom } from './calls';
 import { callScript } from './callscript';
 import { ChannelInfo, listChannels } from './channels';
@@ -20,7 +21,7 @@ import { pageScript } from './pagescript';
 import { canDeleteMessage, canEditMessage, canSeeChannel, isSiteAdmin } from './perms';
 import { Pin, pinOf, readPins } from './pins';
 import { READ_FILE, RoomUnread, UNREAD_CAP, isNewsFor, mentionsUser, readKey, unreadRooms } from './reads';
-import { Room } from './rooms';
+import { Room, channelRoom, dmRoom } from './rooms';
 import { parseQuery } from './search';
 import { styleSheet } from './style';
 import { userDir } from './workspace';
@@ -840,21 +841,84 @@ ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.fla
 <p class="muted">The workspace's own look; each person can still pick their own from the account menu.</p></div>
 <button class="btn btn-primary" type="submit">Save</button>
 </form>
-${callsSection(viewer, opts.calls ?? config.calls)}`;
+${callsSection(viewer, opts.calls ?? config.calls, readReports(root))}
+${connectionLog(root, viewer, readReports(root))}`;
   return doc('Admin', content, { viewer, root });
+}
+
+/** Whether a connection report says the relay carried it. */
+function relayed(r: ConnectionReport): boolean {
+  return r.outcome === 'connected' && !!r.path && (r.path.local === 'relay' || r.path.remote === 'relay');
+}
+
+/**
+ * Whether the relay works: a test the page script runs from the admin's own
+ * browser (see test in src/callscript.ts), and when a real call last went
+ * through the relay, from the connection log.
+ */
+function relayCheck(calls: CallsConfig, reports: ConnectionReport[]): Html {
+  const last = [...reports].reverse().find(relayed);
+  return html`<div class="relay-test" data-relay-test style="max-width:720px">
+<h3>Does it work?</h3>
+<p class="muted">A test from this browser, on the network it is on now, with the settings as saved: each STUN server is asked for this browser's public address, and a test connection is sent through each TURN server and back. Someone on another network can see a different result; the connections listed below are what people's browsers actually found.</p>
+<ul class="relay-results" data-relay-results><li class="info">The test needs script, and a browser that can make calls.</li></ul>
+<p><button class="btn" type="button" data-relay-run hidden>Test again</button></p>
+<p class="muted">${
+    calls.turn.mode === 'none'
+      ? 'No relay is set.'
+      : last
+        ? html`A call last went through the relay ${timeTag(last.at)}: ${last.user} and ${last.with}.`
+        : 'No call has gone through the relay yet, among the connections listed below.'
+  }</p>
+</div>`;
+}
+
+/**
+ * The newest connections in calls, as the browsers in them reported them.
+ * A room the admin cannot see is not named, since an admin does not see
+ * other people's private rooms (see src/perms.ts).
+ */
+function connectionLog(root: string, viewer: Viewer, reports: ConnectionReport[]): Html {
+  if (!reports.length) {
+    return html`<h3 id="call-log">Recent connections</h3><p class="muted">No call has connected anyone yet. Each browser in a call reports how each of its connections went, and they will be listed here.</p>`;
+  }
+  const where = (url: string): string => {
+    const m = /^\/(c|d)\/([^/]+)$/.exec(url);
+    if (!m) return 'a room';
+    const room = m[1] === 'c' ? channelRoom(root, decodeURIComponent(m[2]), viewer.auth) : dmRoom(root, parseInt(m[2], 10), viewer.auth);
+    return room ? room.title : 'a room you cannot see';
+  };
+  const week = reports.filter((r) => Date.now() - Date.parse(r.at) < 7 * 86400000);
+  const count = (f: (r: ConnectionReport) => boolean) => week.filter(f).length;
+  const summary = `In the last week: ${count((r) => r.outcome === 'connected' && !relayed(r))} connected directly, ${count(relayed)} through a relay, ${count((r) => r.outcome === 'failed')} failed attempts, ${count((r) => r.outcome === 'dropped')} dropped.`;
+  const rows = [...reports].reverse().slice(0, 60).map((r) => {
+    const details = [
+      r.gathered.length ? `found ${r.gathered.join(', ')}` : 'found no candidates',
+      r.relayOffered ? '' : 'no relay offered',
+      ...r.errors.map((e) => `${e.code}${e.text ? ` ${e.text}` : ''} from ${e.url || 'an ICE server'}`),
+    ].filter((x) => x !== '');
+    return html`<tr class="${r.outcome}"><td class="muted">${timeTag(r.at)}</td><td>${where(r.room)}</td><td>${r.user} <span class="muted">(${r.device})</span> to ${r.with}</td><td>${describeReport(r)}${
+      r.path?.rtt !== undefined ? html` <span class="muted">${Math.round(r.path.rtt * 1000)} ms round trip</span>` : ''
+    }<div class="muted">${details.join('; ')}</div></td></tr>`;
+  });
+  return html`<h3 id="call-log">Recent connections</h3>
+<p class="muted" style="max-width:720px">${summary} Each browser reports its own side of each connection: when it opens, when an attempt fails, and when an open one drops. A failed attempt is retried, so one failure followed by a connection is a slow start rather than a failure. The kinds of address a browser found say why: <em>host</em> is its own, <em>srflx</em> its public address from STUN, <em>relay</em> an address on the TURN server.</p>
+<table class="listing call-log"><tbody>${joinHtml(rows)}</tbody></table>`;
 }
 
 /**
  * How calls connect. A secret is never written back into the page: its
  * field is blank, says whether one is saved, and a blank field keeps it.
  */
-function callsSection(viewer: Viewer, calls: CallsConfig): Html {
+function callsSection(viewer: Viewer, calls: CallsConfig, reports: ConnectionReport[]): Html {
   const t = calls.turn;
   const mode = (value: string, label: string, hint: string) =>
     html`<label class="checkbox" style="display:block;margin-bottom:6px"><input type="radio" name="turn_mode" value="${value}" ${t.mode === value ? raw('checked') : ''}> ${label}<br><span class="muted">${hint}</span></label>`;
   const saved = (has: string, what: string) => (has ? `A ${what} is saved; leave this blank to keep it.` : `No ${what} is saved.`);
   return html`<h2 id="calls">Calls</h2>
 <p class="muted" style="max-width:720px">A call's audio and video go directly between the browsers in it; the workspace only introduces them to each other. To find a path, each browser asks a STUN server for its public address, which is enough on most networks. Where two people cannot reach each other directly (both behind strict firewalls, for instance), the call needs a TURN server to relay their media, and that relay carries the whole call for them.</p>
+${relayCheck(calls, reports)}
+<h3>Settings</h3>
 <form method="post" action="/admin/calls" style="max-width:520px">${csrfField(viewer)}
 <div class="field"><label for="stun">STUN servers</label><textarea id="stun" name="stun" rows="3" placeholder="stun:stun.example.org:3478">${calls.stun.join('\n')}</textarea>
 <p class="muted">One per line. The defaults (${DEFAULT_STUN.join(', ')}) are public servers run by Google and Cloudflare, which see the address of each person who joins a call. Leave this empty to contact no outside server; calls then connect only where the browsers can reach each other directly.</p></div>

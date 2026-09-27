@@ -1324,6 +1324,9 @@ function startMain() {
   if (list) openStream(list);
   setupAccount();
   callButtonsChanged();
+  // The admin page's test of how calls connect runs from this browser.
+  var test = document.querySelector('[data-relay-test]');
+  if (test && dangoRoot.classList.contains('can-call')) withCallScript(function (call) { call.test(test); });
 }
 function stopMain() {
   if (roomStream) { roomStream.close(); roomStream = null; }

@@ -657,6 +657,25 @@ await b1.eval("document.querySelector('#msg-list .call-entry [data-call-join]').
 await waitFor('both to count two in the call', async () => (await inCallCount(b1)) === '2 in the call' && (await inCallCount(c1)) === '2 in the call', 10000);
 await waitFor('alice and bob to connect, with video', async () => (await connectedTo(c1)) > 0 && (await connectedTo(b1)) > 0, 20000);
 ok('joining from the timeline connects the two pages, peer to peer, with video');
+await c1.eval("document.querySelector('.call-dock [data-call-act=\"settings\"]').click(); true");
+await waitFor('the panel to show the connection to bob, direct', async () => (await c1.eval("document.querySelector('[data-call-diag]').textContent")).includes('bob: connected directly'));
+if (!(await c1.eval("document.querySelector('[data-call-diag]').textContent")).includes('This browser found its own addresses')) fail('the panel does not say what this browser found');
+await c1.eval("document.querySelector('.call-dock [data-call-act=\"settings\"]').click(); true");
+ok('the call’s panel shows each connection and the path it took');
+const logged = () => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(workspace, 'call-log.json'), 'utf8'));
+  } catch {
+    return [];
+  }
+};
+await waitFor('both sides to report the connection', async () => {
+  const connected = logged().filter((r) => r.outcome === 'connected');
+  return connected.some((r) => r.user === 'alice' && r.with === 'bob') && connected.some((r) => r.user === 'bob' && r.with === 'alice');
+}, 10000);
+const report = logged().find((r) => r.outcome === 'connected');
+if (!report.path || report.path.local === 'relay' || !report.gathered.length) fail(`the report does not say how it connected: ${JSON.stringify(report)}`);
+ok('each side reports its connection to the workspace, with the path it took');
 await waitFor('the entry to count two', async () => (await c1.eval("document.querySelector('#msg-list .call-entry').textContent")).includes('2 in the call'));
 ok('the timeline entry says who is in the call, live');
 
@@ -688,6 +707,17 @@ await waitFor('carol’s sidebar to clear the mark', async () => fresh.eval("doc
 const ended = (await api(alice, 'GET', '/channels/general/messages?limit=1')).messages[0];
 if (!ended.call?.ended || ended.call.people.join() !== 'alice,bob') fail(`the entry does not record the end: ${JSON.stringify(ended.call)}`);
 ok('when the last person leaves the call ends, and its entry says who was in it and for how long');
+
+// ---- the admin's test of how calls connect ----
+
+const adm = await openPage(await sessionCookie(owner));
+await adm.go('/admin');
+await waitFor('the test to run', async () => {
+  const t = await adm.eval("document.querySelector('[data-relay-results]').textContent");
+  return t.includes('No STUN servers are set.') && t.includes('No TURN relay is set');
+}, 10000);
+if (!(await adm.eval("document.querySelector('.call-log').textContent")).includes('connected directly')) fail('the admin page does not list the call’s connections');
+ok('the admin page tests how calls connect, and lists the connections calls made');
 
 console.log('');
 console.log(`All ${checks} browser checks passed.`);

@@ -294,11 +294,16 @@ calls_form() { curl -s -b "$ADMIN_JAR" -o /dev/null -w '%{http_code}' --data-url
 [ "$(calls_form --data-urlencode 'stun=http://not-stun.example' -d turn_mode=none)" = "400" ] || fail "a STUN server that is not a STUN URL was saved"
 [ "$(calls_form -d stun= -d turn_mode=coturn --data-urlencode 'turn_urls=turn:turn.example:3478')" = "400" ] || fail "coturn was saved without its secret"
 [ "$(calls_form -d stun= -d turn_mode=coturn --data-urlencode 'turn_urls=turn:turn.example:3478' -d turn_secret=smoke-turn-secret)" = "303" ] || fail "the call settings were not saved"
-grep -q '"secret": "smoke-turn-secret"' "$WS/config.json" || fail "the coturn secret is not in config.json"
+grep -q '"secret": "smoke-turn-secret"' "$WS/.turn" || fail "the coturn secret is not in .turn"
+grep -q smoke-turn-secret "$WS/config.json" && fail "the coturn secret was written into config.json, which a backup without secrets keeps"
 curl -s -b "$ADMIN_JAR" "$BASE/admin" | grep_all -q smoke-turn-secret && fail "the admin page showed the TURN secret"
 [ "$(calls_form -d stun= -d turn_mode=coturn --data-urlencode 'turn_urls=turn:turn.example:3478')" = "303" ] || fail "saving with a blank secret was refused"
-grep -q '"secret": "smoke-turn-secret"' "$WS/config.json" || fail "a blank secret field did not keep the saved secret"
-ok "the admin sets how calls connect, and the TURN secret stays on the server"
+grep -q '"secret": "smoke-turn-secret"' "$WS/.turn" || fail "a blank secret field did not keep the saved secret"
+ok "the admin sets how calls connect, and the TURN secret stays on the server, apart from config.json"
+TEST_JSON="$(curl -s -b "$ADMIN_JAR" -H 'content-type: application/json' -d "{\"csrf\":\"$ADMIN_CSRF\"}" "$BASE/admin/calls/test")"
+echo "$TEST_JSON" | grep_all -q '"username":"[0-9]*:owner"' || fail "the admin's test was not given the relay: $TEST_JSON"
+[ "$(curl -s -b "$JAR" -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -d "{\"csrf\":\"$CSRF\"}" "$BASE/admin/calls/test")" = "403" ] || fail "someone not an admin reached the relay test"
+ok "the admin page's relay test is given the relay's credentials, and only an admin gets them"
 
 # Joining: the page must have its stream open, a relay credential is made for
 # the person, the roster comes down the page's stream, and a room the person
@@ -315,11 +320,17 @@ grep -q smoke-turn-secret "$TMP/call.json" && fail "joining handed out the TURN 
 [ "$(api "$ALICE" GET '/channels/general/messages?limit=1' | jget messages.0.call.people.0)" = "alice" ] || fail "the call has no entry in the timeline"
 CAROL_CSRF="$(curl -s -b "$TMP/carol.jar" "$BASE/" | csrf_in)"
 [ "$(call_post "$TMP/carol.jar" "$CAROL_CSRF" /c/secret/call/join)" = "404" ] || fail "someone outside a private channel reached its call"
+REPORT='{"outcome":"failed","ms":15000,"attempt":1,"gathered":["host/udp"],"errors":[{"url":"turn:turn.example:3478","code":701,"text":"unreachable"}],"relayOffered":true}'
+curl -s -b "$JAR" -o /dev/null -H 'content-type: application/json' -d "{\"csrf\":\"$CSRF\",\"peer\":\"$PEER\",\"to\":\"$PEER\",\"report\":$REPORT}" "$BASE/c/general/call/report"
+grep -q '"outcome":"failed"' "$WS/call-log.json" || fail "a connection report was not kept"
+grep -q 'call: alice to alice in /c/general' "$TMP/server.log" || fail "a connection report was not written to the server's log"
+curl -s -b "$ADMIN_JAR" "$BASE/admin" | grep_all -q 'failed to connect after 15.0 s' || fail "the admin page does not list the connection report"
 [ "$(call_post "$JAR" "$CSRF" /c/general/call/leave)" = "204" ] || fail "leaving the call failed"
 wait "$STREAM"
 grep -q '"type":"call-roster"' "$TMP/page-events.txt" || fail "the roster did not come down the page's stream"
 [ -n "$(api "$ALICE" GET '/channels/general/messages?limit=1' | jget messages.0.call.ended)" ] || fail "leaving did not end the call"
 ok "joining a call hands out a relay credential and the roster, and the last to leave ends it"
+ok "a connection's outcome is kept, logged, and listed for the admin"
 
 # ---- sending, made robust ----
 
