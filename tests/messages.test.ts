@@ -12,10 +12,12 @@ import {
   editMessage,
   lastMessageId,
   readMessage,
+  reactionEmoji,
   readMessages,
   threadRoomDir,
   toggleReaction,
 } from '../src/messages';
+import { channelNameFrom } from '../src/workspace';
 
 function tmpRoom(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'dango-msg-'));
@@ -114,4 +116,19 @@ test('a nonce finds the author’s earlier message, and only theirs', () => {
   assert.ok(isValidNonce('abcdefgh12'));
   assert.ok(!isValidNonce('short'));
   assert.ok(!isValidNonce('has space in it'));
+});
+
+test('a reaction named by its shortcode is the emoji, and an unknown one is refused', () => {
+  assert.strictEqual(reactionEmoji(':tada:'), '\u{1F389}');
+  assert.strictEqual(reactionEmoji(' :+1: '), '\u{1F44D}');
+  assert.strictEqual(reactionEmoji('\u{1F389}'), '\u{1F389}');
+  assert.throws(() => reactionEmoji(':no-such-emoji:'), /No emoji is called/);
+  assert.throws(() => reactionEmoji(':constructor:'), /No emoji is called/);
+});
+
+test('a typed channel name is offered back as the nearest valid one', () => {
+  assert.strictEqual(channelNameFrom('Claude Test!'), 'claude-test');
+  assert.strictEqual(channelNameFrom('  Café -- Menu  '), 'cafe-menu');
+  assert.strictEqual(channelNameFrom('!!!'), '');
+  assert.strictEqual(channelNameFrom('a'.repeat(79) + ' b').length <= 80, true);
 });

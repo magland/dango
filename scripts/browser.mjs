@@ -89,7 +89,9 @@ const workspace = path.join(tmp, 'workspace');
 fs.mkdirSync(workspace);
 // No STUN servers: the calls below connect on this machine's own addresses,
 // and a check should not wait on a server on the internet.
-fs.writeFileSync(path.join(workspace, 'config.json'), JSON.stringify({ calls: { stun: [] } }));
+// The per-person limits are a person's pace, and one test account sends
+// faster than that; they are raised here, and tested in the unit tests.
+fs.writeFileSync(path.join(workspace, 'config.json'), JSON.stringify({ calls: { stun: [] }, limits: { messagesPerMinute: 200, actionsPerMinute: 300 } }));
 const owner = 'dango_browser_owner_token_' + Math.random().toString(16).slice(2);
 const server = spawn(process.execPath, ['dist/dango/src/index.js', 'serve', workspace, '--port', String(port)], {
   env: { ...process.env, DANGO_OWNER_TOKEN: owner },
@@ -235,7 +237,7 @@ async function openPage(cookie) {
       await send('Input.insertText', { text }, sessionId);
     },
     async key(key) {
-      const code = { Enter: 13, ArrowDown: 40, Tab: 9, Escape: 27 }[key];
+      const code = { Enter: 13, ArrowDown: 40, ArrowUp: 38, Tab: 9, Escape: 27 }[key];
       for (const type of ['keyDown', 'keyUp']) {
         await send('Input.dispatchKeyEvent', { type, key, code: key, windowsVirtualKeyCode: code }, sessionId);
       }
@@ -447,18 +449,127 @@ ok('a file copied in a file manager is attached, not pasted as its path');
 
 const doomed = (await api(bob, 'POST', '/channels/random/messages', { body: 'delete me' })).id;
 await waitFor('the message to arrive', async () => s1.eval(`!!document.getElementById('msg-${doomed}')`));
-const declined = s1.answerDialogs(false);
+// The question is the page's own dialog, not the browser's, with the safe
+// answer focused.
+const asked = () => s1.eval("(() => { const d = document.querySelector('dialog.ask[open]'); return d ? d.textContent : ''; })()");
 await s1.eval(`document.querySelector('#msg-${doomed} a[data-delete-message]').click(); true`);
-await waitFor('the confirmation to be asked', async () => declined.length === 1);
+await waitFor('the confirmation to be asked', async () => /Delete this message\?/.test(await asked()));
+if (!(await s1.eval("document.activeElement && document.activeElement.hasAttribute('data-ask-cancel')"))) fail('the delete question does not focus Cancel');
+await s1.eval("document.querySelector('dialog.ask [data-ask-cancel]').click(); true");
 await sleep(500);
 if ((await api(bob, 'GET', `/channels/random/messages/${doomed}`)).deleted) fail('a declined confirmation still deleted the message');
-ok('deleting a message asks first, and declining keeps it');
-listeners.length = 0;
-s1.answerDialogs(true);
+if (await asked()) fail('the dialog stayed open after Cancel');
+ok('deleting a message asks first, in the page, and declining keeps it');
 await s1.eval(`document.querySelector('#msg-${doomed} a[data-delete-message]').click(); true`);
+await waitFor('the confirmation to be asked again', async () => /Delete this message\?/.test(await asked()));
+await s1.eval("document.querySelector('dialog.ask [data-ask-ok]').click(); true");
 await waitFor('the message to be deleted', async () => (await api(bob, 'GET', `/channels/random/messages/${doomed}`)).deleted === true);
 await waitFor('the page to show it deleted', async () => /This message was deleted/.test(await s1.eval(`document.getElementById('msg-${doomed}').textContent`)));
 ok('accepting deletes it, without leaving the room');
+
+// ---- typing on while a message sends ----
+// The text leaves the composer as it is sent, so what is typed meanwhile is
+// kept, and Enter pressed again sends it once the first is through.
+
+const bodyOf = async (id) => (await api(bob, 'GET', `/channels/random/messages/${id}`)).body;
+const beforeTyping = await lastId();
+await s1.eval("document.querySelector('.composer textarea').value = 'first, with a file'; true");
+await s1.setFiles('.composer input[type=file]', [bigFile]);
+await s1.network({ uploadThroughput: 1024 * 1024 });
+await s1.eval("document.querySelector('.composer button[type=submit]').click(); true");
+await waitFor('the send to start', async () => s1.eval("document.querySelector('form[data-composer]').hasAttribute('data-busy')"));
+if ((await s1.eval("document.querySelector('.composer textarea').value")) !== '') fail('the text stayed in the composer while it was sent');
+await s1.eval("document.querySelector('.composer textarea').focus(); true");
+await s1.type('second, typed meanwhile');
+await s1.key('Enter');
+if ((await s1.eval("document.querySelector('.composer textarea').value")) !== 'second, typed meanwhile') fail('what was typed during a send was lost');
+await waitFor('both messages to be sent', async () => (await lastId()) === beforeTyping + 2, 20000);
+await s1.network({});
+if ((await bodyOf(beforeTyping + 1)) !== 'first, with a file' || (await bodyOf(beforeTyping + 2)) !== 'second, typed meanwhile') fail('the two messages were not sent as typed');
+await waitFor('the composer to empty', async () => (await s1.eval("document.querySelector('.composer textarea').value")) === '');
+ok('text typed while a message sends is kept, and Enter sends it once the first is through');
+
+// ---- a completion that arrives late ----
+// The member list is fetched on the first @; if it arrives after the caret
+// has left the name, nothing is offered, and Enter does not take text away.
+
+await s1.eval(`(() => {
+  members = null;
+  const real = window.fetch;
+  window.fetch = function (url) {
+    if (String(url).indexOf('/assets/users.json') >= 0) return new Promise((r) => setTimeout(r, 600)).then(() => real.apply(window, arguments));
+    return real.apply(window, arguments);
+  };
+  window.dangoRealFetch = real;
+  document.querySelector('.composer textarea').focus();
+  return true;
+})()`);
+await s1.type('hi @a');
+await s1.type(' and the rest of it');
+await sleep(900);
+if (!(await s1.eval("document.querySelector('[data-mention-list]').hidden"))) fail('a completion that arrived late was offered after the caret had moved on');
+if ((await s1.eval("document.querySelector('.composer textarea').value")) !== 'hi @a and the rest of it') fail('the text changed under a late completion');
+await s1.eval("window.fetch = window.dangoRealFetch; document.querySelector('.composer textarea').value = ''; true");
+ok('a completion that arrives after the caret has left the name is not offered');
+
+// ---- editing in place ----
+
+const toEdit = (await api(bob, 'POST', '/channels/random/messages', { body: 'to be edited' })).id;
+await waitFor('the message to arrive', async () => s1.eval(`!!document.getElementById('msg-${toEdit}')`));
+await s1.eval("document.querySelector('.composer textarea').focus(); true");
+await s1.key('ArrowUp');
+await waitFor('Up to open the last message for editing', async () =>
+  (await s1.eval(`(() => { const t = document.querySelector('#msg-${toEdit} form.msg-edit textarea'); return t && document.activeElement === t ? t.value : ''; })()`)) === 'to be edited'
+);
+if ((await s1.eval('location.pathname')) !== '/c/random') fail('editing left the room');
+await s1.eval(`document.querySelector('#msg-${toEdit} form.msg-edit textarea').value = 'edited in place'; true`);
+await s1.key('Enter');
+await waitFor('the edit to be saved and repainted', async () =>
+  s1.eval(`(() => { const li = document.getElementById('msg-${toEdit}'); return !li.querySelector('form.msg-edit') && li.querySelector('.msg-body').textContent.trim() === 'edited in place'; })()`)
+);
+if ((await bodyOf(toEdit)) !== 'edited in place') fail('the edit made in place was not saved');
+ok('Up in an empty composer edits the last message in place, and Enter saves it');
+
+// ---- search, in place: focused, and a result opens at its message ----
+
+await s1.eval("document.querySelector('.side-foot a[href=\"/search\"]').click(); true");
+await waitFor('the search page, with its box focused', async () => s1.eval("location.pathname === '/search' && document.activeElement && document.activeElement.name === 'q'"));
+ok('the search box has the focus when search opens in place');
+await s1.eval("document.activeElement.value = 'edited in place'; document.activeElement.form.requestSubmit(); true");
+await waitFor('the result', async () => s1.eval("!!document.querySelector('.search-result .markdown-body')"));
+await s1.eval("document.querySelector('.search-result .markdown-body').click(); true");
+await waitFor('the room to open at the message, marked', async () =>
+  s1.eval(`location.pathname === '/c/random' && location.hash === '#msg-${toEdit}' && document.getElementById('msg-${toEdit}').classList.contains('target')`)
+);
+ok('clicking a search result opens the room at that message, marked');
+if (!(await s1.eval("document.querySelector('[data-theme-name=\"auto\"]').getAttribute('aria-checked') === 'true'"))) fail('the appearance menu does not mark the theme in use after moving in place');
+ok('the appearance menu marks the theme in use');
+if (!/(UTC|GMT|[A-Z]{2,5}|[+-]\d)/.test(await s1.eval(`document.querySelector('#msg-${toEdit} time').title`))) fail('a message’s tooltip time does not say its time zone');
+ok('a message’s tooltip gives its time with the time zone');
+
+// ---- a thread's first reply, in a room whose first message it hangs from ----
+
+await api(owner, 'POST', '/channels', { name: 'threads' });
+const parent = (await api(bob, 'POST', '/channels/threads/messages', { body: 'the thread starts here' })).id;
+if (parent !== 1) fail(`the new channel's first message is not 1: ${parent}`);
+await s1.go('/c/threads/t/1');
+await s1.eval("document.querySelector('.composer textarea').focus(); true");
+await s1.type('the first reply');
+await s1.key('Enter');
+await waitFor('the reply to show', async () => (await s1.eval("document.getElementById('msg-list').textContent")).includes('the first reply'));
+await sleep(300);
+if (!(await s1.eval("document.querySelector('.thread-anchor').textContent")).includes('the thread starts here')) fail('the first reply replaced the message the thread hangs from');
+ok('a thread’s first reply is added under the message it hangs from, not over it');
+
+// ---- a new channel's name that is not one ----
+
+await s1.go('/new');
+await s1.eval("(() => { const f = document.querySelector('form[action=\"/new\"]'); f.noValidate = true; f.querySelector('#name').value = 'Claude Test!'; f.querySelector('#topic').value = 'kept'; f.requestSubmit(); return true; })()");
+await waitFor('the refusal', async () => s1.eval("!!document.querySelector('.form-error')"));
+const refill = await s1.eval("(() => { const f = document.querySelector('form[action=\"/new\"]'); return f.querySelector('#name').value + '|' + f.querySelector('#topic').value; })()");
+if (refill !== 'claude-test|kept') fail(`a refused channel name emptied the form rather than offering a name: ${refill}`);
+ok('a channel name that is not one is offered back as one, and the topic is kept');
+await s1.go('/c/random');
 
 // ---- pinning, live on another page ----
 

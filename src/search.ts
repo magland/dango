@@ -1,7 +1,7 @@
 import { AuthResult } from '../../mochiforge/src/vault';
 import { listChannels } from './channels';
 import { dmTitle, listDmsFor } from './dms';
-import { Message, lastMessageId, readMessage, readMessages, threadRoomDir } from './messages';
+import { Message, ROOM_PAGE, THREAD_PAGE, lastMessageId, readMessage, readMessages, threadRoomDir } from './messages';
 import { canSeeChannel } from './perms';
 import { channelDir, dmDir } from './workspace';
 
@@ -18,10 +18,19 @@ import { channelDir, dmDir } from './workspace';
 // and a query of filters alone lists everything they allow.
 
 export interface SearchHit {
-  /** The page the hit is read on: the room, or the thread it sits in. */
+  /**
+   * The message on the page it is read on: the room, or the thread it sits
+   * in, at #msg-<id>. A message older than the newest ROOM_PAGE of its room
+   * is not on the room's page, so it is linked as the head of its thread,
+   * where it is shown whatever its age.
+   */
   url: string;
+  /** That page alone. */
+  room: string;
   /** How that place is named for this viewer: "#general", "alice, bob". */
   where: string;
+  /** Whether it was said in a channel or a direct conversation. */
+  kind: 'channel' | 'dm';
   message: Message;
 }
 
@@ -61,15 +70,20 @@ function scanRoom(
   dir: string,
   url: string,
   where: string,
+  kind: SearchHit['kind'],
   needle: SearchQuery,
   out: SearchHit[],
   withThreads: boolean,
   info: SearchInfo
 ): void {
-  if (lastMessageId(dir) > SCAN_LIMIT) info.partial = true;
+  const last = lastMessageId(dir);
+  if (last > SCAN_LIMIT) info.partial = true;
   const messages = readMessages(dir, { limit: SCAN_LIMIT });
   for (const m of messages) {
-    if (matches(m, needle)) out.push({ url: `${url}#msg-${m.id}`, where, message: m });
+    if (matches(m, needle)) {
+      const shown = m.id > last - ROOM_PAGE;
+      out.push({ url: shown ? `${url}#msg-${m.id}` : `${url}/t/${m.id}`, room: url, where, kind, message: m });
+    }
     if (withThreads && m.replyCount > 0) {
       const tdir = threadRoomDir(dir, m.id);
       const replies = lastMessageId(tdir);
@@ -77,7 +91,8 @@ function scanRoom(
       if (replies > 0) {
         for (const r of readMessages(tdir, { limit: SCAN_LIMIT })) {
           if (matches(r, needle)) {
-            out.push({ url: `${url}/t/${m.id}#msg-${r.id}`, where: `${where} (thread)`, message: r });
+            const thread = `${url}/t/${m.id}`;
+            out.push({ url: r.id > replies - THREAD_PAGE ? `${thread}#msg-${r.id}` : thread, room: thread, where: `${where} (thread)`, kind, message: r });
           }
         }
       }
@@ -102,12 +117,12 @@ export function searchMessages(root: string, auth: AuthResult, query: string, in
   for (const c of listChannels(root)) {
     if (!canSeeChannel(auth, c)) continue;
     if (needle.in !== undefined && c.name !== needle.in) continue;
-    scanRoom(channelDir(root, c.name), `/c/${encodeURIComponent(c.name)}`, `#${c.name}`, needle, out, true, info);
+    scanRoom(channelDir(root, c.name), `/c/${encodeURIComponent(c.name)}`, `#${c.name}`, 'channel', needle, out, true, info);
     keepNewest(out);
   }
   for (const dm of listDmsFor(root, auth.username)) {
     if (needle.in !== undefined && !dm.participants.some((p) => p !== auth.username && p.toLowerCase() === needle.in)) continue;
-    scanRoom(dmDir(root, dm.id), `/d/${dm.id}`, dmTitle(dm, auth.username), needle, out, true, info);
+    scanRoom(dmDir(root, dm.id), `/d/${dm.id}`, dmTitle(dm, auth.username), 'dm', needle, out, true, info);
     keepNewest(out);
   }
   return out;

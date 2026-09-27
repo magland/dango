@@ -137,6 +137,13 @@ document.addEventListener('DOMContentLoaded', function () {
 // ---- copying ----
 function copyText(btn, text) {
   function done() {
+    // A code block's button carries its own two faces (see copyButton in
+    // mochiforge), and says so by a class; a plain button by its label.
+    if (btn.classList.contains('copy-btn')) {
+      btn.classList.add('copied');
+      setTimeout(function () { btn.classList.remove('copied'); }, 1400);
+      return;
+    }
     var label = btn.textContent;
     btn.textContent = 'Copied';
     setTimeout(function () { btn.textContent = label; }, 1400);
@@ -219,6 +226,19 @@ function clockTimes(within) {
     var d = new Date(times[i].getAttribute('datetime'));
     if (!isNaN(d.getTime())) times[i].textContent = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   }
+  localTitles(within);
+}
+// Every time's tooltip, in the reader's time zone and saying which: the
+// server writes them in its own, which is often UTC and does not say so.
+var TITLE_TIME = { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' };
+function localTitles(within) {
+  var times = within.querySelectorAll('time[datetime]');
+  for (var i = 0; i < times.length; i++) {
+    var d = new Date(times[i].getAttribute('datetime'));
+    if (!isNaN(d.getTime())) {
+      try { times[i].title = d.toLocaleString([], TITLE_TIME); } catch (e) { times[i].title = d.toString(); }
+    }
+  }
 }
 function arrangeList(list, startDay) {
   var old = list.querySelectorAll(':scope > .day-rule');
@@ -269,13 +289,24 @@ function arrangeRoom() {
 // growing, or a phone's keyboard opening under it.
 var stuckToBottom = true;
 var roomWatch = null;
-function setupRoom() {
+// Except a room opened at one message (a search result, say, #msg-12), which
+// opens there, with the message marked, and lets go of the bottom.
+function showTarget(el) {
+  el.scrollIntoView({ block: 'center' });
+  el.classList.remove('target');
+  void el.offsetWidth;
+  el.classList.add('target');
+  stuckToBottom = false;
+}
+function setupRoom(hash) {
   var pane = scrollPane();
   var list = msgList();
   stuckToBottom = true;
   if (!pane || !list) return;
   arrangeRoom();
-  scrollToBottom();
+  var target = /^#msg-[0-9]+$/.test(hash || '') ? list.querySelector(hash) : null;
+  if (target) showTarget(target);
+  else scrollToBottom();
   // Only the reader moving up lets go of the bottom. A scroll event can
   // arrive after the list has grown under it (an image loading just after
   // the page moved to the bottom), and read by distance alone it would look
@@ -328,7 +359,9 @@ function openStream(list) {
       if (roomStream === es) { roomStream = null; reloadPage(); }
       return;
     }
-    var existing = document.getElementById('msg-' + msg.id);
+    // Within the list: on a thread's page the message it hangs from is shown
+    // above it, and its number is not the replies' to share.
+    var existing = list.querySelector(':scope > [data-mid="' + msg.id + '"]');
     var pane = scrollPane();
     var follow = pane ? nearBottom(pane) : false;
     // A pin or an unpin carries the room's new count, for the header.
@@ -337,7 +370,11 @@ function openStream(list) {
       if (pinCount) pinCount.textContent = msg.pins ? String(msg.pins) : '';
     }
     if (existing) {
+      var editing = existing.querySelector('form.msg-edit');
+      var targeted = existing.classList.contains('target');
       existing.outerHTML = msg.html;
+      if (editing) keepEditor(list, msg.id, editing);
+      if (targeted) { var again = list.querySelector(':scope > [data-mid="' + msg.id + '"]'); if (again) again.classList.add('target'); }
       arrangeRoom();
       callButtonsChanged();
     } else if (msg.type === 'message') {
@@ -509,10 +546,12 @@ function markReadHere(id) {
 }
 // The stream carries this page's id (see clientId, under calls), which is
 // what a call addresses the page by.
+var userStream = null;
 function openUserStream() {
   var f = frame();
   if (!f || !window.EventSource) return;
   var es = new EventSource('/events?client=' + clientId);
+  userStream = es;
   es.onopen = function () {
     streamRetry.user = 0;
     if (window.dangoCall) window.dangoCall.streamOpened();
@@ -531,9 +570,28 @@ function openUserStream() {
   };
   es.onerror = function () {
     es.close();
-    retryStream('user', openUserStream);
+    if (userStream === es) retryStream('user', openUserStream);
   };
 }
+// A page left for another is closed with its streams, even where the browser
+// keeps it to come back to: a kept page holding two streams would otherwise
+// hold two of the few connections a browser opens to one site, and a few of
+// them leave none for the page on screen. Coming back opens them again, the
+// room's asking from its newest message, as after a drop.
+window.addEventListener('pagehide', function () {
+  if (userStream) { userStream.close(); userStream = null; }
+  if (roomStream) { roomStream.close(); roomStream = null; }
+});
+window.addEventListener('pageshow', function (e) {
+  if (!e.persisted || !frame()) return;
+  if (!userStream) openUserStream();
+  var list = msgList();
+  if (list && !roomStream) {
+    var items = list.querySelectorAll(':scope > [data-mid]');
+    if (items.length) list.setAttribute('data-last', items[items.length - 1].getAttribute('data-mid'));
+    openStream(list);
+  }
+});
 document.addEventListener('DOMContentLoaded', function () {
   seedCounts();
   openUserStream();
@@ -885,7 +943,30 @@ document.addEventListener('keydown', function (e) {
     e.preventDefault();
     var form = e.target.closest('form');
     if (form) sendComposer(form);
+    return;
   }
+  // Up in an empty composer edits the viewer's last message, as in Slack.
+  if (e.key === 'ArrowUp' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && e.target.value === '') {
+    var mine = lastOwnMessage();
+    if (mine) { e.preventDefault(); startEdit(mine); }
+    return;
+  }
+  // The caret moving out of an @name closes what was offered for it.
+  if (mentionState.open && /^(ArrowLeft|ArrowRight|Home|End)$/.test(e.key)) {
+    var ta = e.target;
+    setTimeout(function () { mentionInput(ta); }, 0);
+  }
+});
+document.addEventListener('click', function (e) {
+  if (e.target.matches && e.target.matches('.composer textarea') && mentionState.open) mentionInput(e.target);
+});
+document.addEventListener('focusout', function (e) {
+  if (e.target.matches && e.target.matches('.composer textarea')) closeMentions(e.target);
+});
+// Choosing from the list must not take the focus from the text, which would
+// close the list before the click lands.
+document.addEventListener('mousedown', function (e) {
+  if (closestOf(e.target, '[data-mention-list]')) e.preventDefault();
 });
 
 // ---- completing an @ ----
@@ -938,9 +1019,13 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 function mentionInput(ta) {
-  var at = mentionAtCaret(ta);
-  if (!at) { closeMentions(ta); return; }
+  if (!mentionAtCaret(ta)) { closeMentions(ta); return; }
   loadMembers(function (list) {
+    // Asked again now: the first @ waits for the member list, and by the
+    // time it arrives the caret may have left the name, or the page the
+    // composer. What is offered is for where the caret is, or nothing.
+    var at = mentionAtCaret(ta);
+    if (!at || !ta.isConnected || document.activeElement !== ta) { closeMentions(ta); return; }
     var me = frame() ? frame().viewer : '';
     var items = [];
     for (var i = 0; i < list.length && items.length < 8; i++) {
@@ -955,9 +1040,13 @@ function mentionInput(ta) {
   });
 }
 function takeMention(ta, name) {
+  // The @name the caret is in now, never one it was in earlier: replacing
+  // from an old start would take everything typed since with it.
+  var at = mentionAtCaret(ta);
+  if (!at) { closeMentions(ta); return; }
   var end = ta.selectionStart;
-  ta.value = ta.value.slice(0, mentionState.start) + '@' + name + ' ' + ta.value.slice(end);
-  var caret = mentionState.start + name.length + 2;
+  ta.value = ta.value.slice(0, at.start) + '@' + name + ' ' + ta.value.slice(end);
+  var caret = at.start + name.length + 2;
   ta.setSelectionRange(caret, caret);
   closeMentions(ta);
   autosize(ta);
@@ -965,6 +1054,8 @@ function takeMention(ta, name) {
 }
 function mentionKey(e, ta) {
   if (!mentionState.open) return false;
+  var at = mentionAtCaret(ta);
+  if (!at || at.start !== mentionState.start) { closeMentions(ta); return false; }
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
     var n = mentionState.items.length;
@@ -984,12 +1075,14 @@ function mentionKey(e, ta) {
   return false;
 }
 // Sending. The form is sent with XMLHttpRequest rather than fetch, for the one
-// thing fetch cannot say: how much of an upload has gone. While a send is in
-// flight the composer is locked (the button, the text, the file picker) so
-// that a second press, a second Enter, or an edit cannot make a second
-// message. If the send fails, for whatever reason, nothing is lost: the text
-// and the files stay where they were, the reason is shown beside them, and
-// Send tries again.
+// thing fetch cannot say: how much of an upload has gone. The text is taken
+// out of the composer as it is sent, so the next message can be typed at
+// once; the files stay, locked with the button, until they are through, so
+// that a second press cannot make a second message. Enter pressed again with
+// something new typed sends that once the first is through. If a send fails,
+// for whatever reason, nothing is lost: its text is put back (ahead of
+// anything typed since), the files are still there, the reason is shown
+// beside them, and Send tries again.
 //
 // Each message carries a nonce, made when it is first sent and kept until it
 // succeeds. A retry sends the same nonce, and the server answers a nonce it
@@ -1011,11 +1104,8 @@ function sendProgress(form, fraction) {
   bar.firstElementChild.style.width = Math.round(Math.max(0.03, Math.min(1, fraction)) * 100) + '%';
 }
 function lockComposer(form, locked) {
-  var controls = form.querySelectorAll('textarea, input[type="file"], button[type="submit"], [data-remove-file]');
-  for (var i = 0; i < controls.length; i++) {
-    if (controls[i].tagName === 'TEXTAREA') controls[i].readOnly = locked;
-    else controls[i].disabled = locked;
-  }
+  var controls = form.querySelectorAll('input[type="file"], button[type="submit"], [data-remove-file]');
+  for (var i = 0; i < controls.length; i++) controls[i].disabled = locked;
   if (locked) form.setAttribute('data-busy', '1');
   else form.removeAttribute('data-busy');
 }
@@ -1038,10 +1128,14 @@ function newNonce() {
   return out;
 }
 function sendComposer(form) {
-  // Already sending: this press is ignored, never turned into a second send.
-  if (form.getAttribute('data-busy')) return;
-  if (!window.XMLHttpRequest || !window.FormData) { form.submit(); return; }
   var ta = form.querySelector('textarea');
+  // Already sending: this press is never a second send of the same message.
+  // Something new typed since is sent next, once this one is through.
+  if (form.getAttribute('data-busy')) {
+    if (ta && ta.value.trim() !== '') form.dangoQueued = true;
+    return;
+  }
+  if (!window.XMLHttpRequest || !window.FormData) { form.submit(); return; }
   var file = form.querySelector('input[type="file"]');
   var bytes = selectedBytes(form);
   var hasFiles = bytes > 0 || (file && file.files && file.files.length > 0);
@@ -1055,7 +1149,10 @@ function sendComposer(form) {
   if (nonceField && !nonceField.value) nonceField.value = newNonce();
   // Read the form before locking it: a disabled field is left out of FormData.
   var data = new FormData(form);
+  var sentText = ta ? ta.value : '';
   lockComposer(form, true);
+  if (ta) { ta.value = ''; autosize(ta); closeMentions(ta); }
+  form.dangoQueued = false;
   sendStatus(form, 'pending', hasFiles ? 'Uploading ' + humanSize(bytes) + '…' : 'Sending…');
   sendProgress(form, hasFiles ? 0 : null);
   var xhr = new XMLHttpRequest();
@@ -1073,6 +1170,18 @@ function sendComposer(form) {
   function failed(reason) {
     lockComposer(form, false);
     sendProgress(form, null);
+    form.dangoQueued = false;
+    if (ta) {
+      var since = ta.value;
+      if (since.trim() === '') ta.value = sentText;
+      else {
+        // What was typed since joins it, which makes it a different message
+        // from the one the nonce was made for.
+        ta.value = sentText + '\\n\\n' + since;
+        if (nonceField) nonceField.value = '';
+      }
+      autosize(ta);
+    }
     sendStatus(form, 'error', 'Not sent: ' + reason + ' Your message is still here; press Send to try again.');
   }
   xhr.onload = function () {
@@ -1080,11 +1189,14 @@ function sendComposer(form) {
       lockComposer(form, false);
       sendProgress(form, null);
       sendStatus(form, '', '');
-      if (ta) { ta.value = ''; autosize(ta); }
       if (nonceField) nonceField.value = '';
       if (file) { if (canEditFiles) setFiles(form, []); else { file.value = ''; showFiles(form); } }
       scrollToBottom();
-      if (ta) ta.focus();
+      if (ta && (!document.activeElement || document.activeElement === document.body)) ta.focus();
+      if (form.dangoQueued) {
+        form.dangoQueued = false;
+        if (ta && ta.value.trim() !== '' && form.isConnected) sendComposer(form);
+      }
       return;
     }
     var reason = '';
@@ -1281,27 +1393,277 @@ document.addEventListener('submit', function (e) {
     sendComposer(form);
     return;
   }
-  // Forms that destroy something say what, and are asked about first.
+  // Forms that destroy something say what, and are asked about first. The
+  // question is the page's own dialog, so the answer comes later: the send is
+  // held, and made again once it is yes.
   var question = form.getAttribute('data-confirm');
-  if (question && !window.confirm(question)) e.preventDefault();
+  if (!question) return;
+  if (form.dangoConfirmed) { form.dangoConfirmed = false; return; }
+  e.preventDefault();
+  var submitter = e.submitter;
+  ask(question, { ok: (submitter && submitter.textContent.trim()) || 'Yes', danger: true }).then(function (yes) {
+    if (!yes) return;
+    form.dangoConfirmed = true;
+    if (form.requestSubmit) form.requestSubmit(submitter && submitter.form === form ? submitter : undefined);
+    else form.submit();
+  });
 });
+
+// ---- the page's own dialogs ----
+// Questions and notices in a dialog drawn by the page, rather than the
+// browser's confirm() and alert(), which look like a warning from the
+// browser itself and stop everything on the page while they are up. Where a
+// browser has no <dialog>, its own are used.
+function ask(text, opts) {
+  opts = opts || {};
+  var notice = opts.cancel === null;
+  if (!window.HTMLDialogElement || !document.createElement('dialog').showModal) {
+    if (notice) { window.alert(text); return Promise.resolve(true); }
+    return Promise.resolve(window.confirm(text));
+  }
+  return new Promise(function (resolve) {
+    var d = document.createElement('dialog');
+    d.className = 'ask';
+    var p = document.createElement('p');
+    p.textContent = text;
+    d.appendChild(p);
+    var row = document.createElement('div');
+    row.className = 'ask-row';
+    var answer = false;
+    function button(label, cls, value) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn ' + cls;
+      b.textContent = label;
+      b.addEventListener('click', function () { answer = value; d.close(); });
+      row.appendChild(b);
+      return b;
+    }
+    var no = notice ? null : button(opts.cancel || 'Cancel', '', false);
+    var yes = button(opts.ok || 'OK', opts.danger ? 'btn-danger' : 'btn-primary', true);
+    yes.setAttribute('data-ask-ok', '');
+    if (no) no.setAttribute('data-ask-cancel', '');
+    d.appendChild(row);
+    d.addEventListener('close', function () { d.remove(); resolve(answer); });
+    document.body.appendChild(d);
+    d.showModal();
+    // The safe answer has the focus, so a stray Enter destroys nothing.
+    (no || yes).focus();
+  });
+}
+function notice(text) { return ask(text, { cancel: null }); }
 
 // Deleting a message asks first, then deletes without leaving the room; the
 // event stream repaints the message as deleted. Without script the trash
 // button is a link to a page that asks the same question.
 function deleteMessage(link) {
-  if (!window.confirm('Delete this message? It will read "This message was deleted." for everyone, and its attachments are removed. There is no undo.')) return;
+  ask('Delete this message? It will read "This message was deleted." for everyone, and its attachments are removed. There is no undo.', { ok: 'Delete message', danger: true })
+    .then(function (yes) { if (yes) deleteConfirmed(link); });
+}
+function deleteConfirmed(link) {
   var f = frame();
   var body = new FormData();
   body.append('csrf', f ? f.csrf : '');
   fetch(link.getAttribute('href'), { method: 'POST', body: body, headers: { Accept: 'application/json' } })
     .then(function (r) {
       if (r.ok) return;
-      return r.json().then(function (d) { window.alert('The message was not deleted: ' + (d.error || 'the server answered ' + r.status)); },
-        function () { window.alert('The message was not deleted: the server answered ' + r.status); });
+      return r.json().then(function (d) { notice('The message was not deleted: ' + (d.error || 'the server answered ' + r.status)); },
+        function () { notice('The message was not deleted: the server answered ' + r.status); });
     }, function () {
-      window.alert('The message was not deleted: the connection to the workspace failed.');
+      notice('The message was not deleted: the connection to the workspace failed.');
     });
+}
+
+// ---- editing in place ----
+// Edit, in a message's tools, opens its text in the list where it is, rather
+// than on a page of its own (which is where the link leads without script).
+// The text is the edit page's own, fetched, so that what is edited is the
+// markdown as written, and the page says so when the message can no longer
+// be edited. Enter saves and Escape puts it back, as in the composer; the
+// room's stream repaints the message once it is saved.
+function lastOwnMessage() {
+  var list = msgList();
+  var f = frame();
+  if (!list || !f) return null;
+  var items = list.querySelectorAll(':scope > .msg[data-author]');
+  for (var i = items.length - 1; i >= 0; i--) {
+    if (items[i].getAttribute('data-author') !== f.viewer) continue;
+    return items[i].querySelector('.msg-tools a[href$="/edit"]') ? items[i] : null;
+  }
+  return null;
+}
+function startEdit(li) {
+  if (!li) return;
+  var open = li.querySelector('form.msg-edit');
+  if (open) { open.querySelector('textarea').focus(); return; }
+  var link = li.querySelector('.msg-tools a[href$="/edit"]');
+  if (!link) return;
+  fetch(link.href, { credentials: 'same-origin', headers: { Accept: 'text/html' } }).then(function (r) {
+    return r.text().then(function (text) {
+      var d = new DOMParser().parseFromString(text, 'text/html');
+      var src = d.querySelector('[data-edit-body]');
+      if (!r.ok || !src) { notice(pageMessage(text)); return; }
+      if (!li.isConnected || li.querySelector('form.msg-edit')) return;
+      openEditor(li, src.closest('form').getAttribute('action'), src.value);
+    });
+  }, function () {
+    notice('The message cannot be edited now: the connection to the workspace failed.');
+  });
+}
+function openEditor(li, action, text) {
+  var body = li.querySelector('.msg-body');
+  if (!body) return;
+  var form = document.createElement('form');
+  form.className = 'msg-edit';
+  form.method = 'post';
+  form.action = action;
+  var ta = document.createElement('textarea');
+  ta.name = 'body';
+  ta.value = text;
+  ta.setAttribute('aria-label', 'Edit message');
+  form.appendChild(ta);
+  var row = document.createElement('div');
+  row.className = 'msg-edit-row';
+  var hint = document.createElement('span');
+  hint.className = 'hint';
+  hint.textContent = touchKeyboard.matches ? '' : 'Enter saves, Escape cancels';
+  row.appendChild(hint);
+  var cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'btn';
+  cancel.textContent = 'Cancel';
+  cancel.setAttribute('data-edit-cancel', '');
+  row.appendChild(cancel);
+  var save = document.createElement('button');
+  save.type = 'submit';
+  save.className = 'btn btn-primary';
+  save.textContent = 'Save';
+  row.appendChild(save);
+  form.appendChild(row);
+  body.hidden = true;
+  body.after(form);
+  autosize(ta);
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  li.classList.add('editing');
+  if (stuckToBottom && li === msgList().lastElementChild) scrollToBottom();
+}
+function closeEditor(form) {
+  var li = closestOf(form, '.msg');
+  form.remove();
+  if (!li) return;
+  li.classList.remove('editing');
+  var body = li.querySelector('.msg-body');
+  if (body) body.hidden = false;
+  if (li.closest('#msg-list')) {
+    var ta = document.querySelector('.composer textarea');
+    if (ta && !touchKeyboard.matches) ta.focus();
+  }
+}
+// A message repainted while it is being edited (a reaction, say) keeps the
+// editor, and what was typed in it.
+function keepEditor(list, id, form) {
+  var li = list.querySelector(':scope > [data-mid="' + id + '"]');
+  var body = li && li.querySelector('.msg-body');
+  if (!body) return;
+  var ta = form.querySelector('textarea');
+  var focused = document.activeElement === ta || !document.activeElement || document.activeElement === document.body;
+  var a = ta.selectionStart, b = ta.selectionEnd;
+  body.hidden = true;
+  body.after(form);
+  li.classList.add('editing');
+  if (focused) { ta.focus(); ta.setSelectionRange(a, b); }
+}
+function saveEdit(form) {
+  if (form.getAttribute('data-busy')) return;
+  var ta = form.querySelector('textarea');
+  var f = frame();
+  var fields = new URLSearchParams();
+  fields.append('csrf', f ? f.csrf : '');
+  fields.append('body', ta.value);
+  form.setAttribute('data-busy', '1');
+  ta.readOnly = true;
+  fetch(form.getAttribute('action'), { method: 'POST', body: fields, credentials: 'same-origin', headers: { Accept: 'application/json' } })
+    .then(function (r) {
+      if (r.ok) { closeEditor(form); return; }
+      return r.json().catch(function () { return {}; }).then(function (d) {
+        throw new Error(d.error || 'the server answered ' + r.status + '.');
+      });
+    })
+    .catch(function (e) {
+      form.removeAttribute('data-busy');
+      ta.readOnly = false;
+      notice('Not saved: ' + (e && e.message && e.message !== 'Failed to fetch' ? e.message : 'the connection to the workspace failed.'));
+    });
+}
+document.addEventListener('submit', function (e) {
+  var form = e.target;
+  if (!form.matches || !form.matches('form.msg-edit')) return;
+  e.preventDefault();
+  saveEdit(form);
+});
+document.addEventListener('keydown', function (e) {
+  var form = e.target.matches && e.target.matches('form.msg-edit textarea') ? e.target.form : null;
+  if (!form) return;
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !touchKeyboard.matches) {
+    e.preventDefault();
+    saveEdit(form);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeEditor(form);
+  }
+});
+document.addEventListener('input', function (e) {
+  if (e.target.matches && e.target.matches('form.msg-edit textarea')) autosize(e.target);
+});
+document.addEventListener('click', function (e) {
+  var cancel = closestOf(e.target, 'form.msg-edit [data-edit-cancel]');
+  if (cancel) closeEditor(cancel.form);
+});
+
+// ---- small helps for forms ----
+// A channel's name is typed the way it will be written: lowercase, with a
+// hyphen where a space was typed.
+document.addEventListener('input', function (e) {
+  var el = e.target;
+  if (!el.matches || !el.matches('[data-channel-name]')) return;
+  var next = el.value.toLowerCase().replace(/\\s/g, '-');
+  if (next === el.value) return;
+  var at = el.selectionStart;
+  el.value = next;
+  if (next.length === el.value.length) el.setSelectionRange(at, at);
+});
+// The new-conversation page's list of people, narrowed as a name is typed.
+// Someone already ticked stays in view, so the choice can be seen whole.
+function setupPeopleFilter() {
+  var input = document.querySelector('[data-people-filter]');
+  if (!input) return;
+  input.hidden = false;
+  var none = document.querySelector('[data-people-none]');
+  function visible() {
+    return Array.prototype.filter.call(document.querySelectorAll('[data-person]'), function (r) { return !r.hidden; });
+  }
+  function apply() {
+    var q = input.value.trim().toLowerCase();
+    var rows = document.querySelectorAll('[data-person]');
+    for (var i = 0; i < rows.length; i++) {
+      rows[i].hidden = !!q && rows[i].getAttribute('data-person').indexOf(q) < 0 && !rows[i].querySelector('input').checked;
+    }
+    if (none) none.hidden = visible().length > 0;
+  }
+  input.addEventListener('input', apply);
+  // Enter ticks the one person left, rather than sending a half-made choice.
+  input.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    var q = input.value.trim().toLowerCase();
+    var left = visible().filter(function (r) { return r.getAttribute('data-person').indexOf(q) >= 0; });
+    if (q && left.length === 1) {
+      left[0].querySelector('input').checked = true;
+      input.value = '';
+      apply();
+    }
+  });
 }
 
 // ---- clicks, delegated ----
@@ -1333,6 +1695,26 @@ document.addEventListener('click', function (e) {
   }
   var copy = closestOf(t, '[data-copy]');
   if (copy) { copyText(copy, copy.getAttribute('data-copy')); return; }
+  // A code block's button copies the code before it.
+  var codeCopy = closestOf(t, '.code-block .copy-btn');
+  if (codeCopy) {
+    var pre = codeCopy.previousElementSibling;
+    copyText(codeCopy, pre ? pre.textContent : '');
+    return;
+  }
+  // Editing a message in a room's list happens in the list.
+  var edit = closestOf(t, '#msg-list .msg-tools a[href$="/edit"]');
+  if (edit && window.fetch && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+    e.preventDefault();
+    startEdit(closestOf(edit, '.msg'));
+    return;
+  }
+  // A search result opens at its message, wherever in it it is clicked.
+  var result = closestOf(t, '.search-result[data-href]');
+  if (result && !closestOf(t, 'a, button, summary, input, video, audio') && !(window.getSelection && String(window.getSelection()))) {
+    navigate(result.getAttribute('data-href'), { push: true });
+    return;
+  }
   if (closestOf(t, '[data-jump-newest]')) { scrollToBottom(); stuckToBottom = true; showJump(false); return; }
   var mention = closestOf(t, '[data-mention]');
   if (mention) {
@@ -1348,10 +1730,10 @@ document.addEventListener('click', function (e) {
     fetch(form.getAttribute('action'), { method: 'POST', body: new FormData(form), headers: { Accept: 'application/json' } })
       .then(function (r) {
         if (r.ok) return;
-        return r.json().then(function (d) { window.alert(d.error || 'That did not work: the server answered ' + r.status + '.'); },
-          function () { window.alert('That did not work: the server answered ' + r.status + '.'); });
+        return r.json().then(function (d) { notice(d.error || 'That did not work: the server answered ' + r.status + '.'); },
+          function () { notice('That did not work: the server answered ' + r.status + '.'); });
       }, function () {
-        window.alert('That did not work: the connection to the workspace failed.');
+        notice('That did not work: the connection to the workspace failed.');
       });
     return;
   }
@@ -1361,12 +1743,15 @@ document.addEventListener('click', function (e) {
 // ---- the page on screen ----
 // What each page shown sets up, whether it arrived by a load or in place,
 // and takes down when the next one replaces it.
-function startMain() {
+function startMain(hash) {
+  applyTheme();
   highlightSearch();
-  setupRoom();
+  setupRoom(hash);
+  localTitles(document);
   var list = msgList();
   if (list) openStream(list);
   setupAccount();
+  setupPeopleFilter();
   callButtonsChanged();
   // The admin page's test of how calls connect runs from this browser.
   var test = document.querySelector('[data-relay-test]');
@@ -1378,7 +1763,16 @@ function stopMain() {
   mentionState.open = false;
   mentionState.items = [];
 }
-document.addEventListener('DOMContentLoaded', startMain);
+document.addEventListener('DOMContentLoaded', function () { startMain(location.hash); });
+// A page shown in place is not given the focus its field asks for, as a
+// loaded page is; so it is given it here. A text is focused with the caret
+// at its end, where an edit carries on.
+function autofocusMain() {
+  var el = document.querySelector('.app-main [autofocus]');
+  if (!el || el.hidden || el.disabled) return;
+  el.focus({ preventScroll: true });
+  if (el.tagName === 'TEXTAREA') el.setSelectionRange(el.value.length, el.value.length);
+}
 
 // ---- moving between pages in place ----
 // A link or form inside the frame fetches its page and swaps it in (see the
@@ -1414,7 +1808,7 @@ function showPage(request, hash, opts) {
   }).then(function (page) {
     if (seq !== navSeq) return;
     document.documentElement.classList.remove('loading-page');
-    if (!swapIn(page.text)) {
+    if (!swapIn(page.text, hash)) {
       // A form answered with something that is not a page of the frame (an
       // error from before the frame, say) is shown as the browser would have
       // shown it, rather than fetched again: the address a form posts to may
@@ -1422,7 +1816,7 @@ function showPage(request, hash, opts) {
       // Except while a call is on: writing a page over this one would leave
       // the call's camera and microphone running with nothing on screen to
       // end it, so what the answer says is shown over the page instead.
-      if (opts.form && !page.redirected && window.dangoCall && window.dangoCall.active()) window.alert(pageMessage(page.text));
+      if (opts.form && !page.redirected && window.dangoCall && window.dangoCall.active()) notice(pageMessage(page.text));
       else if (opts.form && !page.redirected) { document.open(); document.write(page.text); document.close(); }
       else location.assign(page.url);
       return;
@@ -1436,8 +1830,9 @@ function showPage(request, hash, opts) {
     if (opts.replace || where === location.pathname + location.search + location.hash) history.replaceState(null, '', where);
     else if (opts.push) history.pushState(null, '', where);
     shownPath = location.pathname + location.search;
+    // A room's own target was found by setupRoom; another page's is here.
     var target = hash && hash.length > 1 ? document.getElementById(decodeURIComponent(hash.slice(1))) : null;
-    if (target) target.scrollIntoView();
+    if (target && !closestOf(target, '.msgs')) target.scrollIntoView();
     else if (!msgList()) { var d = document.querySelector('.doc'); if (d) d.scrollTop = 0; }
   }).catch(function () {
     if (seq !== navSeq) return;
@@ -1445,7 +1840,7 @@ function showPage(request, hash, opts) {
     // Tried in place and failed: the browser is given the same address, and
     // shows whatever the matter is, the way it would have without script.
     if (!opts.form) location.assign(opts.href);
-    else window.alert('That did not work: the connection to the workspace failed.');
+    else notice('That did not work: the connection to the workspace failed.');
   });
 }
 // The sentence an error page says, for showing it without the page.
@@ -1454,7 +1849,7 @@ function pageMessage(text) {
   var p = d.querySelector('main p, .doc p, body p');
   return p && p.textContent ? p.textContent : 'That did not work; try again in a moment.';
 }
-function swapIn(text) {
+function swapIn(text, hash) {
   var next = new DOMParser().parseFromString(text, 'text/html');
   var nextApp = next.querySelector('.app');
   var f = frame();
@@ -1479,7 +1874,8 @@ function swapIn(text) {
   seedCounts();
   closeMenus(null);
   window.scrollTo(0, 0);
-  startMain();
+  startMain(hash || '');
+  autofocusMain();
   if (window.dangoCall) window.dangoCall.place();
   return true;
 }
@@ -1587,7 +1983,7 @@ function withCallScript(then) {
   var s = document.createElement('script');
   s.src = src;
   s.onload = function () { if (window.dangoCall) then(window.dangoCall); };
-  s.onerror = function () { window.alert('The call could not start: its script did not load.'); };
+  s.onerror = function () { notice('The call could not start: its script did not load.'); };
   document.head.appendChild(s);
 }
 document.addEventListener('click', function (e) {

@@ -2,6 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { withFileLock } from '../../mochiforge/src/atomic';
 import { readDoc, str, writeDoc } from '../../mochiforge/src/discussion';
+import MarkdownIt from 'markdown-it';
+import { full as emojiPlugin } from 'markdown-it-emoji';
 import { OpError } from '../../mochiforge/src/ops';
 
 // Message storage, shared by channels, direct conversations, and threads.
@@ -55,6 +57,9 @@ export function isValidNonce(v: unknown): v is string {
   return typeof v === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(v);
 }
 export const MAX_REACTION = 32;
+/** How many of a room's newest messages its page shows, and a thread's page its replies. */
+export const ROOM_PAGE = 100;
+export const THREAD_PAGE = 200;
 
 export interface Attachment {
   name: string;
@@ -424,8 +429,26 @@ export function updateCallRecord(room: string, id: number, fn: (call: CallRecord
 }
 
 /** Toggle one user's reaction. Adding an existing one removes it, as in Slack. */
+// The emoji shortcodes messages understand (:tada:), for a reaction written
+// as one: the same table, through a parser that does nothing else.
+const SHORTCODES = new MarkdownIt('zero').use(emojiPlugin);
+
+/**
+ * A reaction as it is kept: the emoji itself, with a shortcode such as
+ * :tada: turned into the emoji it names, so that the menu's 🎉 and a typed
+ * :tada: are one reaction. A shortcode that names no emoji is refused rather
+ * than kept as text.
+ */
+export function reactionEmoji(input: string): string {
+  const e = input.trim();
+  if (!/^:[A-Za-z0-9_+-]+:$/.test(e)) return e;
+  const out = SHORTCODES.renderInline(e);
+  if (out === e) throw new OpError(`No emoji is called ${e}.`);
+  return out;
+}
+
 export function toggleReaction(room: string, id: number, emoji: string, user: string): Message {
-  const e = emoji.trim();
+  const e = reactionEmoji(emoji);
   if (e === '' || e.length > MAX_REACTION || /[\n\r]/.test(e)) {
     throw new OpError('That is not usable as a reaction.');
   }

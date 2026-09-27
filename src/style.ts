@@ -141,6 +141,37 @@ const CHAT_CSS = `
 .msg-body.markdown-body > :first-child { margin-top: 0; }
 .msg-body.markdown-body > :last-child { margin-bottom: 0; }
 .msg-deleted { color: var(--fg-subtle); font-style: italic; }
+/* A deleted message keeps its place in the gutter, and draws nothing there. */
+.avatar-gap { width: 32px; flex: none; }
+/* A code block's copy button sits at its foot in a message, clear of the
+   message's tools, which float over the message's top edge. */
+.msg-body .code-block .copy-btn { top: auto; bottom: 8px; }
+
+/* The message a link opened the room at: marked, and the mark fading. */
+@keyframes msg-target { from { background: var(--line-mark); } to { background: transparent; } }
+.msg.target { animation: msg-target 2.5s ease-out; }
+
+/* Editing in place: the text where the message's body was, and its buttons
+   under it. */
+.msg-edit { margin-top: 2px; }
+.msg-edit textarea {
+  display: block; width: 100%; min-height: 60px; max-height: 40vh; resize: vertical;
+  padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg); color: var(--fg); font: inherit;
+}
+.msg-edit textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.msg-edit-row { display: flex; align-items: center; justify-content: flex-end; gap: var(--s2); margin-top: 6px; }
+.msg-edit-row .hint { color: var(--fg-subtle); font-size: var(--t-xs); margin-right: auto; }
+.msg.editing .msg-tools { display: none !important; }
+
+/* The page's own question or notice, over a dimmed page. */
+dialog.ask {
+  max-width: min(440px, calc(100vw - 32px)); padding: var(--s4); border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--bg); color: var(--fg); box-shadow: 0 8px 28px var(--shadow);
+}
+dialog.ask::backdrop { background: rgba(0, 0, 0, 0.35); }
+dialog.ask p { margin: 0 0 var(--s4); }
+.ask-row { display: flex; justify-content: flex-end; gap: var(--s2); flex-wrap: wrap; }
 
 /* A continuation: the same person again within a few minutes, drawn as more
    of what they were saying. The avatar keeps its column but is not drawn,
@@ -201,12 +232,16 @@ const CHAT_CSS = `
 /* Reacting: the quick reactions in one row, opening from the strip's right
    edge rather than from the plus, so on a narrow screen the row stays on it. */
 .msg-tools .react-menu { position: static; }
-.react-menu .dropdown-menu { top: 100%; right: -1px; width: auto; margin-top: 4px; display: flex; }
+.react-menu .dropdown-menu { top: 100%; right: -1px; width: auto; margin-top: 4px; display: grid; grid-template-columns: repeat(6, auto); }
 .react-menu .dropdown-menu form { display: flex; }
 .react-menu .dropdown-menu button.dd-item {
   width: auto; min-width: 40px; height: 40px; min-height: 0; padding: 0 8px; justify-content: center;
   border: none; font-size: var(--t-lg);
 }
+/* Under the quick ones, any other emoji, pasted or named as :tada:. */
+.react-menu .dropdown-menu form.react-other { grid-column: 1 / -1; gap: 6px; padding: 6px; border-top: 1px solid var(--border); }
+.react-other input { flex: 1; min-width: 0; width: 10em; }
+.msg-tools .react-other button { color: var(--fg); min-width: 0; height: auto; padding: 4px 10px; border: 1px solid var(--border); }
 
 /* Where nothing hovers, a tap on a message shows its tools, larger, for a
    thumb (the page script keeps the tapped message marked). Without script
@@ -360,6 +395,7 @@ form[data-busy] button[type="submit"] { opacity: 0.6; cursor: progress; }
 
 /* The people to start a conversation with: a box, a face, a name. */
 .field label.person-pick { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s1); }
+[data-people-filter] { margin-bottom: var(--s2); }
 
 /* The mark over a signed-out page's form. */
 .signin-mark { display: flex; justify-content: center; margin-bottom: var(--s4); color: var(--fg); }
@@ -370,6 +406,10 @@ form[data-busy] button[type="submit"] { opacity: 0.6; cursor: progress; }
 .doc { flex: 1; overflow-y: auto; padding: var(--s5) var(--s5) var(--s6); }
 .doc > .inner { max-width: 920px; }
 .search-result { border-left: 3px solid var(--border); padding: 2px 0 2px var(--s3); margin-bottom: var(--s4); max-width: var(--measure); }
+.js .search-result { cursor: pointer; border-radius: 0 var(--radius) var(--radius) 0; }
+.js .search-result:hover { background: var(--surface); border-left-color: var(--accent); }
+.search-result .where > a:first-child { display: inline-flex; align-items: center; gap: 4px; }
+.search-result .result-time { color: var(--fg-muted); }
 .search-result .where { display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--s2); font-size: var(--t-sm); margin-bottom: 2px; }
 .search-result .who { display: inline-flex; align-items: center; gap: 4px; color: var(--fg-muted); }
 .search-result .markdown-body { overflow-wrap: anywhere; }

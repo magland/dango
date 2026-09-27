@@ -75,6 +75,23 @@ export function isValidChannelName(name: string): boolean {
 }
 
 /**
+ * The nearest channel name to what someone typed: accents dropped, lowercase,
+ * each run of anything else a single hyphen, none at either end. Empty when
+ * nothing usable is left.
+ */
+export function channelNameFrom(text: string): string {
+  const name = text
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+/, '')
+    .slice(0, 80)
+    .replace(/-+$/, '');
+  return isValidChannelName(name) ? name : '';
+}
+
+/**
  * Names no user may take, because a top-level route answers to them: user
  * profiles live at `/<username>`, which is also where @mentions link (the
  * mention renderer is shared with mochiforge and links to `/<name>`), so

@@ -29,12 +29,14 @@ test('a hostile message body renders inert, and inline code keeps its text', () 
   const root = tmpRoot();
   createChannel(root, 'general', { createdBy: 'eve' });
   const room = channelRoom(root, 'general', viewer('eve').auth)!;
-  // A bare script tag is sanitized away outright; in a code span the text
-  // must survive, escaped.
+  // A bare script tag is shown as the text it was written as, since a chat
+  // message that says <script> is usually about HTML; in a code span the
+  // text survives too. Both are escaped.
   const m = addMessage(room.dir, { author: 'eve', body: `\`${PAYLOAD}\` and ${PAYLOAD}` });
   const out = messageHtml(root, room, m, viewer('eve')).text;
   assert.ok(!out.includes('<script'), 'no executable markup');
   assert.ok(out.includes('alert(1)'), 'the code-span text still reached the page');
+  assert.ok(out.includes('and &lt;script&gt;alert(1)&lt;/script&gt;'), 'the bare tag is shown as text');
 });
 
 test('a hostile topic and a hostile reaction render inert on the channel page', () => {

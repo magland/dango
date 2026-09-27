@@ -52,6 +52,8 @@ import {
   readMessage,
   readMessages,
   toggleReaction,
+  ROOM_PAGE,
+  THREAD_PAGE,
 } from './messages';
 import { RateLimited, WriteLimits, refusalStatus } from './limits';
 import { CALL_NOT_EDITABLE, EDIT_WINDOW_PASSED, canDeleteMessage, canEditMessage, isSiteAdmin } from './perms';
@@ -79,7 +81,7 @@ import { readKey, readMarkers } from './reads';
 import { Room, channelRoom, dmRoom, removeWorkspaceUser, threadRoom } from './rooms';
 import { searchMessages } from './search';
 import * as views from './views';
-import { isValidWorkspaceUserName } from './workspace';
+import { channelNameFrom, isValidChannelName, isValidWorkspaceUserName } from './workspace';
 
 // Every page and form of the web interface. Anonymous requests reach exactly
 // two things, the sign-in page and the assets; everything else resolves a
@@ -302,18 +304,30 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     const viewer = requireForm(req, res);
     if (!viewer) return;
     const body = req.body as Record<string, unknown>;
-    const name = String(body.name ?? '').trim().toLowerCase();
+    const typed = String(body.name ?? '').trim();
+    const name = typed.toLowerCase();
+    const form = { name: typed, topic: String(body.topic ?? ''), private: body.private === '1' };
+    // A name that is not one is offered back as the nearest that is, for the
+    // person to accept by pressing Create again: "Claude Test!" as claude-test.
+    if (!isValidChannelName(name)) {
+      const suggestion = channelNameFrom(typed);
+      const error = suggestion
+        ? `"${typed}" cannot be a channel name, which is lowercase letters, digits, and single hyphens. It is changed to ${suggestion} below; press Create channel to use that.`
+        : 'A channel name is lowercase letters, digits, and single hyphens, at most 80 characters.';
+      res.status(400).type('html').send(views.newChannelPage(root, viewer, error, { ...form, name: suggestion || typed }));
+      return;
+    }
     try {
       limits.action(viewer.auth.username);
       const c = createChannel(root, name, {
-        topic: String(body.topic ?? ''),
-        private: body.private === '1',
+        topic: form.topic,
+        private: form.private,
         createdBy: viewer.auth.username,
       });
       res.redirect(303, `/c/${encodeURIComponent(c.name)}`);
     } catch (e) {
       if (e instanceof OpError) {
-        res.status(refusalStatus(e, opErrorStatus)).type('html').send(views.newChannelPage(root, viewer, e.message));
+        res.status(refusalStatus(e, opErrorStatus)).type('html').send(views.newChannelPage(root, viewer, e.message, form));
         return;
       }
       throw e;
@@ -747,14 +761,14 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
   // The room pages themselves.
   app.get('/c/:channel', (req, res) =>
     withRoom(req, res, (viewer, room) => {
-      const messages = readMessages(room.dir, { limit: 100 });
+      const messages = readMessages(room.dir, { limit: ROOM_PAGE });
       const readUpTo = seen(req, viewer, room, messages);
       res.type('html').send(views.channelPage(root, room, messages, viewer, readUpTo));
     })
   );
   app.get('/d/:dm', (req, res) =>
     withRoom(req, res, (viewer, room) => {
-      const messages = readMessages(room.dir, { limit: 100 });
+      const messages = readMessages(room.dir, { limit: ROOM_PAGE });
       const readUpTo = seen(req, viewer, room, messages);
       res.type('html').send(views.dmPage(root, room, messages, viewer, readUpTo));
     })
@@ -766,7 +780,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         fail(res, viewer, 404, 'Page not found');
         return;
       }
-      const replies = readMessages(room.dir, { limit: 200 });
+      const replies = readMessages(room.dir, { limit: THREAD_PAGE });
       seen(req, viewer, room, replies);
       res.type('html').send(views.threadPage(root, room, anchor, replies, viewer));
     })
@@ -932,7 +946,9 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         limits.action(viewer.auth.username);
         const edited = editMessage(room.dir, id, String((req.body as Record<string, unknown>).body ?? ''));
         publish(room.url, { type: 'update', message: edited });
-        res.redirect(303, room.url);
+        // The page script edits in place, and hears the message repainted.
+        if (wantsJson(req)) res.json({ ok: true });
+        else res.redirect(303, room.url);
       },
       { form: true }
     )

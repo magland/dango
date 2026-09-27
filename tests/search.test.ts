@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { AuthResult } from '../../mochiforge/src/vault';
 import { createChannel } from '../src/channels';
 import { openDm } from '../src/dms';
-import { addMessage, deleteMessage, threadRoomDir } from '../src/messages';
+import { ROOM_PAGE, addMessage, deleteMessage, threadRoomDir } from '../src/messages';
 import { searchMessages } from '../src/search';
 import { channelDir, dmDir } from '../src/workspace';
 
@@ -71,4 +71,22 @@ test('from: and in: narrow a search, and alone list what they allow', () => {
   // A filter does not open a channel the viewer cannot read.
   assert.deepStrictEqual(bodies('in:secret'), []);
   assert.deepStrictEqual(bodies('in:secret', 'alice'), ['secret lunch']);
+});
+
+test('a hit links to its message, and one older than the room page shows as its thread', () => {
+  const root = tmpRoot();
+  createChannel(root, 'general', { createdBy: 'alice' });
+  const general = channelDir(root, 'general');
+  const old = addMessage(general, { author: 'alice', body: 'an old needle' });
+  for (let i = 0; i < ROOM_PAGE; i++) addMessage(general, { author: 'alice', body: `filler ${i}` });
+  const recent = addMessage(general, { author: 'alice', body: 'a new needle' });
+  const dm = openDm(root, ['alice', 'bob']);
+  addMessage(dmDir(root, dm.id), { author: 'bob', body: 'a needle in private' });
+  const hits = searchMessages(root, auth('alice'), 'needle');
+  const byBody = new Map(hits.map((h) => [h.message.body, h]));
+  assert.strictEqual(byBody.get('a new needle')!.url, `/c/general#msg-${recent.id}`);
+  assert.strictEqual(byBody.get('an old needle')!.url, `/c/general/t/${old.id}`);
+  assert.strictEqual(byBody.get('an old needle')!.room, '/c/general');
+  assert.strictEqual(byBody.get('a needle in private')!.kind, 'dm');
+  assert.strictEqual(byBody.get('a new needle')!.kind, 'channel');
 });

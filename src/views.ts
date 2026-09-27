@@ -16,7 +16,7 @@ import { CallsConfig, DEFAULT_STUN, loadConfig } from './config';
 import { DmInfo, dmTitle } from './dms';
 import { MARK } from './logo';
 import { Device, NotifyPrefs, isMuted, readPrefs } from './notify';
-import { Attachment, MAX_ATTACHMENTS_BYTES, Message } from './messages';
+import { Attachment, MAX_ATTACHMENTS_BYTES, MAX_REACTION, Message } from './messages';
 import { pageScript } from './pagescript';
 import { canDeleteMessage, canEditMessage, canSeeChannel, isSiteAdmin } from './perms';
 import { Pin, pinOf, readPins } from './pins';
@@ -227,6 +227,7 @@ function bodyHtml(root: string, body: string, viewer: Viewer): Html {
       renderMarkdown(body, {
         rawBase: '',
         blobBase: '',
+        showRefusedHtml: true,
         mentions: (name) => userExists(root, name),
         channels: (name) => {
           visible ??= new Set(listChannels(root).filter((c) => canSeeChannel(viewer.auth, c)).map((c) => c.name));
@@ -295,7 +296,10 @@ function fileRows(roomUrl: string, id: number, files: Attachment[]): Html | '' {
   return html`<ul class="msg-files">${joinHtml(rows)}</ul>`;
 }
 
-const QUICK_REACTIONS = ['\u{1F44D}', '✅', '\u{1F440}', '\u{1F389}', '❤️', '\u{1F604}'];
+const QUICK_REACTIONS = [
+  '\u{1F44D}', '✅', '\u{1F440}', '\u{1F389}', '❤️', '\u{1F604}',
+  '\u{1F602}', '\u{1F64F}', '\u{1F525}', '\u{1F44F}', '\u{1F914}', '\u{1F62E}',
+];
 
 function reactForm(roomUrl: string, id: number, emoji: string, viewer: Viewer, mine: boolean, count?: number): Html {
   return html`<form data-quiet method="post" action="${roomUrl}/m/${id}/react">${csrfField(viewer)}<input type="hidden" name="emoji" value="${emoji}"><button class="${count === undefined ? 'dd-item' : `react-pill ${mine ? 'mine' : ''}`}" type="submit" title="${mine ? 'Remove your reaction' : 'React'}">${emoji}${count !== undefined ? html` <span>${count}</span>` : ''}</button></form>`;
@@ -306,7 +310,7 @@ function msgTools(room: Room, m: Message, viewer: Viewer): Html {
   parts.push(
     html`<details class="dropdown react-menu"><summary aria-label="React" title="React">${icon('plus')}</summary><div class="dropdown-menu dd-right" role="menu">${joinHtml(
       QUICK_REACTIONS.map((e) => reactForm(room.url, m.id, e, viewer, (m.reactions[e] ?? []).includes(viewer.auth.username)))
-    )}</div></details>`
+    )}<form data-quiet class="react-other" method="post" action="${room.url}/m/${m.id}/react">${csrfField(viewer)}<input type="text" name="emoji" maxlength="${MAX_REACTION}" placeholder="Any emoji, or :name:" aria-label="React with any emoji, or its :name:" autocomplete="off" data-1p-ignore required><button class="btn" type="submit">React</button></form></div></details>`
   );
   if (room.kind !== 'thread') {
     parts.push(html`<a href="${room.url}/t/${m.id}" title="Reply in thread">${icon('comment')}</a>`);
@@ -332,15 +336,15 @@ function msgTools(room: Room, m: Message, viewer: Viewer): Html {
  * author and time ride on the item, so the page script can tell, as the
  * list changes, which messages continue the one before (see messageItems).
  */
-export function messageHtml(root: string, room: Room, m: Message, viewer: Viewer, cont = false): Html {
+export function messageHtml(root: string, room: Room, m: Message, viewer: Viewer, cont = false, idPrefix = 'msg-'): Html {
   if (m.deleted) {
-    return html`<li class="msg" id="msg-${m.id}" data-mid="${m.id}" data-created="${m.created}"><span class="avatar" style="width:32px"></span><div class="msg-main"><span class="msg-deleted">This message was deleted.</span>${
+    return html`<li class="msg msg-gone" id="${idPrefix}${m.id}" data-mid="${m.id}" data-created="${m.created}"><span class="avatar-gap" aria-hidden="true"></span><div class="msg-main"><span class="msg-deleted">This message was deleted.</span>${
       m.replyCount > 0 && room.kind !== 'thread'
         ? html`<div class="msg-below"><a class="thread-link" href="${room.url}/t/${m.id}">${m.replyCount} ${m.replyCount === 1 ? 'reply' : 'replies'}</a></div>`
         : ''
     }</div></li>`;
   }
-  if (m.call) return callEntryHtml(room, m, viewer, cont);
+  if (m.call) return callEntryHtml(room, m, viewer, cont, idPrefix);
   const reactions = Object.entries(m.reactions).map(([emoji, users]) =>
     reactForm(room.url, m.id, emoji, viewer, users.includes(viewer.auth.username), users.length)
   );
@@ -353,7 +357,7 @@ export function messageHtml(root: string, room: Room, m: Message, viewer: Viewer
   // found in a scroll the way a flagged line can be found on a page.
   const mine = mentionsUser(m.body, viewer.auth.username) ? 'mentions-me' : '';
   const pin = room.kind === 'thread' ? null : pinOf(room.dir, m.id);
-  return html`<li class="msg ${mine} ${pin ? 'pinned' : ''} ${cont ? 'msg-cont' : ''}" id="msg-${m.id}" data-mid="${m.id}" data-author="${m.author}" data-created="${m.created}">${avatar(m.author, 32)}<div class="msg-main">
+  return html`<li class="msg ${mine} ${pin ? 'pinned' : ''} ${cont ? 'msg-cont' : ''}" id="${idPrefix}${m.id}" data-mid="${m.id}" data-author="${m.author}" data-created="${m.created}">${avatar(m.author, 32)}<div class="msg-main">
 ${pin ? html`<div class="pinned-by">${PIN_ICON} Pinned by ${pin.by}</div>` : ''}<div class="msg-head"><a class="author" href="/${encodeURIComponent(m.author)}">${m.author}</a>${timeTag(m.created)}${m.edited ? html`<span class="msg-edited">(edited)</span>` : ''}</div>
 <div class="msg-body markdown-body">${bodyHtml(root, m.body, viewer)}</div>
 ${fileRows(room.url, m.id, m.files)}${below}
@@ -377,7 +381,7 @@ export function callLength(ms: number): string {
  * long. An entry whose call is not going on, and never recorded its end, is
  * one the workspace was restarted under while nobody was left to resume it.
  */
-function callEntryHtml(room: Room, m: Message, viewer: Viewer, cont: boolean): Html {
+function callEntryHtml(room: Room, m: Message, viewer: Viewer, cont: boolean, idPrefix: string): Html {
   const rec = m.call!;
   const live = liveCall(room.url);
   const isLive = live !== null && live.id === rec.id;
@@ -402,7 +406,7 @@ function callEntryHtml(room: Room, m: Message, viewer: Viewer, cont: boolean): H
       : '';
   const below = reactions.length || thread ? html`<div class="msg-below">${joinHtml(reactions)}${thread}</div>` : '';
   const pin = room.kind === 'thread' ? null : pinOf(room.dir, m.id);
-  return html`<li class="msg msg-call ${pin ? 'pinned' : ''} ${cont ? 'msg-cont' : ''}" id="msg-${m.id}" data-mid="${m.id}" data-author="${m.author}" data-created="${m.created}">${avatar(m.author, 32)}<div class="msg-main">
+  return html`<li class="msg msg-call ${pin ? 'pinned' : ''} ${cont ? 'msg-cont' : ''}" id="${idPrefix}${m.id}" data-mid="${m.id}" data-author="${m.author}" data-created="${m.created}">${avatar(m.author, 32)}<div class="msg-main">
 ${pin ? html`<div class="pinned-by">${PIN_ICON} Pinned by ${pin.by}</div>` : ''}<div class="msg-head"><a class="author" href="/${encodeURIComponent(m.author)}">${m.author}</a>${timeTag(m.created)}<span class="muted">started a call</span></div>
 ${card}${below}
 </div>${msgTools(room, m, viewer)}</li>`;
@@ -549,8 +553,11 @@ export function threadPage(root: string, room: Room, anchor: Message, replies: M
   const parent = room.parent!;
   const head = html`<header class="room-head"><a class="topbar-icon" href="${parent.url}" aria-label="Back to ${parent.title}">${BACK_ICON}</a><div class="room-title"><h1>Thread</h1><span class="room-topic">in <a href="${parent.url}">${parent.title}</a></span></div><div class="room-tools"></div></header>`;
   // The parent carries the day it was said, and the replies take theirs from
-  // it, so a reply the same day is not set under a rule of its own.
-  const anchorHtml = html`<ul class="thread-anchor" style="list-style:none;margin:0;padding:0">${dayRule(anchor.created)}${messageHtml(root, parent, anchor, viewer)}</ul>`;
+  // it, so a reply the same day is not set under a rule of its own. Its id is
+  // not msg-<id>: that is the replies' own, numbered from 1 in the thread, and
+  // the parent is often message 1 of its room too, so the first reply would
+  // otherwise be taken for it and drawn in its place.
+  const anchorHtml = html`<ul class="thread-anchor" style="list-style:none;margin:0;padding:0">${dayRule(anchor.created)}${messageHtml(root, parent, anchor, viewer, false, 'parent-')}</ul>`;
   const items = messageItems(root, room, replies, viewer, undefined, anchor.created.slice(0, 10));
   const last = replies.length ? replies[replies.length - 1].id : 0;
   const list = html`<div class="msgs">${anchorHtml}<ul id="msg-list" data-stream="${room.url}/events" data-last="${last}" data-at="${String(Date.now())}">${joinHtml(items)}</ul></div>${JUMP_NEWEST}`;
@@ -611,15 +618,22 @@ export function errorPage(status: number, message: string, opts: PageOpts): stri
   return opts.viewer ? doc(`${status}`, content, opts) : layout(`${status}`, content, opts);
 }
 
-export function newChannelPage(root: string, viewer: Viewer, error?: string): string {
+/** What the new-channel form held when it was sent back, so a refusal does not empty it. */
+export interface NewChannelForm {
+  name: string;
+  topic: string;
+  private: boolean;
+}
+
+export function newChannelPage(root: string, viewer: Viewer, error?: string, form?: NewChannelForm): string {
   const content = html`<div class="form-box">
 <h1>New channel</h1>
 ${error ? html`<div class="form-error">${error}</div>` : ''}
 <form method="post" action="/new">${csrfField(viewer)}
-<div class="field"><label for="name">Name</label><input type="text" id="name" name="name" required pattern="[a-z0-9][a-z0-9-]*" autofocus>
-<p class="muted">Lowercase letters, digits, and hyphens: what fits after a #.</p></div>
-<div class="field"><label for="topic">Topic</label><input type="text" id="topic" name="topic"></div>
-<div class="field"><label class="checkbox"><input type="checkbox" name="private" value="1"> Private: visible only to people added to it, and that cannot be undone later.</label></div>
+<div class="field"><label for="name">Name</label><input type="text" id="name" name="name" value="${form?.name ?? ''}" required maxlength="80" pattern="[a-z0-9]+(-[a-z0-9]+)*" autocomplete="off" data-1p-ignore data-channel-name autofocus>
+<p class="muted">Lowercase letters, digits, and single hyphens: what fits after a #. Spaces become hyphens as you type.</p></div>
+<div class="field"><label for="topic">Topic</label><input type="text" id="topic" name="topic" value="${form?.topic ?? ''}" autocomplete="off" data-1p-ignore></div>
+<div class="field"><label class="checkbox"><input type="checkbox" name="private" value="1" ${form?.private ? raw('checked') : ''}> Private: visible only to people added to it, and that cannot be undone later.</label></div>
 <button class="btn btn-primary" type="submit">Create channel</button>
 </form></div>`;
   return doc('New channel', content, { viewer, root });
@@ -645,7 +659,7 @@ export function channelSettingsPage(
     ? html`<h2>Members</h2>
 <ul style="list-style:none;padding:0;max-width:420px">${memberRows}</ul>
 <form method="post" action="${room.url}/members/add">${csrfField(viewer)}
-<div class="field"><label for="user">Add someone</label><input type="text" id="user" name="user" placeholder="username"></div>
+<div class="field"><label for="user">Add someone</label><input type="text" id="user" name="user" placeholder="username" autocomplete="off" data-1p-ignore></div>
 <button class="btn" type="submit">Add</button>
 </form>`
     : html`<p class="muted">#${c.name} is public: every member of the workspace can read and post in it.</p>`;
@@ -657,7 +671,7 @@ export function channelSettingsPage(
   const content = html`<h1>${room.title} settings</h1>
 ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.flash ? html`<div class="flash">${opts.flash}</div>` : ''}
 <form method="post" action="${room.url}/settings">${csrfField(viewer)}
-<div class="field" style="max-width:520px"><label for="topic">Topic</label><input type="text" id="topic" name="topic" value="${c.topic}"></div>
+<div class="field" style="max-width:520px"><label for="topic">Topic</label><input type="text" id="topic" name="topic" value="${c.topic}" autocomplete="off" data-1p-ignore></div>
 <button class="btn btn-primary" type="submit">Save</button>
 </form>
 ${membersSection}
@@ -669,13 +683,16 @@ export function newDmPage(root: string, viewer: Viewer, error?: string): string 
   const state = loadVault(root);
   const users = state.status === 'ok' ? Object.keys(state.vault.users).filter((u) => u !== viewer.auth.username).sort() : [];
   const boxes = users.map(
-    (u) => html`<label class="checkbox person-pick"><input type="checkbox" name="user" value="${u}">${avatar(u, 20)} ${u}</label>`
+    (u) => html`<label class="checkbox person-pick" data-person="${[u, state.status === 'ok' ? state.vault.users[u]?.profile?.name ?? '' : ''].join(' ').toLowerCase()}"><input type="checkbox" name="user" value="${u}">${avatar(u, 20)} ${u}${
+      state.status === 'ok' && state.vault.users[u]?.profile?.name ? html` <span class="muted">${state.vault.users[u].profile!.name}</span>` : ''
+    }</label>`
   );
   const content = html`<div class="form-box">
 <h1>New conversation</h1>
 ${error ? html`<div class="form-error">${error}</div>` : ''}
 <form method="post" action="/d/new">${csrfField(viewer)}
-<div class="field"><label>With</label>${joinHtml(boxes)}</div>
+<div class="field"><label for="people-filter">With</label><input type="text" id="people-filter" placeholder="Find someone" autocomplete="off" data-1p-ignore data-people-filter hidden autofocus>
+<div data-people>${joinHtml(boxes)}</div><p class="muted" data-people-none hidden>Nobody by that name.</p></div>
 <button class="btn btn-primary" type="submit">Start</button>
 </form></div>`;
   return doc('New conversation', content, { viewer, root });
@@ -703,18 +720,21 @@ export function searchPage(
   root: string,
   viewer: Viewer,
   query: string,
-  hits: { url: string; where: string; message: Message }[],
+  hits: { url: string; room: string; where: string; kind: 'channel' | 'dm'; message: Message }[],
   partial = false
 ): string {
+  // Each result is a link to the message, where it is marked; the room's
+  // name beside it is a link to the room. The whole result takes the click
+  // with script, and its time is the link without.
   const rows = hits.map(
-    (h) => html`<div class="search-result">
-<div class="where"><a href="${h.url}">${h.where}</a><span class="who">${avatar(h.message.author, 16)} ${h.message.author}</span>${timeTag(h.message.created)}</div>
+    (h) => html`<div class="search-result" data-href="${h.url}">
+<div class="where"><a href="${h.room}">${h.kind === 'dm' ? html`${icon('people')} Conversation with ${h.where}` : h.where}</a><span class="who">${avatar(h.message.author, 16)} ${h.message.author}</span><a class="result-time" href="${h.url}" title="Show this message">${timeTag(h.message.created, '')}</a></div>
 <div class="markdown-body">${bodyHtml(root, h.message.body, viewer)}</div>
 </div>`
   );
   // The words found are marked in each result by the page script.
   const content = html`<h1>Search</h1>
-<form method="get" action="/search" style="margin-bottom:24px;max-width:520px"><div class="field"><input type="text" name="q" value="${query}" placeholder="Search messages" autofocus aria-label="Search messages">
+<form method="get" action="/search" style="margin-bottom:24px;max-width:520px"><div class="field"><input type="text" name="q" value="${query}" placeholder="Search messages" autofocus aria-label="Search messages" autocomplete="off" data-1p-ignore>
 <p class="muted">Narrow it with <code>from:alice</code> or <code>in:#general</code>.</p></div></form>
 ${query === '' ? '' : html`<p class="muted">${searchSummary(hits.length, partial)}</p>`}
 <div data-highlight="${parseQuery(query).text}">${joinHtml(rows)}</div>`;
@@ -774,8 +794,8 @@ export function accountPage(root: string, viewer: Viewer, notify: AccountNotific
   const content = html`<h1>Account</h1>
 ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.flash ? html`<div class="flash">${opts.flash}</div>` : ''}
 <form method="post" action="/account" style="max-width:520px">${csrfField(viewer)}
-<div class="field"><label for="name">Display name</label><input type="text" id="name" name="name" value="${profile?.name ?? ''}"></div>
-<div class="field"><label for="bio">Bio</label><input type="text" id="bio" name="bio" value="${profile?.bio ?? ''}"></div>
+<div class="field"><label for="name">Display name</label><input type="text" id="name" name="name" value="${profile?.name ?? ''}" autocomplete="off" data-1p-ignore></div>
+<div class="field"><label for="bio">Bio</label><input type="text" id="bio" name="bio" value="${profile?.bio ?? ''}" autocomplete="off" data-1p-ignore></div>
 <button class="btn btn-primary" type="submit">Save</button>
 </form>
 ${notificationsSection(root, viewer, notify)}
@@ -870,14 +890,14 @@ ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.fla
 <h2>People</h2>
 <table class="listing people"><tbody>${joinHtml(rows)}</tbody></table>
 <form method="post" action="/admin/users/add" style="margin-top:12px;max-width:520px">${csrfField(viewer)}
-<div class="field"><label for="username">Add someone</label><input type="text" id="username" name="username" placeholder="username" required>
+<div class="field"><label for="username">Add someone</label><input type="text" id="username" name="username" placeholder="username" required autocomplete="off" data-1p-ignore>
 <p class="muted">Creates the account and mints its first token, shown once for you to hand over.</p></div>
 <label class="checkbox"><input type="checkbox" name="admin" value="1"> Site admin</label>
 <div style="margin-top:10px"><button class="btn btn-primary" type="submit">Add user</button></div>
 </form>
 <h2>Workspace</h2>
 <form method="post" action="/admin/settings" style="max-width:520px">${csrfField(viewer)}
-<div class="field"><label for="wsname">Name</label><input type="text" id="wsname" name="name" value="${config.name}"></div>
+<div class="field"><label for="wsname">Name</label><input type="text" id="wsname" name="name" value="${config.name}" autocomplete="off" data-1p-ignore></div>
 <div class="field"><label for="theme">Theme</label><select id="theme" name="theme">${joinHtml(
     THEMES.map((t) => html`<option value="${t.name}" ${t.name === config.theme ? raw('selected') : ''}>${t.label}</option>`)
   )}</select>
@@ -1057,7 +1077,7 @@ export function editMessagePage(root: string, room: Room, m: Message, viewer: Vi
   const content = html`<h1>Edit message</h1>
 ${error ? html`<div class="form-error">${error}</div>` : ''}
 <form method="post" action="${room.url}/m/${m.id}/edit" style="max-width:720px">${csrfField(viewer)}
-<div class="field"><textarea name="body" rows="8" autofocus>${m.body}</textarea></div>
+<div class="field"><textarea name="body" rows="8" autofocus data-edit-body>${m.body}</textarea></div>
 <button class="btn btn-primary" type="submit">Save</button>
 <a class="btn" href="${room.url}">Cancel</a>
 </form>`;
