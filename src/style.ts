@@ -375,6 +375,127 @@ table.people td.person .avatar { vertical-align: middle; margin-right: 4px; }
 table.people td.tokens, table.people td.seen { white-space: nowrap; }
 table.people td.actions { text-align: right; white-space: nowrap; }
 
+/* --- calls ---
+
+   The call buttons exist only for script (html.can-call says the browser can
+   make a call), so without it they are not drawn at all. The header's is a
+   camera, in the accent with a count while a call is on, and filled while
+   this page is in it; the sidebar marks a room with a call the same way. */
+.call-button, .call-join { display: none; }
+.can-call .room-tools .call-button { display: inline-flex; width: auto; gap: 4px; padding: 0 8px; font-size: var(--t-sm); }
+.can-call .call-join { display: inline-flex; }
+.room-tools .call-button.live { color: var(--accent); font-weight: 700; }
+.room-tools .call-button.joined { background: var(--chip-bg); color: var(--accent); }
+.room-call { display: flex; flex: none; color: var(--accent); }
+.room-call[hidden] { display: none; }
+.room-call .glyph { color: inherit; }
+html.loading-page { cursor: progress; }
+
+/* A call's entry in the timeline: a bordered card under the author's line,
+   in the accent while the call goes on, with who is in it. */
+.call-entry {
+  display: flex; align-items: center; gap: var(--s3); margin-top: 4px; padding: var(--s2) var(--s3);
+  max-width: 460px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+}
+.call-entry.live { border-color: var(--accent); }
+.call-entry-icon { display: flex; color: var(--fg-muted); }
+.call-entry.live .call-entry-icon { color: var(--accent); }
+.call-entry-text { flex: 1; min-width: 0; }
+.call-entry-people { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px; }
+.call-entry-people .avatar { display: block; }
+.msg-call .msg-head .muted { font-size: var(--t-sm); }
+
+/* The dock: the call on screen. It is dark whatever the theme, as video is
+   watched against, and takes one of three shapes. As a strip under the
+   room's header its tiles run in a row with the controls beneath; floating,
+   it is small, in the corner, with room for one tile; full page, it covers
+   the frame, its tiles in a grid, and a tile pressed fills it. */
+.call-dock {
+  --call-bg: #15171b; --call-fg: #eceef2; --call-muted: #a3a8b3; --call-ctl: rgba(255, 255, 255, 0.12);
+  display: grid; gap: 6px; background: var(--call-bg); color: var(--call-fg); font-size: var(--t-sm);
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "notice notice" "tiles tiles" "settings settings" "bar controls";
+}
+.call-bar { grid-area: bar; display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.call-where { color: var(--call-fg); font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.call-where:hover { color: var(--call-fg); }
+.call-status { color: var(--call-muted); white-space: nowrap; }
+.call-size { margin-left: auto; }
+.call-notice { grid-area: notice; display: flex; align-items: flex-start; gap: var(--s2); padding: 6px 10px; border-radius: var(--radius); background: #4a3712; color: #fbe7b5; }
+.call-notice[hidden] { display: none; }
+.call-notice span { flex: 1; }
+.call-tiles { grid-area: tiles; min-width: 0; min-height: 0; }
+.call-controls { grid-area: controls; display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.call-ctl {
+  display: inline-flex; align-items: center; justify-content: center; flex: none; width: 36px; height: 36px; padding: 0;
+  border: none; border-radius: 50%; background: var(--call-ctl); color: var(--call-fg); cursor: pointer;
+}
+.call-ctl:hover { background: rgba(255, 255, 255, 0.22); }
+.call-ctl:disabled { opacity: 0.45; cursor: default; }
+.call-ctl.off { background: #b8322a; }
+.call-ctl.active { background: var(--accent); color: var(--on-accent, #fff); }
+.call-leave {
+  display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 14px;
+  border: none; border-radius: 18px; background: #c62f26; color: #fff; font: inherit; font-weight: 600; cursor: pointer;
+}
+.call-leave:hover { background: #a82820; }
+.call-settings { grid-area: settings; display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4); padding: var(--s2) var(--s3); border-radius: var(--radius); background: rgba(255, 255, 255, 0.06); }
+.call-settings[hidden] { display: none; }
+.call-settings label { display: flex; flex-direction: column; gap: 2px; color: var(--call-muted); font-size: var(--t-xs); }
+.call-settings select { max-width: 240px; font-size: var(--t-sm); }
+.call-settings p { flex-basis: 100%; margin: 0; color: var(--call-muted); font-size: var(--t-xs); }
+
+.call-tile { position: relative; overflow: hidden; border-radius: 8px; background: #000; aspect-ratio: 16 / 9; }
+.call-tile video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.call-tile.mirror video { transform: scaleX(-1); }
+.call-tile.screen video { object-fit: contain; }
+.call-face { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: #262a31; }
+.call-tile.video-off .call-face { display: flex; }
+.call-face .avatar { width: min(64px, 42%) !important; height: auto !important; aspect-ratio: 1 / 1; border-radius: 50%; overflow: hidden; }
+.call-face svg { display: block; width: 100%; height: 100%; }
+.call-label {
+  position: absolute; left: 6px; bottom: 6px; max-width: calc(100% - 12px); display: flex; align-items: center; gap: 4px;
+  padding: 1px 6px; border-radius: 4px; background: rgba(0, 0, 0, 0.6); color: #fff; font-size: 12px; line-height: 18px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.call-muted { display: flex; color: #ff8a80; }
+.call-muted svg { width: 12px; height: 12px; }
+.call-wait { position: absolute; top: 6px; left: 6px; display: none; color: var(--call-muted); font-size: 12px; }
+.call-tile.connecting .call-wait { display: block; }
+.call-tile.speaking::after { content: ""; position: absolute; inset: 0; border: 3px solid #43d17a; border-radius: inherit; pointer-events: none; }
+
+.call-dock.strip { flex: none; padding: var(--s2) var(--s4); border-bottom: 1px solid var(--border); }
+.call-dock.strip .call-where { display: none; }
+.call-dock.strip .call-tiles { display: flex; gap: 8px; height: 132px; overflow-x: auto; }
+.call-dock.strip .call-tile { flex: none; height: 100%; }
+
+.call-dock.mini {
+  position: fixed; right: 16px; bottom: 16px; z-index: 60; width: 320px; padding: 8px; border-radius: 12px;
+  grid-template-columns: minmax(0, 1fr); grid-template-areas: "bar" "notice" "tiles" "settings" "controls";
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+.call-dock.mini .call-bar { cursor: move; touch-action: none; }
+.call-dock.mini .call-tile:not(.featured) { display: none; }
+.call-dock.mini .call-controls { justify-content: center; }
+.call-dock.mini .call-leave span { display: none; }
+.call-dock.mini .call-leave { width: 36px; padding: 0; justify-content: center; }
+
+.call-dock.full {
+  position: fixed; inset: 0; z-index: 60; padding: var(--s3);
+  grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  grid-template-areas: "bar" "notice" "tiles" "settings" "controls";
+}
+.call-dock.full .call-controls { justify-content: center; }
+.call-dock.full .call-tiles {
+  display: grid; gap: 8px; overflow: auto;
+  grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr)); grid-auto-rows: minmax(160px, 1fr);
+}
+.call-dock.full .call-tile { aspect-ratio: auto; cursor: pointer; }
+.call-dock.full.spot .call-tiles { display: flex; flex-wrap: wrap; align-content: flex-start; }
+.call-dock.full.spot .call-tile { flex: none; height: 96px; aspect-ratio: 16 / 9; }
+.call-dock.full.spot .call-tile.spotlit { order: -1; flex: 1 1 100%; height: calc(100% - 104px); aspect-ratio: auto; }
+.call-dock.full.spot .call-tile.spotlit video { object-fit: contain; }
+
 /* --- touch ---
 
    A field set under 16px is one iOS zooms the page into on focus, and does
@@ -435,6 +556,16 @@ table.people td.actions { text-align: right; white-space: nowrap; }
   .composer-row [data-file-total]:empty { display: none; }
   .composer-row .hint { display: none; }
   .mention-list { left: 0; right: 0; width: auto; }
+
+  /* A call keeps to a thumb's reach: a shorter strip, and a floating dock
+     narrower and clear of the composer. */
+  .call-dock.strip { padding: var(--s2); }
+  .call-dock.strip .call-tiles { height: 96px; }
+  .call-dock.mini { width: 190px; right: 8px; bottom: 84px; }
+  .call-dock.mini .call-ctl, .call-dock.mini .call-leave { width: 32px; height: 32px; }
+  .call-dock.mini .call-controls { gap: 4px; }
+  .call-dock.full { padding: var(--s2); }
+  .call-entry { max-width: 100%; }
 
   .doc { padding: var(--s4) var(--s4) var(--s6); }
   /* The people list becomes a name and its count on one line, and what can

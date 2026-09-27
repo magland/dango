@@ -28,9 +28,11 @@ import {
   removeMember,
   setTopic,
 } from './channels';
-import { loadConfig, updateConfig } from './config';
+import { MAX_IN_CALL, joinCall, leaveCall, participantUser, pruneCalls, relaySignals } from './calls';
+import { CallsConfig, TurnMode, loadConfig, updateConfig } from './config';
 import { openDm } from './dms';
-import { RoomEvent, publish, serveEvents, serveUserEvents } from './events';
+import { RoomEvent, clientOwner, isClientId, publish, serveEvents, serveUserEvents } from './events';
+import { iceFor, isIceUrl, turnProblem } from './ice';
 import {
   Attachment,
   Message,
@@ -45,7 +47,7 @@ import {
   toggleReaction,
 } from './messages';
 import { RateLimited, WriteLimits, refusalStatus } from './limits';
-import { EDIT_WINDOW_PASSED, canDeleteMessage, canEditMessage, isSiteAdmin } from './perms';
+import { CALL_NOT_EDITABLE, EDIT_WINDOW_PASSED, canDeleteMessage, canEditMessage, isSiteAdmin } from './perms';
 import { Pin, pinMessage, pinOf, readPins, unpinMessage } from './pins';
 import {
   NotifyLevel,
@@ -517,6 +519,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       return;
     }
     removeUser(root, username);
+    pruneCalls(root);
     res.redirect(303, '/admin');
   });
 
@@ -530,6 +533,50 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       ...(typeof body.theme === 'string' ? { theme: body.theme } : {}),
     });
     res.redirect(303, '/admin');
+  });
+
+  // A call's ICE servers and TURN relay. The secrets are never written into
+  // the page: their fields are blank, and a blank one keeps what is saved.
+  app.post('/admin/calls', urlenc, (req, res) => {
+    const viewer = requireAdminForm(req, res);
+    if (!viewer) return;
+    const body = req.body as Record<string, unknown>;
+    const lines = (v: unknown) =>
+      String(v ?? '')
+        .split(/[\s,]+/)
+        .map((x) => x.trim())
+        .filter((x) => x !== '');
+    const field = (v: unknown) => String(v ?? '').trim();
+    const current = loadConfig(root).calls;
+    const mode: TurnMode = body.turn_mode === 'static' || body.turn_mode === 'coturn' || body.turn_mode === 'cloudflare' ? body.turn_mode : 'none';
+    const stun = lines(body.stun);
+    const urls = lines(body.turn_urls);
+    const next: CallsConfig = {
+      stun,
+      turn: {
+        mode,
+        urls,
+        username: field(body.turn_username),
+        credential: field(body.turn_credential) || current.turn.credential,
+        secret: field(body.turn_secret) || current.turn.secret,
+        keyId: field(body.cf_key_id),
+        apiToken: field(body.cf_api_token) || current.turn.apiToken,
+      },
+    };
+    const bad = [...stun.filter((u) => !isIceUrl(u, 'stun')), ...urls.filter((u) => !isIceUrl(u, 'turn'))];
+    const problem = bad.length
+      ? `Not saved: ${bad.join(', ')} ${bad.length === 1 ? 'is not a usable URL' : 'are not usable URLs'}. STUN servers are written stun:host:port, and TURN servers turn:host:port or turns:host:port, optionally ending in ?transport=udp or ?transport=tcp.`
+      : turnProblem(next);
+    const state = loadVault(root);
+    if (problem || state.status !== 'ok') {
+      res
+        .status(400)
+        .type('html')
+        .send(state.status === 'ok' ? views.adminPage(root, viewer, state.vault, { error: bad.length ? problem! : `Not saved: ${problem}.`, calls: next }) : 'The workspace could not be read.');
+      return;
+    }
+    updateConfig(root, { calls: next });
+    res.redirect(303, '/admin#calls');
   });
 
   // ---- rooms ----
@@ -641,7 +688,8 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
   app.get('/events', (req, res) => {
     const viewer = requireViewer(req, res);
     if (!viewer) return;
-    serveUserEvents(res, viewer.auth.username);
+    const client = req.query.client;
+    serveUserEvents(res, viewer.auth.username, isClientId(client) ? client : undefined);
   });
 
   // Every member, as names, for the composer to complete an @ against
@@ -726,7 +774,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         return;
       }
       if (!canEditMessage(viewer.auth, m)) {
-        fail(res, viewer, 403, EDIT_WINDOW_PASSED);
+        fail(res, viewer, 403, m.call ? CALL_NOT_EDITABLE : EDIT_WINDOW_PASSED);
         return;
       }
       res.type('html').send(views.editMessagePage(root, room, m, viewer));
@@ -747,7 +795,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         // Checked on the save, not only when the form was opened: a form
         // opened inside the window can be submitted outside it.
         if (!canEditMessage(viewer.auth, m)) {
-          fail(res, viewer, 403, EDIT_WINDOW_PASSED);
+          fail(res, viewer, 403, m.call ? CALL_NOT_EDITABLE : EDIT_WINDOW_PASSED);
           return;
         }
         limits.action(viewer.auth.username);
@@ -896,6 +944,103 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     })
   );
 
+  // ---- calls ----
+  //
+  // Joining, leaving, and the signals a call's pages send each other through
+  // the workspace (see src/calls.ts). Each request names the page it comes
+  // from, which must be one of the viewer's own open pages; the page script
+  // sends JSON, with the CSRF token in the body as the push routes take it.
+
+  const callJson = express.json({ limit: '256kb' });
+  const pageOf = (viewer: Viewer, raw: unknown): string => {
+    if (!isClientId(raw) || clientOwner(raw) !== viewer.auth.username) {
+      throw new OpError('This page has lost its connection to the workspace. Wait a moment and try again, or reload the page.', 'conflict');
+    }
+    return raw;
+  };
+
+  // The ICE servers are made first, so that a page is never told of the
+  // others in the call before it has the means to reach them.
+  app.post(BASES.map((b) => `${b}/call/join`), callJson, (req, res) =>
+    withRoom(
+      req,
+      res,
+      (viewer, room) => {
+        const body = req.body as Record<string, unknown>;
+        const peer = pageOf(viewer, body.peer);
+        const resume = typeof body.resume === 'string' && /^[0-9a-f]{16}$/.test(body.resume) ? body.resume : undefined;
+        limits.action(viewer.auth.username);
+        iceFor(loadConfig(root).calls, viewer.auth.username)
+          .then((ice) => {
+            try {
+              const call = joinCall(root, room, viewer.auth.username, peer, resume);
+              res.json({ call, ice, max: MAX_IN_CALL });
+            } catch (e) {
+              sendOpError(res, viewer, e);
+            }
+          })
+          .catch((e) => {
+            console.error(e);
+            if (!res.headersSent) fail(res, viewer, 500, 'The call could not be joined.');
+          });
+      },
+      { form: true }
+    )
+  );
+
+  // Fresh credentials for a call that outlasts the ones it joined with.
+  app.post(BASES.map((b) => `${b}/call/ice`), callJson, (req, res) =>
+    withRoom(
+      req,
+      res,
+      (viewer, room) => {
+        const peer = String((req.body as Record<string, unknown>).peer ?? '');
+        if (participantUser(room.url, peer) !== viewer.auth.username) throw new OpError('This page is not in the call.', 'conflict');
+        limits.action(viewer.auth.username);
+        iceFor(loadConfig(root).calls, viewer.auth.username).then(
+          (ice) => res.json({ ice }),
+          (e) => {
+            console.error(e);
+            if (!res.headersSent) fail(res, viewer, 500, 'No credentials could be made.');
+          }
+        );
+      },
+      { form: true }
+    )
+  );
+
+  // Leaving comes from a button, or from a page as it closes, through
+  // sendBeacon, which posts a form; so this takes a form as well as JSON. A
+  // closing page's stream may already be gone, so what is checked is that
+  // the page in the call is the viewer's.
+  app.post(BASES.map((b) => `${b}/call/leave`), formBody, callJson, (req, res) =>
+    withRoom(
+      req,
+      res,
+      (viewer, room) => {
+        const peer = String((req.body as Record<string, unknown>).peer ?? '');
+        if (participantUser(room.url, peer) === viewer.auth.username) leaveCall(room.url, peer);
+        res.status(204).end();
+      },
+      { form: true }
+    )
+  );
+
+  app.post(BASES.map((b) => `${b}/call/signal`), callJson, (req, res) =>
+    withRoom(
+      req,
+      res,
+      (viewer, room) => {
+        const body = req.body as Record<string, unknown>;
+        const peer = pageOf(viewer, body.peer);
+        if (!isClientId(body.to) || !Array.isArray(body.signals)) throw new OpError('Send {peer, to, signals: [...]}.');
+        relaySignals(room.url, peer, body.to, body.signals);
+        res.status(204).end();
+      },
+      { form: true }
+    )
+  );
+
   // ---- channel settings ----
 
   app.get('/c/:channel/settings', (req, res) =>
@@ -942,6 +1087,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
           throw new OpError('You can remove yourself; removing others is for a site admin.');
         }
         removeMember(root, room.channel!.name, user);
+        pruneCalls(root);
         const stillIn = user !== viewer.auth.username;
         res.redirect(303, stillIn ? `${room.url}/settings` : '/');
       },
@@ -956,6 +1102,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       (viewer, room) => {
         if (!isSiteAdmin(viewer.auth)) throw new OpError('Only a site admin may delete a channel.');
         deleteChannel(root, room.channel!.name);
+        pruneCalls(root);
         res.redirect(303, '/');
       },
       { form: true }

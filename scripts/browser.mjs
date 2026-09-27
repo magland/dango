@@ -6,7 +6,9 @@
 // workspace, launches headless Chrome, and drives real pages over the
 // DevTools protocol (Node's built-in WebSocket; no dependencies): live
 // unread badges, the tab title and favicon, reading across pages,
-// @-completion, the account menu, notifications, and invite links.
+// @-completion, the account menu, notifications, invite links, moving
+// between pages in place, and calls, between two pages with Chrome's fake
+// camera and microphone.
 //
 // Run from the repository root after a build: node scripts/browser.mjs
 // Needs Node 22 or newer, and Chrome or Chromium (CHROME=<path> to choose).
@@ -85,6 +87,9 @@ const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
 const workspace = path.join(tmp, 'workspace');
 fs.mkdirSync(workspace);
+// No STUN servers: the calls below connect on this machine's own addresses,
+// and a check should not wait on a server on the internet.
+fs.writeFileSync(path.join(workspace, 'config.json'), JSON.stringify({ calls: { stun: [] } }));
 const owner = 'dango_browser_owner_token_' + Math.random().toString(16).slice(2);
 const server = spawn(process.execPath, ['dist/dango/src/index.js', 'serve', workspace, '--port', String(port)], {
   env: { ...process.env, DANGO_OWNER_TOKEN: owner },
@@ -138,7 +143,13 @@ const chrome = spawn(
     // even when headless, so the pushes below would pop up on the screen of
     // whoever runs this. Its built-in notifications stay inside the browser,
     // and the checks read them through the service worker either way.
-    '--disable-features=NativeNotifications,SystemNotifications',
+    '--disable-features=NativeNotifications,SystemNotifications,WebRtcHideLocalIpsWithMdns',
+    // A camera and a microphone that exist without hardware, allowed without
+    // asking, for the calls; and host candidates as plain addresses rather
+    // than mDNS names, which a sandbox may not resolve.
+    '--use-fake-device-for-media-stream',
+    '--use-fake-ui-for-media-stream',
+    '--allow-loopback-in-peer-connection',
     '--window-size=1200,800',
     'about:blank',
   ],
@@ -593,6 +604,90 @@ ok('an invite link fills in the token and clears it from the address bar');
 await fresh.eval("document.querySelector('[data-invite] button[type=submit]').click(); true");
 await waitFor('carol to be signed in', async () => (await fresh.eval("document.querySelector('.whoami')?.textContent ?? ''")) === 'carol');
 ok('one press of the button signs the invited person in');
+
+// ---- moving between pages in place ----
+
+const nav = await openPage(aliceCookie);
+await nav.go('/c/general');
+await nav.eval('window.stillHere = true; true');
+await nav.eval("document.querySelector('.side-rooms a[href=\"/c/random\"]').click(); true");
+await waitFor('#random to be shown', async () => (await nav.eval("location.pathname + '|' + document.querySelector('.room-head h1').textContent")) === '/c/random|#random');
+if (!(await nav.eval('window.stillHere === true'))) fail('following a room link reloaded the page');
+if ((await nav.eval("document.querySelector('.side-rooms a.current').getAttribute('href')")) !== '/c/random') fail('the sidebar did not mark the new room');
+ok('following a link to a room shows it in place, without reloading the page');
+await api(bob, 'POST', '/channels/random/messages', { body: 'live after moving' });
+await waitFor('a message to arrive live in the room moved to', async () => (await nav.eval("document.getElementById('msg-list').textContent")).includes('live after moving'));
+ok('the room moved to streams its messages live');
+await nav.eval('history.back(); true');
+await waitFor('the back button to bring #general back', async () => (await nav.eval("location.pathname + '|' + document.querySelector('.room-head h1').textContent")) === '/c/general|#general');
+if (!(await nav.eval('window.stillHere === true'))) fail('the back button reloaded the page');
+ok('the back button brings the previous room back in place');
+await nav.eval("document.querySelector('.mute-form button').click(); true");
+await waitFor('the bell to show the room muted', async () => nav.eval("document.querySelector('.mute-form button').classList.contains('is-muted')"));
+if (!(await nav.eval('window.stillHere === true'))) fail('posting a form reloaded the page');
+ok('a form posts and shows its answer in place');
+await nav.eval("document.querySelector('.mute-form button').click(); true");
+await waitFor('the bell to show the room unmuted', async () => nav.eval("!document.querySelector('.mute-form button').classList.contains('is-muted')"));
+
+// ---- calls ----
+
+const inCallCount = (page) => page.eval("(() => { const s = document.querySelector('.call-dock .call-status'); return s ? s.textContent : ''; })()");
+const connectedTo = (page) => page.eval("(() => { const t = document.querySelector('.call-dock .call-tile:not([data-peer=\"self\"])'); if (!t || t.classList.contains('connecting')) return 0; return t.querySelector('video').videoWidth; })()");
+const c1 = await openPage(aliceCookie);
+await c1.go('/c/general');
+await c1.eval('window.stillHere = true; true');
+if (!(await c1.eval("getComputedStyle(document.querySelector('[data-call-start]')).display !== 'none'"))) fail('the call button is not shown where the browser can make calls');
+await c1.eval("document.querySelector('[data-call-start]').click(); true");
+await waitFor('alice to be in the call', async () => (await inCallCount(c1)) === '1 in the call', 10000);
+if (!(await c1.eval("!!document.querySelector('.app-main > .room-head + .call-dock.strip')"))) fail('the call is not a strip under the room’s header');
+ok('starting a call shows it as a strip under the room’s header');
+await waitFor('the timeline to say a call started', async () => c1.eval("!!document.querySelector('#msg-list .call-entry.live')"));
+const entry = (await api(alice, 'GET', '/channels/general/messages?limit=1')).messages[0];
+if (!entry.call || entry.call.people[0] !== 'alice') fail(`the call's entry does not record it: ${JSON.stringify(entry)}`);
+ok('the call has an entry in the timeline, live');
+
+// carol, elsewhere, sees the call beside the room's name
+await fresh.go('/c/random');
+await waitFor('carol’s sidebar to mark the call', async () => fresh.eval("!document.querySelector('.side-rooms [data-room=\"/c/general\"] [data-room-call]').hidden"));
+ok('the sidebar marks a room with a call going on');
+
+const b1 = await openPage(await sessionCookie(bob));
+await b1.go('/c/general');
+await b1.eval("document.querySelector('#msg-list .call-entry [data-call-join]').click(); true");
+await waitFor('both to count two in the call', async () => (await inCallCount(b1)) === '2 in the call' && (await inCallCount(c1)) === '2 in the call', 10000);
+await waitFor('alice and bob to connect, with video', async () => (await connectedTo(c1)) > 0 && (await connectedTo(b1)) > 0, 20000);
+ok('joining from the timeline connects the two pages, peer to peer, with video');
+await waitFor('the entry to count two', async () => (await c1.eval("document.querySelector('#msg-list .call-entry').textContent")).includes('2 in the call'));
+ok('the timeline entry says who is in the call, live');
+
+await c1.eval("document.querySelector('.call-dock [data-call-act=\"mic\"]').click(); true");
+await waitFor('bob to see alice’s microphone on', async () => b1.eval("!document.querySelector('.call-dock .call-tile:not([data-peer=\"self\"]) .call-muted')"));
+ok('turning the microphone on is shown to the others');
+
+await c1.eval("document.querySelector('.side-rooms a[href=\"/c/random\"]').click(); true");
+await waitFor('alice to be in #random with the call floating', async () => (await c1.eval("location.pathname + '|' + !!document.querySelector('body > .call-dock.mini')")) === '/c/random|true');
+if (!(await c1.eval('window.stillHere === true'))) fail('moving to another room reloaded the page and ended the call');
+await sleep(500);
+if (!((await connectedTo(c1)) > 0)) fail('the call dropped when alice moved to another room');
+ok('moving to another room keeps the call, floating in the corner');
+await c1.eval("document.querySelector('.call-dock [data-call-act=\"size\"]').click(); true");
+await waitFor('the call to fill the page', async () => c1.eval("!!document.querySelector('.call-dock.full')"));
+await c1.key('Escape');
+await waitFor('Escape to put the call back in the corner', async () => c1.eval("!!document.querySelector('.call-dock.mini')"));
+ok('the call expands to the full page, and collapses back');
+await c1.eval("document.querySelector('.call-dock .call-where').click(); true");
+await waitFor('the room’s link to lead back with the call as a strip', async () => (await c1.eval("location.pathname + '|' + !!document.querySelector('.room-head + .call-dock.strip')")) === '/c/general|true');
+ok('the call’s link leads back to its room, where it is a strip again');
+
+await b1.eval("document.querySelector('.call-dock [data-call-act=\"leave\"]').click(); true");
+await waitFor('alice to be alone in the call', async () => (await inCallCount(c1)) === '1 in the call');
+if (await b1.eval("!!document.querySelector('.call-dock')")) fail('leaving left the call on screen');
+await c1.eval("document.querySelector('.call-dock [data-call-act=\"leave\"]').click(); true");
+await waitFor('the entry to say the call ended', async () => (await b1.eval("document.querySelector('#msg-list .call-entry').textContent")).includes('lasted'));
+await waitFor('carol’s sidebar to clear the mark', async () => fresh.eval("document.querySelector('.side-rooms [data-room=\"/c/general\"] [data-room-call]').hidden"));
+const ended = (await api(alice, 'GET', '/channels/general/messages?limit=1')).messages[0];
+if (!ended.call?.ended || ended.call.people.join() !== 'alice,bob') fail(`the entry does not record the end: ${JSON.stringify(ended.call)}`);
+ok('when the last person leaves the call ends, and its entry says who was in it and for how long');
 
 console.log('');
 console.log(`All ${checks} browser checks passed.`);

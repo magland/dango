@@ -1,6 +1,6 @@
 import { loadVault } from '../../mochiforge/src/vault';
 import { listeningUsers, publish, publishToUser } from './events';
-import { Attachment, Message, addMessage, findByNonce, readMessage } from './messages';
+import { Attachment, CallRecord, Message, addMessage, findByNonce, readMessage } from './messages';
 import { queueNotifications } from './notify';
 import { Room } from './rooms';
 import { audienceOf, isNewsFor, markRead, unreadIn } from './reads';
@@ -15,7 +15,7 @@ import { audienceOf, isNewsFor, markRead, unreadIn } from './reads';
 export function postMessage(
   root: string,
   room: Room,
-  input: { author: string; body: string; files?: Attachment[]; nonce?: string },
+  input: { author: string; body: string; files?: Attachment[]; nonce?: string; call?: CallRecord },
   opts: {
     /** Charge the sender's rate limits; throws when they are spent. A retry found by its nonce is not charged. */
     charge?: () => void;

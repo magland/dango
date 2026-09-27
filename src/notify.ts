@@ -410,6 +410,10 @@ export function wantsPush(
 ): boolean {
   if (m.deleted || m.author === username || prefs.level === 'none') return false;
   if (prefs.muted.includes(readKey(baseRoom(room).url))) return false;
+  // A call starting is pushed in a direct conversation, where it is a call to
+  // the people in it; in a channel it is shown beside the channel's name, and
+  // not pushed to the whole workspace.
+  if (m.call && room.dm === undefined) return false;
   const addressed = room.dm !== undefined || mentionsUser(m.body, username) || (room.kind === 'thread' && inThread().has(username));
   if (addressed) return true;
   return prefs.level === 'all' && room.kind !== 'thread';

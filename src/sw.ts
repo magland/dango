@@ -70,6 +70,21 @@ self.addEventListener('push', function (e) {
 
 // Pressing a notification brings a workspace window forward and shows the
 // room; a new window only when none is open.
+// A tab is asked to show the room itself first, which it does without
+// leaving the page, so that a call going on in it is not ended by the tap. A
+// tab that does not answer within a second is navigated as before.
+function inPlace(client, url) {
+  return new Promise(function (resolve) {
+    var channel = new MessageChannel();
+    var timer = setTimeout(function () { resolve(false); }, 1000);
+    channel.port1.onmessage = function (e) {
+      clearTimeout(timer);
+      resolve(!!(e.data && e.data.done));
+    };
+    client.postMessage({ type: 'navigate', url: url }, [channel.port2]);
+  });
+}
+
 self.addEventListener('notificationclick', function (e) {
   e.notification.close();
   var url = new URL((e.notification.data && e.notification.data.url) || '/', self.location.origin).href;
@@ -79,7 +94,9 @@ self.addEventListener('notificationclick', function (e) {
     }
     if (list.length && list[0].navigate) {
       var c = list[0];
-      return c.focus().then(function () { return c.navigate(url); }).catch(function () { return self.clients.openWindow(url); });
+      return c.focus().then(function () { return inPlace(c, url); }).then(function (done) {
+        return done ? c : c.navigate(url);
+      }).catch(function () { return self.clients.openWindow(url); });
     }
     return self.clients.openWindow(url);
   }));

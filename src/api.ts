@@ -11,6 +11,7 @@ import {
   tokenId,
   userExists,
 } from '../../mochiforge/src/vault';
+import { pruneCalls } from './calls';
 import {
   ChannelInfo,
   addMember,
@@ -33,7 +34,7 @@ import {
   toggleReaction,
 } from './messages';
 import { RateLimited, WriteLimits, refusalStatus } from './limits';
-import { EDIT_WINDOW_PASSED, canDeleteMessage, canEditMessage, canSeeChannel, isSiteAdmin } from './perms';
+import { CALL_NOT_EDITABLE, EDIT_WINDOW_PASSED, canDeleteMessage, canEditMessage, canSeeChannel, isSiteAdmin } from './perms';
 import { pinMessage, pinOf, readPins, unpinMessage } from './pins';
 import { noteRead, postMessage } from './post';
 import { unreadRooms } from './reads';
@@ -67,6 +68,7 @@ function messageJson(m: Message): Record<string, unknown> {
     reactions: m.reactions,
     files: m.files,
     replyCount: m.replyCount,
+    ...(m.call ? { call: m.call } : {}),
   };
 }
 
@@ -168,6 +170,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         return;
       }
       deleteChannel(root, room.channel!.name);
+      pruneCalls(root);
       res.json({ deleted: true });
     })
   );
@@ -194,7 +197,9 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         apiError(res, 403, 'you can remove yourself; removing others is for a site admin');
         return;
       }
-      res.json(channelJson(removeMember(root, room.channel!.name, user)));
+      const channel = removeMember(root, room.channel!.name, user);
+      pruneCalls(root);
+      res.json(channelJson(channel));
     })
   );
 
@@ -297,7 +302,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         return;
       }
       if (!canEditMessage(auth, m)) {
-        apiError(res, 403, EDIT_WINDOW_PASSED);
+        apiError(res, 403, m.call ? CALL_NOT_EDITABLE : EDIT_WINDOW_PASSED);
         return;
       }
       const text = body(req).body;
@@ -504,7 +509,9 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         apiError(res, 400, 'removing yourself is a job for another admin');
         return;
       }
-      res.json({ removed: removeUser(root, req.params.name) });
+      const removed = removeUser(root, req.params.name);
+      pruneCalls(root);
+      res.json({ removed });
     })
   );
 }

@@ -12,6 +12,7 @@ import { workspaceLayout } from './backup';
 import { loadConfig } from './config';
 import { createWriteLimits } from './limits';
 import { ICON_SIZES, appIconPng, badgePng } from './appicon';
+import { callScript } from './callscript';
 import { MAX_ATTACHMENTS_BYTES } from './messages';
 import { faviconSvg } from './logo';
 import { pageScript } from './pagescript';
@@ -129,6 +130,15 @@ export function createApp(root: string) {
   });
   app.get('/assets/page.js', (req, res) => {
     const script = pageScript();
+    const fresh = String(req.query.v ?? '') === script.tag;
+    res
+      .type('text/javascript')
+      .set('Cache-Control', fresh ? 'public, max-age=31536000, immutable' : 'no-cache')
+      .send(script.body);
+  });
+  // The call script, loaded by a page the first time it joins a call.
+  app.get('/assets/call.js', (req, res) => {
+    const script = callScript();
     const fresh = String(req.query.v ?? '') === script.tag;
     res
       .type('text/javascript')

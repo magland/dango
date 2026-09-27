@@ -49,6 +49,18 @@ export interface Attachment {
   size: number;
 }
 
+/**
+ * A call, as the timeline keeps it: the message that says a call started is
+ * the call's entry, and it is rewritten as people join and when it ends, so
+ * the history says who was in it and for how long.
+ */
+export interface CallRecord {
+  id: string;
+  /** Everyone who was in it at some point, in the order they joined. */
+  people: string[];
+  ended?: string;
+}
+
 export interface Message {
   id: number;
   author: string;
@@ -61,6 +73,8 @@ export interface Message {
   files: Attachment[];
   /** Replies in this message's thread; 0 when it has none. */
   replyCount: number;
+  /** Set on the message a call started with. */
+  call?: CallRecord;
 }
 
 export function messagesDir(room: string): string {
@@ -106,6 +120,14 @@ function parseReactions(v: unknown): Record<string, string[]> {
   return out;
 }
 
+function parseCall(v: unknown): CallRecord | undefined {
+  if (typeof v !== 'object' || v === null) return undefined;
+  const rec = v as Record<string, unknown>;
+  if (typeof rec.id !== 'string') return undefined;
+  const people = Array.isArray(rec.people) ? rec.people.filter((p): p is string => typeof p === 'string') : [];
+  return { id: rec.id, people, ...(typeof rec.ended === 'string' ? { ended: rec.ended } : {}) };
+}
+
 function parseFiles(v: unknown): Attachment[] {
   if (!Array.isArray(v)) return [];
   const out: Attachment[] = [];
@@ -137,6 +159,7 @@ export function readMessage(room: string, id: number): Message | null {
     reactions: parseReactions(doc.meta.reactions),
     files: parseFiles(doc.meta.files),
     replyCount: replyCount(room, id),
+    ...(doc.meta.deleted !== true && parseCall(doc.meta.call) ? { call: parseCall(doc.meta.call) } : {}),
   };
 }
 
@@ -191,7 +214,7 @@ export function findByNonce(room: string, author: string, nonce: string): Messag
 
 export function addMessage(
   room: string,
-  input: { author: string; body: string; files?: Attachment[]; nonce?: string }
+  input: { author: string; body: string; files?: Attachment[]; nonce?: string; call?: CallRecord }
 ): Message {
   const body = checkBody(input.body);
   if (body.trim() === '' && !(input.files ?? []).length) {
@@ -216,6 +239,7 @@ export function addMessage(
     const meta: Record<string, unknown> = { author: input.author, created: now };
     if (input.files?.length) meta.files = input.files;
     if (input.nonce) meta.nonce = input.nonce;
+    if (input.call) meta.call = input.call;
     writeDoc(file, meta, body);
     return {
       id,
@@ -225,6 +249,7 @@ export function addMessage(
       reactions: {},
       files: input.files ?? [],
       replyCount: 0,
+      ...(input.call ? { call: input.call } : {}),
     };
   }
   throw new OpError('Could not allocate a message number; try again.', 'conflict');
@@ -270,6 +295,26 @@ export function deleteMessage(room: string, id: number): Message {
   }));
   fs.rmSync(filesDir(room, id), { recursive: true, force: true });
   return m;
+}
+
+/**
+ * Rewrite the call a message records. Returns null when the message is gone
+ * or deleted, or was not a call's: a deleted entry stays deleted, and the
+ * call goes on without one.
+ */
+export function updateCallRecord(room: string, id: number, fn: (call: CallRecord) => CallRecord): Message | null {
+  const current = readMessage(room, id);
+  if (!current || current.deleted || !current.call) return null;
+  try {
+    return editMessageFile(room, id, (meta, body) => {
+      const call = parseCall(meta.call);
+      if (meta.deleted === true || !call) throw new OpError('This message was deleted.', 'nochange');
+      return { meta: { ...meta, call: fn(call) }, body };
+    });
+  } catch (e) {
+    if (e instanceof OpError) return null;
+    throw e;
+  }
 }
 
 /** Toggle one user's reaction. Adding an existing one removes it, as in Slack. */

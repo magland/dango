@@ -8,8 +8,10 @@ import { formatDay, formatSize, timeTag } from '../../mochiforge/src/render';
 import { Viewer } from '../../mochiforge/src/session';
 import { THEMES, activeTheme, darkFor } from '../../mochiforge/src/themes';
 import { UserProfile, Vault, loadVault, userExists } from '../../mochiforge/src/vault';
+import { liveCall, liveCallsByRoom } from './calls';
+import { callScript } from './callscript';
 import { ChannelInfo, listChannels } from './channels';
-import { loadConfig } from './config';
+import { CallsConfig, DEFAULT_STUN, loadConfig } from './config';
 import { DmInfo, dmTitle } from './dms';
 import { MARK } from './logo';
 import { Device, NotifyPrefs, isMuted, readPrefs } from './notify';
@@ -108,12 +110,21 @@ function unreadSummary(rooms: RoomUnread[]): { total: number; urgent: boolean } 
   return { total, urgent };
 }
 
-function roomLink(u: RoomUnread, glyph: Html | string, active?: string, muted = false): Html {
+/**
+ * The camera beside a room with a call going on, saying who is in it. It is
+ * always there, hidden when there is no call, so the page script can show it
+ * as calls start and end.
+ */
+function callMarker(people: string[] | undefined): Html {
+  return html`<span class="room-call" data-room-call title="${people?.length ? `In a call: ${people.join(', ')}` : ''}" ${people?.length ? '' : raw('hidden')}>${CALL_ICON}</span>`;
+}
+
+function roomLink(u: RoomUnread, glyph: Html | string, active?: string, muted = false, call?: string[]): Html {
   const cls = [u.url === active ? 'current' : '', u.count ? 'unread' : '', muted ? 'muted-room' : ''].join(' ');
   const label = u.kind === 'channel' ? u.title.slice(1) : u.title;
   return html`<li><a class="${cls}" href="${u.url}" data-room="${u.url}"><span class="room-glyph">${glyph}</span><span class="room-name">${label}</span>${
     muted ? html`<span class="room-muted" title="Notifications muted">${BELL_OFF_ICON}</span>` : ''
-  }${badge(u)}</a></li>`;
+  }${callMarker(call)}${badge(u)}</a></li>`;
 }
 
 function sidebar(opts: PageOpts, rooms: RoomUnread[]): Html {
@@ -121,18 +132,19 @@ function sidebar(opts: PageOpts, rooms: RoomUnread[]): Html {
   const privateNames = new Set(listChannels(root).filter((c) => c.private).map((c) => `/c/${encodeURIComponent(c.name)}`));
   const wsName = loadConfig(root).name;
   const prefs = readPrefs(root, opts.viewer!.auth.username);
+  const calls = liveCallsByRoom();
   return html`<nav class="app-side">
 <div class="side-head"><a class="brand" href="/">${raw(MARK)}<span>${wsName}</span></a></div>
 <div class="side-rooms">
 <div class="side-cap"><span>Channels</span><a href="/new" title="New channel">${icon('plus')}</a></div>
 <ul>${joinHtml(
-    rooms.filter((r) => r.kind === 'channel').map((r) => roomLink(r, privateNames.has(r.url) ? icon('lock') : '#', opts.active, isMuted(prefs, r.url)))
+    rooms.filter((r) => r.kind === 'channel').map((r) => roomLink(r, privateNames.has(r.url) ? icon('lock') : '#', opts.active, isMuted(prefs, r.url), calls.get(r.url)))
   )}</ul>
 <div class="side-cap"><span>Direct messages</span><a href="/d/new" title="New conversation">${icon('plus')}</a></div>
 <ul>${joinHtml(
     rooms
       .filter((r) => r.kind === 'dm')
-      .map((r) => roomLink(r, r.with && r.with.length === 1 ? avatar(r.with[0], 18) : icon('people'), opts.active, isMuted(prefs, r.url)))
+      .map((r) => roomLink(r, r.with && r.with.length === 1 ? avatar(r.with[0], 18) : icon('people'), opts.active, isMuted(prefs, r.url), calls.get(r.url)))
   )}</ul>
 </div>
 <div class="side-foot">${userMenu(opts)}<a class="topbar-icon" href="/search" aria-label="Search">${icon('search')}</a></div>
@@ -153,9 +165,10 @@ export function layout(title: string, main: Html, opts: PageOpts): string {
     `/favicon.svg?t=${encodeURIComponent(theme)}` + (unread.total > 0 ? `&unread=${unread.urgent ? 'urgent' : 'some'}` : '');
   // The frame says which room it shows and who is looking, for the page
   // script: the count stream marks the current room read as messages arrive,
-  // and the composer's @-completion needs to know whom not to suggest.
+  // and the composer's @-completion needs to know whom not to suggest. It
+  // also says where the call script is, which is loaded on the first call.
   const body = opts.viewer
-    ? html`<div class="app ${opts.roomsPage ? 'rooms-page' : ''}" data-viewer="${opts.viewer.auth.username}" data-current-room="${opts.active ?? ''}" data-csrf="${opts.viewer.csrf}">${sidebar(opts, rooms)}<div class="app-main">${main}</div></div>`
+    ? html`<div class="app ${opts.roomsPage ? 'rooms-page' : ''}" data-viewer="${opts.viewer.auth.username}" data-current-room="${opts.active ?? ''}" data-csrf="${opts.viewer.csrf}" data-call-script="/assets/call.js?v=${callScript().tag}">${sidebar(opts, rooms)}<div class="app-main">${main}</div></div>`
     : html`<main class="container" style="padding-top: 48px">${main}</main>`;
   return html`<!doctype html>
 <html lang="en" data-theme-vault="${theme}" data-theme-dark="${darkFor(activeTheme())}">
@@ -251,6 +264,10 @@ const BACK_ICON = raw(
 const PAPERCLIP_ICON = raw(
   '<svg class="glyph" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 7.5l-5.6 5.6a3.5 3.5 0 0 1-5-5l6-6a2.3 2.3 0 0 1 3.3 3.3l-6 6a1.2 1.2 0 0 1-1.7-1.7l5.5-5.5"/></svg>'
 );
+/** A video camera, in the same manner: calls. */
+export const CALL_ICON = raw(
+  '<svg class="glyph" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="4" width="9" height="8" rx="1.5"/><path d="M10.5 7.2L14.5 5v6l-4-2.2"/></svg>'
+);
 const BELL_OFF_ICON = raw(
   '<svg class="glyph" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10.5V7a4 4 0 0 1 8 0v3.5l1.5 1.5h-11zM6.5 14a1.5 1.5 0 0 0 3 0M2 2l12 12"/></svg>'
 );
@@ -322,6 +339,7 @@ export function messageHtml(root: string, room: Room, m: Message, viewer: Viewer
         : ''
     }</div></li>`;
   }
+  if (m.call) return callEntryHtml(room, m, viewer, cont);
   const reactions = Object.entries(m.reactions).map(([emoji, users]) =>
     reactForm(room.url, m.id, emoji, viewer, users.includes(viewer.auth.username), users.length)
   );
@@ -338,6 +356,54 @@ export function messageHtml(root: string, room: Room, m: Message, viewer: Viewer
 ${pin ? html`<div class="pinned-by">${PIN_ICON} Pinned by ${pin.by}</div>` : ''}<div class="msg-head"><a class="author" href="/${encodeURIComponent(m.author)}">${m.author}</a>${timeTag(m.created)}${m.edited ? html`<span class="msg-edited">(edited)</span>` : ''}</div>
 <div class="msg-body markdown-body">${bodyHtml(root, m.body, viewer)}</div>
 ${fileRows(room.url, m.id, m.files)}${below}
+</div>${msgTools(room, m, viewer)}</li>`;
+}
+
+/** How long a call lasted, in words: "under a minute", "23 minutes", "1 hour 5 minutes". */
+export function callLength(ms: number): string {
+  const minutes = Math.round(ms / 60000);
+  if (minutes < 1) return 'under a minute';
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  const part = (n: number, unit: string) => `${n} ${unit}${n === 1 ? '' : 's'}`;
+  return h ? (m ? `${part(h, 'hour')} ${part(m, 'minute')}` : part(h, 'hour')) : part(m, 'minute');
+}
+
+/**
+ * A call's entry in the timeline. While the call goes on it says who is in
+ * it and offers to join (the button is the page script's, shown where the
+ * browser can make calls); afterwards it says who was in it and for how
+ * long. An entry whose call is not going on, and never recorded its end, is
+ * one the workspace was restarted under while nobody was left to resume it.
+ */
+function callEntryHtml(room: Room, m: Message, viewer: Viewer, cont: boolean): Html {
+  const rec = m.call!;
+  const live = liveCall(room.url);
+  const isLive = live !== null && live.id === rec.id;
+  const people = isLive ? live!.people : rec.people;
+  const faces = joinHtml(people.map((p) => html`<span title="${p}">${avatar(p, 20)}</span>`));
+  const status = isLive
+    ? `${people.length} in the call`
+    : rec.ended
+      ? `lasted ${callLength(Date.parse(rec.ended) - Date.parse(m.created))}`
+      : 'ended';
+  const card = html`<div class="call-entry ${isLive ? 'live' : ''}" data-call-entry="${rec.id}"><span class="call-entry-icon">${CALL_ICON}</span><div class="call-entry-text"><div><strong>${
+    isLive ? 'Call in progress' : 'Call'
+  }</strong> <span class="muted">${status}</span></div><div class="call-entry-people">${faces}</div></div>${
+    isLive ? html`<button class="btn btn-primary call-join" type="button" data-call-join="${room.url}" data-call-title="${room.title}">Join</button>` : ''
+  }</div>`;
+  const reactions = Object.entries(m.reactions).map(([emoji, users]) =>
+    reactForm(room.url, m.id, emoji, viewer, users.includes(viewer.auth.username), users.length)
+  );
+  const thread =
+    room.kind !== 'thread' && m.replyCount > 0
+      ? html`<a class="thread-link" href="${room.url}/t/${m.id}">${icon('comment')} ${m.replyCount} ${m.replyCount === 1 ? 'reply' : 'replies'}</a>`
+      : '';
+  const below = reactions.length || thread ? html`<div class="msg-below">${joinHtml(reactions)}${thread}</div>` : '';
+  const pin = room.kind === 'thread' ? null : pinOf(room.dir, m.id);
+  return html`<li class="msg msg-call ${pin ? 'pinned' : ''} ${cont ? 'msg-cont' : ''}" id="msg-${m.id}" data-mid="${m.id}" data-author="${m.author}" data-created="${m.created}">${avatar(m.author, 32)}<div class="msg-main">
+${pin ? html`<div class="pinned-by">${PIN_ICON} Pinned by ${pin.by}</div>` : ''}<div class="msg-head"><a class="author" href="/${encodeURIComponent(m.author)}">${m.author}</a>${timeTag(m.created)}<span class="muted">started a call</span></div>
+${card}${below}
 </div>${msgTools(room, m, viewer)}</li>`;
 }
 
@@ -438,13 +504,24 @@ function muteButton(root: string, room: Room, viewer: Viewer): Html {
   return html`<form method="post" action="${room.url}/mute" class="mute-form">${csrfField(viewer)}<input type="hidden" name="muted" value="${muted ? '0' : '1'}"><button class="topbar-icon ${muted ? 'is-muted' : ''}" type="submit" title="${label}" aria-label="${label}" aria-pressed="${muted ? 'true' : 'false'}">${muted ? BELL_OFF_ICON : BELL_ICON}</button></form>`;
 }
 
+/**
+ * The header's call button: starts a call, or joins the one going on, and
+ * says so. Only the page script can make a call, so the sheet shows it only
+ * where script has said the browser can.
+ */
+function callButton(room: Room): Html {
+  const live = liveCall(room.url);
+  const label = live ? `Join the call (${live.people.join(', ')})` : 'Start a call';
+  return html`<button class="topbar-icon call-button ${live ? 'live' : ''}" type="button" data-call-start="${room.url}" data-call-title="${room.title}" title="${label}" aria-label="${label}">${CALL_ICON}<span data-call-count>${live ? String(live.people.length) : ''}</span></button>`;
+}
+
 function roomHead(root: string, room: Room, viewer: Viewer, tools: Html | '' = ''): Html {
   const topic = room.channel?.topic;
   const pins = readPins(room.dir).length;
   const pinsLink = html`<a class="topbar-icon pins-link" href="${room.url}/pins" title="Pinned messages" aria-label="Pinned messages, ${pins}">${PIN_ICON}<span data-pin-count>${pins || ''}</span></a>`;
   return html`<header class="room-head"><a class="back-link topbar-icon" href="/" aria-label="All rooms">${BACK_ICON}</a><div class="room-title"><h1>${room.title}</h1>${
     topic ? html`<span class="room-topic">${topic}</span>` : ''
-  }</div><div class="room-tools">${pinsLink}${muteButton(root, room, viewer)}${tools}</div></header>`;
+  }</div><div class="room-tools">${room.kind !== 'thread' ? callButton(room) : ''}${pinsLink}${muteButton(root, room, viewer)}${tools}</div></header>`;
 }
 
 /** A room's pinned messages, most recently pinned first, each whole. */
@@ -730,7 +807,7 @@ function lastActive(root: string, username: string): Html {
   }
 }
 
-export function adminPage(root: string, viewer: Viewer, vault: Vault, opts: { flash?: string; error?: string } = {}): string {
+export function adminPage(root: string, viewer: Viewer, vault: Vault, opts: { flash?: string; error?: string; calls?: CallsConfig } = {}): string {
   const config = loadConfig(root);
   const users = Object.entries(vault.users).sort(([a], [b]) => a.localeCompare(b));
   const rows = users.map(([name, u]) => {
@@ -762,8 +839,39 @@ ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.fla
   )}</select>
 <p class="muted">The workspace's own look; each person can still pick their own from the account menu.</p></div>
 <button class="btn btn-primary" type="submit">Save</button>
-</form>`;
+</form>
+${callsSection(viewer, opts.calls ?? config.calls)}`;
   return doc('Admin', content, { viewer, root });
+}
+
+/**
+ * How calls connect. A secret is never written back into the page: its
+ * field is blank, says whether one is saved, and a blank field keeps it.
+ */
+function callsSection(viewer: Viewer, calls: CallsConfig): Html {
+  const t = calls.turn;
+  const mode = (value: string, label: string, hint: string) =>
+    html`<label class="checkbox" style="display:block;margin-bottom:6px"><input type="radio" name="turn_mode" value="${value}" ${t.mode === value ? raw('checked') : ''}> ${label}<br><span class="muted">${hint}</span></label>`;
+  const saved = (has: string, what: string) => (has ? `A ${what} is saved; leave this blank to keep it.` : `No ${what} is saved.`);
+  return html`<h2 id="calls">Calls</h2>
+<p class="muted" style="max-width:720px">A call's audio and video go directly between the browsers in it; the workspace only introduces them to each other. To find a path, each browser asks a STUN server for its public address, which is enough on most networks. Where two people cannot reach each other directly (both behind strict firewalls, for instance), the call needs a TURN server to relay their media, and that relay carries the whole call for them.</p>
+<form method="post" action="/admin/calls" style="max-width:520px">${csrfField(viewer)}
+<div class="field"><label for="stun">STUN servers</label><textarea id="stun" name="stun" rows="3" placeholder="stun:stun.example.org:3478">${calls.stun.join('\n')}</textarea>
+<p class="muted">One per line. The defaults (${DEFAULT_STUN.join(', ')}) are public servers run by Google and Cloudflare, which see the address of each person who joins a call. Leave this empty to contact no outside server; calls then connect only where the browsers can reach each other directly.</p></div>
+<h3>TURN relay</h3>
+${mode('none', 'None', 'Calls connect directly or not at all.')}
+${mode('static', 'A TURN server with a fixed username and password', 'Any provider can give you these. They are handed to every member who joins a call.')}
+${mode('coturn', 'coturn, with a shared secret', "coturn's use-auth-secret. The secret stays on this server, which gives each member a credential that expires after 12 hours.")}
+${mode('cloudflare', 'Cloudflare Realtime TURN', 'A TURN key from the Cloudflare dashboard. The API token stays on this server, which asks Cloudflare for a credential for each member who joins.')}
+<div class="field"><label for="turn_urls">TURN server URLs</label><textarea id="turn_urls" name="turn_urls" rows="3" placeholder="turn:turn.example.org:3478&#10;turns:turn.example.org:5349">${t.urls.join('\n')}</textarea>
+<p class="muted">For a fixed password or coturn. One per line; listing both a turn: URL and a turns: URL on port 443 helps members on networks that allow little else.</p></div>
+<div class="field"><label for="turn_username">Username</label><input type="text" id="turn_username" name="turn_username" value="${t.username}" autocomplete="off"></div>
+<div class="field"><label for="turn_credential">Password</label><input type="password" id="turn_credential" name="turn_credential" autocomplete="new-password"><p class="muted">${saved(t.credential, 'password')}</p></div>
+<div class="field"><label for="turn_secret">coturn shared secret</label><input type="password" id="turn_secret" name="turn_secret" autocomplete="new-password"><p class="muted">${saved(t.secret, 'secret')}</p></div>
+<div class="field"><label for="cf_key_id">Cloudflare TURN key id</label><input type="text" id="cf_key_id" name="cf_key_id" value="${t.keyId}" autocomplete="off"></div>
+<div class="field"><label for="cf_api_token">Cloudflare API token</label><input type="password" id="cf_api_token" name="cf_api_token" autocomplete="new-password"><p class="muted">${saved(t.apiToken, 'token')}</p></div>
+<button class="btn btn-primary" type="submit">Save</button>
+</form>`;
 }
 
 /**

@@ -285,6 +285,42 @@ curl -s -b "$ADMIN_JAR" -d "csrf=$ADMIN_CSRF&username=dave" "$BASE/admin/users/a
   || fail "the admin page's new-user result has no invite link"
 ok "adding someone on the admin page shows their invite link"
 
+# ---- calls ----
+
+# The admin's call settings: an address that is not a STUN or TURN URL is
+# refused, as is a relay without what it needs, and a secret is kept on disk
+# and never written into the page, a blank field keeping it.
+calls_form() { curl -s -b "$ADMIN_JAR" -o /dev/null -w '%{http_code}' --data-urlencode "csrf=$ADMIN_CSRF" "$@" "$BASE/admin/calls"; }
+[ "$(calls_form --data-urlencode 'stun=http://not-stun.example' -d turn_mode=none)" = "400" ] || fail "a STUN server that is not a STUN URL was saved"
+[ "$(calls_form -d stun= -d turn_mode=coturn --data-urlencode 'turn_urls=turn:turn.example:3478')" = "400" ] || fail "coturn was saved without its secret"
+[ "$(calls_form -d stun= -d turn_mode=coturn --data-urlencode 'turn_urls=turn:turn.example:3478' -d turn_secret=smoke-turn-secret)" = "303" ] || fail "the call settings were not saved"
+grep -q '"secret": "smoke-turn-secret"' "$WS/config.json" || fail "the coturn secret is not in config.json"
+curl -s -b "$ADMIN_JAR" "$BASE/admin" | grep_all -q smoke-turn-secret && fail "the admin page showed the TURN secret"
+[ "$(calls_form -d stun= -d turn_mode=coturn --data-urlencode 'turn_urls=turn:turn.example:3478')" = "303" ] || fail "saving with a blank secret was refused"
+grep -q '"secret": "smoke-turn-secret"' "$WS/config.json" || fail "a blank secret field did not keep the saved secret"
+ok "the admin sets how calls connect, and the TURN secret stays on the server"
+
+# Joining: the page must have its stream open, a relay credential is made for
+# the person, the roster comes down the page's stream, and a room the person
+# cannot see is a 404 as it is everywhere else.
+PEER="0123456789abcdef0123456789abcdef"
+call_post() { curl -s -b "$1" -o "$TMP/call.json" -w '%{http_code}' -H 'content-type: application/json' -H 'accept: application/json' -d "{\"csrf\":\"$2\",\"peer\":\"$PEER\"}" "$BASE$3"; }
+[ "$(call_post "$JAR" "$CSRF" /c/general/call/join)" = "409" ] || fail "a page with no stream open joined a call"
+( curl -s -N -b "$JAR" --max-time 4 "$BASE/events?client=$PEER" > "$TMP/page-events.txt" || true ) &
+STREAM=$!
+sleep 1
+[ "$(call_post "$JAR" "$CSRF" /c/general/call/join)" = "200" ] || fail "joining a call failed: $(cat "$TMP/call.json")"
+grep -q '"urls":\["turn:turn.example:3478"\],"username":"[0-9]*:alice"' "$TMP/call.json" || fail "joining did not hand out a coturn credential for alice: $(cat "$TMP/call.json")"
+grep -q smoke-turn-secret "$TMP/call.json" && fail "joining handed out the TURN secret itself"
+[ "$(api "$ALICE" GET '/channels/general/messages?limit=1' | jget messages.0.call.people.0)" = "alice" ] || fail "the call has no entry in the timeline"
+CAROL_CSRF="$(curl -s -b "$TMP/carol.jar" "$BASE/" | csrf_in)"
+[ "$(call_post "$TMP/carol.jar" "$CAROL_CSRF" /c/secret/call/join)" = "404" ] || fail "someone outside a private channel reached its call"
+[ "$(call_post "$JAR" "$CSRF" /c/general/call/leave)" = "204" ] || fail "leaving the call failed"
+wait "$STREAM"
+grep -q '"type":"call-roster"' "$TMP/page-events.txt" || fail "the roster did not come down the page's stream"
+[ -n "$(api "$ALICE" GET '/channels/general/messages?limit=1' | jget messages.0.call.ended)" ] || fail "leaving did not end the call"
+ok "joining a call hands out a relay credential and the roster, and the last to leave ends it"
+
 # ---- sending, made robust ----
 
 JSON_ACCEPT=(-H 'accept: application/json')

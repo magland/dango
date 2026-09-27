@@ -42,15 +42,17 @@ export const EDIT_WINDOW_MS = 2 * 60 * 60 * 1000;
 
 export const EDIT_WINDOW_PASSED = 'A message can be edited for two hours after it is sent.';
 
+export const CALL_NOT_EDITABLE = "A call's entry is kept by the call and cannot be edited.";
+
 /** Whether a message is still inside its edit window. A timestamp that does not parse is outside it. */
 export function withinEditWindow(created: string, now: number = Date.now()): boolean {
   const t = Date.parse(created);
   return Number.isFinite(t) && now - t < EDIT_WINDOW_MS;
 }
 
-/** The author may edit, and only within the edit window. */
-export function canEditMessage(auth: AuthResult | null, m: { author: string; created: string }, now?: number): boolean {
-  return auth !== null && auth.username === m.author && withinEditWindow(m.created, now);
+/** The author may edit, and only within the edit window. A call's entry is written by the call, not by its author. */
+export function canEditMessage(auth: AuthResult | null, m: { author: string; created: string; call?: unknown }, now?: number): boolean {
+  return auth !== null && auth.username === m.author && !m.call && withinEditWindow(m.created, now);
 }
 
 export function canDeleteMessage(auth: AuthResult | null, author: string): boolean {

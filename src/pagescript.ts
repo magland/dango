@@ -10,7 +10,17 @@ import { createHash } from 'crypto';
 // renders without it. What it adds is the live half of a chat: the event
 // stream that appends messages as they arrive, Enter sending the composer,
 // reactions posting without a page reload, the theme applied before first
-// paint, and turning notifications on for a device, which only script can do.
+// paint, turning notifications on for a device, which only script can do,
+// and calls, which are only script: this file starts them, and the call
+// itself is src/callscript.ts, loaded the first time one is joined.
+//
+// Moving between the workspace's pages loads each one in place: a link or a
+// form inside the frame fetches its page, and the page's sidebar and main
+// pane replace the ones on screen, without the browser leaving the page.
+// That is what lets a call go on while its members read and write in other
+// rooms. So everything here about the room on screen is set up by
+// startMain() and taken down by stopMain(), once per page shown, rather than
+// once per load.
 
 const PAGE_JS = `
 // ---- appearance (the pattern from mochiforge, under dango's own key) ----
@@ -19,6 +29,11 @@ var dangoRoot = document.documentElement;
 // message's tools wait for a tap when script is here to take it, and are
 // simply shown when it is not.
 dangoRoot.classList.add('js');
+// And whether this browser can make calls, so the sheet shows call buttons
+// only where pressing one can work.
+if (window.RTCPeerConnection && navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.fetch) {
+  dangoRoot.classList.add('can-call');
+}
 var dangoTheme = {
   vault: dangoRoot.getAttribute('data-theme-vault') || 'paper',
   dark: dangoRoot.getAttribute('data-theme-dark') || 'midnight',
@@ -66,7 +81,7 @@ function closestOf(el, selector) {
 // the query once its filters are taken out as one run, case aside, so the
 // same run is marked here: in the text of the results, and not in the line
 // saying where each was said or inside its mathematics.
-document.addEventListener('DOMContentLoaded', function () {
+function highlightSearch() {
   var box = document.querySelector('[data-highlight]');
   var needle = box ? (box.getAttribute('data-highlight') || '').toLowerCase() : '';
   if (!needle) return;
@@ -93,7 +108,7 @@ document.addEventListener('DOMContentLoaded', function () {
     frag.appendChild(document.createTextNode(text.slice(last)));
     node.parentNode.replaceChild(frag, node);
   });
-});
+}
 
 // ---- invite links ----
 // An invite link is /invite#token=<token>. The fragment never reaches the
@@ -253,9 +268,11 @@ function arrangeRoom() {
 // an image arriving after the page, a message repainted, the composer
 // growing, or a phone's keyboard opening under it.
 var stuckToBottom = true;
-document.addEventListener('DOMContentLoaded', function () {
+var roomWatch = null;
+function setupRoom() {
   var pane = scrollPane();
   var list = msgList();
+  stuckToBottom = true;
   if (!pane || !list) return;
   arrangeRoom();
   scrollToBottom();
@@ -271,11 +288,11 @@ document.addEventListener('DOMContentLoaded', function () {
     if (stuckToBottom || farFromBottom(pane)) showJump(!stuckToBottom);
   }, { passive: true });
   if (window.ResizeObserver) {
-    var watch = new ResizeObserver(function () { if (stuckToBottom) scrollToBottom(); });
-    watch.observe(pane);
-    watch.observe(list);
+    roomWatch = new ResizeObserver(function () { if (stuckToBottom) scrollToBottom(); });
+    roomWatch.observe(pane);
+    roomWatch.observe(list);
   }
-});
+}
 // A room brought back from the browser's back-forward cache is where it was
 // left, which is not where the conversation is now.
 window.addEventListener('pageshow', function (e) {
@@ -285,14 +302,16 @@ window.addEventListener('pageshow', function (e) {
   stuckToBottom = true;
 });
 
-// One EventSource per open room page. The stream sends {type, id, html};
+// One EventSource for the room on screen. The stream sends {type, id, html};
 // an element already on the page is replaced in place, a new one is appended,
 // and the view follows the bottom only if the reader was already there.
+var roomStream = null;
 function openStream(list) {
   var url = list.getAttribute('data-stream');
-  if (!url || !window.EventSource) return;
+  if (!url || !window.EventSource || !list.isConnected) return;
   var after = list.getAttribute('data-last') || '0';
   var es = new EventSource(url + '?after=' + encodeURIComponent(after));
+  roomStream = es;
   es.onmessage = function (ev) {
     var msg;
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
@@ -307,10 +326,12 @@ function openStream(list) {
     if (existing) {
       existing.outerHTML = msg.html;
       arrangeRoom();
+      callButtonsChanged();
     } else if (msg.type === 'message') {
       list.insertAdjacentHTML('beforeend', msg.html);
       list.setAttribute('data-last', String(msg.id));
       arrangeRoom();
+      callButtonsChanged();
       if (follow) scrollToBottom();
       else showJump(true);
       // Seen, if someone is at the page (see attended()); otherwise it waits
@@ -327,15 +348,11 @@ function openStream(list) {
   es.onerror = function () {
     var items = list.querySelectorAll('[data-mid]');
     if (items.length) list.setAttribute('data-last', items[items.length - 1].getAttribute('data-mid'));
-    if (es.readyState === 2) {
-      setTimeout(function () { openStream(list); }, 5000);
+    if (es.readyState === 2 && roomStream === es) {
+      setTimeout(function () { if (roomStream === es) openStream(list); }, 5000);
     }
   };
 }
-document.addEventListener('DOMContentLoaded', function () {
-  var list = msgList();
-  if (list) openStream(list);
-});
 
 // ---- unread counts ----
 // Every signed-in page holds one stream of the viewer's counts (/events),
@@ -448,15 +465,25 @@ function markReadHere(id) {
   body.append('id', String(id));
   fetch(room + '/read', { method: 'POST', body: body });
 }
+// The stream carries this page's id (see clientId, under calls), which is
+// what a call addresses the page by.
 function openUserStream() {
   var f = frame();
   if (!f || !window.EventSource) return;
-  var es = new EventSource('/events');
+  var es = new EventSource('/events?client=' + clientId);
+  es.onopen = function () {
+    if (window.dangoCall) window.dangoCall.streamOpened();
+  };
   es.onmessage = function (ev) {
     var msg;
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.type === 'call') { callChanged(msg.url, msg.people); return; }
+    if (msg.type === 'call-roster' || msg.type === 'call-signal' || msg.type === 'call-gone') {
+      if (window.dangoCall) window.dangoCall.event(msg);
+      return;
+    }
     if (msg.type !== 'unread') return;
-    if (msg.url === f.room && attended()) return;
+    if (msg.url === frame().room && attended()) return;
     setCount(msg.url, msg.count, msg.mentions);
   };
   es.onerror = function () {
@@ -521,6 +548,8 @@ document.addEventListener('DOMContentLoaded', function () {
   if (frame() && navigator.serviceWorker && window.isSecureContext) {
     navigator.serviceWorker.register('/sw.js').catch(function () {});
   }
+});
+function setupAccount() {
   var box = document.querySelector('[data-push]');
   if (box) pushSetup(box);
   // Quiet hours are kept in the person's own time zone, which the browser
@@ -529,7 +558,8 @@ document.addEventListener('DOMContentLoaded', function () {
   if (tz && !tz.value && window.Intl) {
     try { tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) {}
   }
-});
+  setupChime();
+}
 function isIos() {
   return /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
 }
@@ -650,7 +680,7 @@ function pushSetup(box) {
           });
         })
         .then(function (sub) { return pushPost('/account/push/subscribe', { subscription: sub.toJSON() }); })
-        .then(function () { location.reload(); });
+        .then(function () { reloadPage(); });
     }).catch(function (e) {
       on.disabled = false;
       show('Notifications could not be turned on: ' + (e && e.message ? e.message : e), 'off');
@@ -661,7 +691,7 @@ function pushSetup(box) {
     currentSubscription().then(function (sub) {
       if (!sub) return;
       return pushPost('/account/push/remove', { endpoint: sub.endpoint }).catch(function () {}).then(function () { return sub.unsubscribe(); });
-    }).then(function () { location.reload(); }, function (e) {
+    }).then(function () { reloadPage(); }, function (e) {
       off.disabled = false;
       show('Notifications could not be turned off: ' + (e && e.message ? e.message : e), 'on');
     });
@@ -734,14 +764,23 @@ function playChime() {
 }
 if (navigator.serviceWorker) {
   navigator.serviceWorker.addEventListener('message', function (e) {
-    if (!e.data || e.data.type !== 'chime') return;
+    if (!e.data) return;
+    // A notification tapped while this tab is open asks the tab to show its
+    // room, which it does in place, so that a call here goes on.
+    if (e.data.type === 'navigate') {
+      var done = !!frame() && typeof e.data.url === 'string';
+      if (done) navigate(e.data.url, { push: true });
+      if (e.ports && e.ports[0]) e.ports[0].postMessage({ done: done });
+      return;
+    }
+    if (e.data.type !== 'chime') return;
     var played = chimeWanted() && playChime();
     if (e.ports && e.ports[0]) e.ports[0].postMessage({ played: played });
   });
   if (navigator.serviceWorker.startMessages) navigator.serviceWorker.startMessages();
 }
 // The account page's switch for it, kept per browser, and a button to hear it.
-document.addEventListener('DOMContentLoaded', function () {
+function setupChime() {
   var box = document.querySelector('[data-chime]');
   if (!box) return;
   box.hidden = false;
@@ -755,7 +794,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // A context started by this very press may still be starting.
     if (!playChime() && audio && audio.resume) audio.resume().then(playChime, function () {});
   });
-});
+}
 
 // Signing out drops this browser's subscription and tells the workspace, so
 // a shared computer stops showing the notifications of whoever left it. The
@@ -1183,8 +1222,9 @@ document.addEventListener('paste', function (e) {
   sendStatus(form, '', '');
 });
 // Leaving the page mid-send would drop the upload; the browser asks first.
+// So would leaving a call's page end the call, and it asks about that too.
 window.addEventListener('beforeunload', function (e) {
-  if (document.querySelector('form[data-composer][data-busy]')) {
+  if (document.querySelector('form[data-composer][data-busy]') || (window.dangoCall && window.dangoCall.active())) {
     e.preventDefault();
     e.returnValue = '';
   }
@@ -1272,6 +1312,234 @@ document.addEventListener('click', function (e) {
     return;
   }
   closeMenus(t);
+});
+
+// ---- the page on screen ----
+// What each page shown sets up, whether it arrived by a load or in place,
+// and takes down when the next one replaces it.
+function startMain() {
+  highlightSearch();
+  setupRoom();
+  var list = msgList();
+  if (list) openStream(list);
+  setupAccount();
+  callButtonsChanged();
+}
+function stopMain() {
+  if (roomStream) { roomStream.close(); roomStream = null; }
+  if (roomWatch) { roomWatch.disconnect(); roomWatch = null; }
+  mentionState.open = false;
+  mentionState.items = [];
+}
+document.addEventListener('DOMContentLoaded', startMain);
+
+// ---- moving between pages in place ----
+// A link or form inside the frame fetches its page and swaps it in (see the
+// head of this file). Whatever this cannot show in place goes to the browser
+// as it would have without script: a page outside the frame (signing in, an
+// error before the frame), a different person's frame, a file, or a failed
+// fetch.
+var shownPath = location.pathname + location.search;
+var navSeq = 0;
+var NOT_IN_PLACE = /^[/](?:assets|api|icon|events|sw[.]js|favicon|manifest|logout|login|invite)(?:[/?.#]|$)|^[/][cd][/][^/]+(?:[/]t[/][0-9]+)?[/](?:files[/]|events$)/;
+function inPlacePath(url) {
+  if (!frame() || !window.fetch || !window.DOMParser || !history.pushState) return false;
+  return url.origin === location.origin && !NOT_IN_PLACE.test(url.pathname);
+}
+function navigate(href, opts) {
+  var url = new URL(href, location.href);
+  if (!inPlacePath(url)) { location.assign(url.href); return; }
+  opts = opts || {};
+  opts.href = url.href;
+  showPage(fetch(url.href, { credentials: 'same-origin', headers: { Accept: 'text/html' } }), url.hash, opts);
+}
+function reloadPage() {
+  if (frame()) navigate(location.href, { replace: true });
+  else location.reload();
+}
+function showPage(request, hash, opts) {
+  var seq = ++navSeq;
+  document.documentElement.classList.add('loading-page');
+  request.then(function (r) {
+    var type = r.headers.get('content-type') || '';
+    if (type.indexOf('text/html') < 0) throw new Error('not a page');
+    return r.text().then(function (text) { return { url: r.url, redirected: r.redirected, text: text }; });
+  }).then(function (page) {
+    if (seq !== navSeq) return;
+    document.documentElement.classList.remove('loading-page');
+    if (!swapIn(page.text)) {
+      // A form answered with something that is not a page of the frame (an
+      // error from before the frame, say) is shown as the browser would have
+      // shown it, rather than fetched again: the address a form posts to may
+      // be one only a POST answers, and the form has already done its work.
+      if (opts.form && !page.redirected) { document.open(); document.write(page.text); document.close(); }
+      else location.assign(page.url);
+      return;
+    }
+    var at = new URL(page.url);
+    var where = at.pathname + at.search + (hash || '');
+    // A form's answer that was not a redirect is shown at the address the
+    // reader was already on: the form's own address may be one only a POST
+    // answers.
+    if (opts.form && !page.redirected) where = location.pathname + location.search;
+    if (opts.replace || where === location.pathname + location.search + location.hash) history.replaceState(null, '', where);
+    else if (opts.push) history.pushState(null, '', where);
+    shownPath = location.pathname + location.search;
+    var target = hash && hash.length > 1 ? document.getElementById(decodeURIComponent(hash.slice(1))) : null;
+    if (target) target.scrollIntoView();
+    else if (!msgList()) { var d = document.querySelector('.doc'); if (d) d.scrollTop = 0; }
+  }).catch(function () {
+    if (seq !== navSeq) return;
+    document.documentElement.classList.remove('loading-page');
+    // Tried in place and failed: the browser is given the same address, and
+    // shows whatever the matter is, the way it would have without script.
+    if (!opts.form) location.assign(opts.href);
+    else window.alert('That did not work: the connection to the workspace failed.');
+  });
+}
+function swapIn(text) {
+  var next = new DOMParser().parseFromString(text, 'text/html');
+  var nextApp = next.querySelector('.app');
+  var f = frame();
+  if (!nextApp || !f || nextApp.getAttribute('data-viewer') !== f.viewer) return false;
+  stopMain();
+  if (window.dangoCall) window.dangoCall.park();
+  var app = f.app;
+  app.className = nextApp.className;
+  ['data-current-room', 'data-csrf', 'data-call-script'].forEach(function (a) { app.setAttribute(a, nextApp.getAttribute(a) || ''); });
+  var side = app.querySelector('.app-side');
+  var keep = side && side.querySelector('.side-rooms') ? side.querySelector('.side-rooms').scrollTop : 0;
+  side.replaceWith(document.adoptNode(nextApp.querySelector('.app-side')));
+  var rooms = app.querySelector('.side-rooms');
+  if (rooms) rooms.scrollTop = keep;
+  app.querySelector('.app-main').replaceWith(document.adoptNode(nextApp.querySelector('.app-main')));
+  var t = next.querySelector('title');
+  f.room = app.getAttribute('data-current-room') || '';
+  f.csrf = app.getAttribute('data-csrf') || '';
+  if (t) f.title = t.getAttribute('data-title') || t.textContent;
+  counts = {};
+  urgent = {};
+  seedCounts();
+  closeMenus(null);
+  window.scrollTo(0, 0);
+  startMain();
+  if (window.dangoCall) window.dangoCall.place();
+  return true;
+}
+function shownInPlace(a) {
+  if (a.target && a.target !== '_self') return false;
+  if (a.hasAttribute('download')) return false;
+  var url = new URL(a.href, location.href);
+  // A link to somewhere on this very page is the browser's to follow.
+  if (url.hash && url.pathname + url.search === location.pathname + location.search) return false;
+  return inPlacePath(url);
+}
+// After the other click handlers, which may have taken the click already.
+document.addEventListener('click', function (e) {
+  if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  var a = closestOf(e.target, 'a[href]');
+  if (!a || !shownInPlace(a)) return;
+  e.preventDefault();
+  closeMenus(null);
+  navigate(a.href, { push: true });
+});
+// Forms, likewise, once the composer and the confirmations have had them. A
+// form's fields go as a plain form would send them, so the server cannot tell
+// the difference.
+document.addEventListener('submit', function (e) {
+  var form = e.target;
+  if (e.defaultPrevented || !form.matches || form.matches('form[data-composer], form[data-quiet]')) return;
+  if (form.target && form.target !== '_self') return;
+  var url = new URL(form.action || location.href, location.href);
+  if (!inPlacePath(url) || form.querySelector('input[type="file"]')) return;
+  var data = new FormData(form);
+  if (e.submitter && e.submitter.name) data.append(e.submitter.name, e.submitter.value);
+  var fields = new URLSearchParams();
+  data.forEach(function (v, k) { if (typeof v === 'string') fields.append(k, v); });
+  e.preventDefault();
+  closeMenus(null);
+  if ((form.getAttribute('method') || 'get').toLowerCase() !== 'post') {
+    url.search = fields.toString();
+    navigate(url.href, { push: true });
+    return;
+  }
+  showPage(fetch(url.href, { method: 'POST', body: fields, credentials: 'same-origin', headers: { Accept: 'text/html' } }), '', { push: true, form: true });
+});
+window.addEventListener('popstate', function () {
+  if (location.pathname + location.search === shownPath) return;
+  shownPath = location.pathname + location.search;
+  navigate(location.href, {});
+});
+
+// ---- calls ----
+// The page's side of a call: its id, the call buttons, and who is in each
+// room's call, as the viewer's stream tells it. The call itself (the media,
+// the connections, what is drawn) is the call script, loaded on the first
+// press of a call button, which sets window.dangoCall.
+function newClientId() {
+  var bytes = new Uint8Array(16);
+  (window.crypto || window.msCrypto).getRandomValues(bytes);
+  var out = '';
+  for (var i = 0; i < bytes.length; i++) out += ('0' + bytes[i].toString(16)).slice(-2);
+  return out;
+}
+var clientId = newClientId();
+var callPeople = {};
+function callChanged(url, people) {
+  callPeople[url] = people;
+  var marks = document.querySelectorAll('[data-room="' + url + '"] [data-room-call]');
+  for (var i = 0; i < marks.length; i++) {
+    marks[i].hidden = !people.length;
+    marks[i].title = people.length ? 'In a call: ' + people.join(', ') : '';
+  }
+  callButtonsChanged();
+}
+// The header's button and the timeline's Join say what pressing them would
+// do now: start a call, join one, or, for the call this page is in, nothing
+// more than bring it up.
+function callButtonsChanged() {
+  var mine = window.dangoCall ? window.dangoCall.room() : '';
+  var starts = document.querySelectorAll('[data-call-start]');
+  for (var i = 0; i < starts.length; i++) {
+    var b = starts[i];
+    var url = b.getAttribute('data-call-start');
+    b.classList.toggle('joined', url === mine);
+    var people = callPeople[url];
+    // Until the stream says otherwise, the button is as the page drew it.
+    if (people === undefined && url !== mine) continue;
+    people = people || [];
+    var label = url === mine ? 'You are in this call: show it full page' : people.length ? 'Join the call (' + people.join(', ') + ')' : 'Start a call';
+    b.classList.toggle('live', people.length > 0);
+    b.title = label;
+    b.setAttribute('aria-label', label);
+    var count = b.querySelector('[data-call-count]');
+    if (count) count.textContent = people.length ? String(people.length) : '';
+  }
+  var joins = document.querySelectorAll('[data-call-join]');
+  for (var j = 0; j < joins.length; j++) {
+    var here = joins[j].getAttribute('data-call-join') === mine;
+    joins[j].disabled = here;
+    joins[j].textContent = here ? 'You are in it' : 'Join';
+  }
+}
+function withCallScript(then) {
+  if (window.dangoCall) { then(window.dangoCall); return; }
+  var f = frame();
+  var src = f ? f.app.getAttribute('data-call-script') : '';
+  if (!src) return;
+  var s = document.createElement('script');
+  s.src = src;
+  s.onload = function () { if (window.dangoCall) then(window.dangoCall); };
+  s.onerror = function () { window.alert('The call could not start: its script did not load.'); };
+  document.head.appendChild(s);
+}
+document.addEventListener('click', function (e) {
+  var b = closestOf(e.target, '[data-call-start], [data-call-join]');
+  if (!b || b.disabled) return;
+  e.preventDefault();
+  var url = b.getAttribute('data-call-start') || b.getAttribute('data-call-join');
+  var title = b.getAttribute('data-call-title') || url;
+  withCallScript(function (call) { call.join(url, title); });
 });
 `;
 
