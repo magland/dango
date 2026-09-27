@@ -9,6 +9,7 @@ import { afterEach, test } from 'node:test';
 import { AuthResult, addUserToken } from '../../mochiforge/src/vault';
 import { THEMES } from '../../mochiforge/src/themes';
 import { appIconPng } from '../src/appicon';
+import { DANGO_COLORS } from '../src/logo';
 import { createChannel } from '../src/channels';
 import { openDm } from '../src/dms';
 import { addMessage } from '../src/messages';
@@ -390,5 +391,6 @@ test('the app icon is a PNG of the requested size in the theme’s colours', () 
   const px = (x: number, y: number) => [...rows.subarray(y * (64 * 4 + 1) + 1 + x * 4, y * (64 * 4 + 1) + 1 + x * 4 + 3)];
   const hex = (rgb: number[]) => '#' + rgb.map((v) => v.toString(16).padStart(2, '0')).join('');
   assert.strictEqual(hex(px(0, 0)), theme.vars.surface.toLowerCase(), 'the corner is the ground');
-  assert.strictEqual(hex(px(32, 32)), theme.vars.surface.toLowerCase(), 'the middle dango is hollow');
+  assert.strictEqual(hex(px(34, 29)), DANGO_COLORS.white, 'the middle dango is white');
+  assert.strictEqual(hex(px(41, 22)), DANGO_COLORS.pink, 'the top dango is pink');
 });

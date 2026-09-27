@@ -1,5 +1,6 @@
 import { deflateSync } from 'zlib';
 import { Theme, activeTheme } from '../../mochiforge/src/themes';
+import { DANGO, DANGO_COLORS, DANGO_R, OUTLINE, STICK } from './logo';
 
 // The mark as PNG, for the places SVG is not taken: the home-screen icon on
 // iPhone and iPad (apple-touch-icon), the installed app's icon on Android and
@@ -7,36 +8,27 @@ import { Theme, activeTheme } from '../../mochiforge/src/themes';
 //
 // The mark is three circles and a stroke, so it is drawn here directly rather
 // than by an SVG renderer: each pixel is sampled sixteen times against the
-// same geometry logo.ts writes as SVG, in the same 64-unit square, and the
-// samples averaged for the edges. The result is encoded as an ordinary PNG
+// geometry logo.ts exports, in the same 64-unit square, and the samples'
+// colours averaged for the edges. The result is encoded as an ordinary PNG
 // with zlib from Node itself.
 
-const LINE = { x1: 14, y1: 50, x2: 50, y2: 14, r: 3 };
-const CIRCLES = [
-  [22, 42],
-  [32, 32],
-  [42, 22],
-];
-/** The circles' ring: stroke width 6 centred on radius 9. */
-const RING_IN = 6;
-const RING_OUT = 12;
-
-type Ink = 'ground' | 'mark';
+type Ink = 'ground' | 'line' | 'green' | 'white' | 'pink';
+const FILLS: Ink[] = ['green', 'white', 'pink'];
 
 function segmentDistance(px: number, py: number): number {
-  const dx = LINE.x2 - LINE.x1;
-  const dy = LINE.y2 - LINE.y1;
-  const t = Math.max(0, Math.min(1, ((px - LINE.x1) * dx + (py - LINE.y1) * dy) / (dx * dx + dy * dy)));
-  return Math.hypot(px - (LINE.x1 + t * dx), py - (LINE.y1 + t * dy));
+  const dx = STICK.x2 - STICK.x1;
+  const dy = STICK.y2 - STICK.y1;
+  const t = Math.max(0, Math.min(1, ((px - STICK.x1) * dx + (py - STICK.y1) * dy) / (dx * dx + dy * dy)));
+  return Math.hypot(px - (STICK.x1 + t * dx), py - (STICK.y1 + t * dy));
 }
 
-/** What the mark paints at a point, in paint order: the stick, then each dango over it. */
+/** What the mark paints at a point, in paint order: the stick, then each dango over it, bottom first. */
 function inkAt(x: number, y: number): Ink {
-  let ink: Ink = segmentDistance(x, y) <= LINE.r ? 'mark' : 'ground';
-  for (const [cx, cy] of CIRCLES) {
-    const d = Math.hypot(x - cx, y - cy);
-    if (d <= RING_OUT) ink = d >= RING_IN ? 'mark' : 'ground';
-  }
+  let ink: Ink = segmentDistance(x, y) <= STICK.width / 2 ? 'line' : 'ground';
+  DANGO.forEach((d, i) => {
+    const r = Math.hypot(x - d.cx, y - d.cy);
+    if (r <= DANGO_R + OUTLINE / 2) ink = r >= DANGO_R - OUTLINE / 2 ? 'line' : FILLS[i];
+  });
   return ink;
 }
 
@@ -91,24 +83,24 @@ export function encodePng(width: number, height: number, rgba: Buffer): Buffer {
 
 /**
  * Draw the mark into a size-by-size image. `scale` is how much of the square
- * the mark keeps around its centre; `ground` and `mark` are RGBA.
+ * the mark keeps around its centre; `inks` gives each ink's RGBA.
  */
-function draw(size: number, scale: number, ground: number[], mark: number[]): Buffer {
+function draw(size: number, scale: number, inks: Record<Ink, number[]>): Buffer {
   const out = Buffer.alloc(size * size * 4);
   const S = 4;
   for (let py = 0; py < size; py++) {
     for (let px = 0; px < size; px++) {
-      let hits = 0;
+      const sum = [0, 0, 0, 0];
       for (let sy = 0; sy < S; sy++) {
         for (let sx = 0; sx < S; sx++) {
           const u = ((px + (sx + 0.5) / S) / size) * 64;
           const v = ((py + (sy + 0.5) / S) / size) * 64;
-          if (inkAt(32 + (u - 32) / scale, 32 + (v - 32) / scale) === 'mark') hits++;
+          const rgba = inks[inkAt(32 + (u - 32) / scale, 32 + (v - 32) / scale)];
+          for (let c = 0; c < 4; c++) sum[c] += rgba[c];
         }
       }
-      const a = hits / (S * S);
       const o = (py * size + px) * 4;
-      for (let c = 0; c < 4; c++) out[o + c] = Math.round(ground[c] * (1 - a) + mark[c] * a);
+      for (let c = 0; c < 4; c++) out[o + c] = Math.round(sum[c] / (S * S));
     }
   }
   return out;
@@ -127,9 +119,18 @@ export function appIconPng(size: number, theme: Theme = activeTheme()): Buffer {
   const key = `icon:${theme.name}:${size}`;
   let png = made.get(key);
   if (!png) {
-    const ground = [...parseColor(theme.vars.surface, [255, 255, 255]), 255];
-    const ink = [...parseColor(theme.vars.fg, [0, 0, 0]), 255];
-    png = encodePng(size, size, draw(size, 0.78, ground, ink));
+    const fill = (css: string) => [...parseColor(css, [255, 255, 255]), 255];
+    png = encodePng(
+      size,
+      size,
+      draw(size, 0.78, {
+        ground: fill(theme.vars.surface),
+        line: [...parseColor(theme.vars.fg, [0, 0, 0]), 255],
+        green: fill(DANGO_COLORS.green),
+        white: fill(DANGO_COLORS.white),
+        pink: fill(DANGO_COLORS.pink),
+      }),
+    );
     made.set(key, png);
   }
   return png;
@@ -137,14 +138,16 @@ export function appIconPng(size: number, theme: Theme = activeTheme()): Buffer {
 
 /**
  * The badge: the small monochrome icon Android shows in the status bar for a
- * notification. Only its alpha is used, so it is the mark in white on
- * transparent, drawn larger since it is shown at 24 pixels.
+ * notification. Only its alpha is used, so it is the mark's line in white on
+ * transparent, the dango left hollow, drawn larger since it is shown at 24
+ * pixels.
  */
 export function badgePng(size = 96): Buffer {
   const key = `badge:${size}`;
   let png = made.get(key);
   if (!png) {
-    png = encodePng(size, size, draw(size, 1.3, [255, 255, 255, 0], [255, 255, 255, 255]));
+    const clear = [255, 255, 255, 0];
+    png = encodePng(size, size, draw(size, 1.3, { ground: clear, line: [255, 255, 255, 255], green: clear, white: clear, pink: clear }));
     made.set(key, png);
   }
   return png;
