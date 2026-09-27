@@ -83,7 +83,14 @@ export function createApp(root: string) {
   // history to keep up with.
   app.set('query parser', 'simple');
   const config = loadConfig(root);
-  app.set('trust proxy', config.network.trustProxy);
+  // One hop, not `true`: with `true`, req.ip is the leftmost address in
+  // X-Forwarded-For, which is whatever the client wrote there when the proxy
+  // appends to the header rather than replacing it, and every per-address
+  // limit (sign-in attempts first) would then be the client's to choose. One
+  // hop is the address the proxy itself saw, the last in the list, which is
+  // right for a proxy that appends (Fly's, nginx's) and one that replaces
+  // (Caddy's), the two arrangements docs/deploying.md describes.
+  app.set('trust proxy', config.network.trustProxy ? 1 : false);
 
   app.use(compression({ filter: isCompressible }));
 

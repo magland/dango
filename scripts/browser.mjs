@@ -618,6 +618,18 @@ ok('following a link to a room shows it in place, without reloading the page');
 await api(bob, 'POST', '/channels/random/messages', { body: 'live after moving' });
 await waitFor('a message to arrive live in the room moved to', async () => (await nav.eval("document.getElementById('msg-list').textContent")).includes('live after moving'));
 ok('the room moved to streams its messages live');
+// A stream that drops is opened again, and what changed while it was down
+// (an edit to a message already shown, and a new one) reaches the page.
+const beforeDrop = (await api(bob, 'GET', '/channels/random/messages?limit=1')).messages[0];
+await nav.eval('roomStream.close(); roomStream.onerror(); true');
+await api(bob, 'PATCH', `/channels/random/messages/${beforeDrop.id}`, { body: 'edited while the stream was down' });
+await api(bob, 'POST', '/channels/random/messages', { body: 'sent while the stream was down' });
+await waitFor('the edit and the new message to reach the page', async () => {
+  const text = await nav.eval("document.getElementById('msg-list').textContent");
+  return text.includes('edited while the stream was down') && text.includes('sent while the stream was down');
+}, 10000);
+if (!(await nav.eval('window.stillHere === true'))) fail('catching up after a drop reloaded the page');
+ok('a stream opened again after a drop repaints what was edited meanwhile, and adds what was sent');
 await nav.eval('history.back(); true');
 await waitFor('the back button to bring #general back', async () => (await nav.eval("location.pathname + '|' + document.querySelector('.room-head h1').textContent")) === '/c/general|#general');
 if (!(await nav.eval('window.stillHere === true'))) fail('the back button reloaded the page');

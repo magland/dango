@@ -468,7 +468,7 @@ function messageItems(root: string, room: Room, messages: Message[], viewer: Vie
 function messageList(root: string, room: Room, messages: Message[], viewer: Viewer, readUpTo?: number): Html {
   const items = messageItems(root, room, messages, viewer, readUpTo);
   const last = messages.length ? messages[messages.length - 1].id : 0;
-  return html`<div class="msgs"><ul id="msg-list" data-stream="${room.url}/events" data-last="${last}">${joinHtml(items)}</ul></div>${JUMP_NEWEST}`;
+  return html`<div class="msgs"><ul id="msg-list" data-stream="${room.url}/events" data-last="${last}" data-at="${String(Date.now())}">${joinHtml(items)}</ul></div>${JUMP_NEWEST}`;
 }
 
 const JUMP_NEWEST = html`<div class="jump-newest-wrap"><button class="jump-newest" type="button" data-jump-newest hidden>Jump to newest ${raw(
@@ -553,7 +553,7 @@ export function threadPage(root: string, room: Room, anchor: Message, replies: M
   const anchorHtml = html`<ul class="thread-anchor" style="list-style:none;margin:0;padding:0">${dayRule(anchor.created)}${messageHtml(root, parent, anchor, viewer)}</ul>`;
   const items = messageItems(root, room, replies, viewer, undefined, anchor.created.slice(0, 10));
   const last = replies.length ? replies[replies.length - 1].id : 0;
-  const list = html`<div class="msgs">${anchorHtml}<ul id="msg-list" data-stream="${room.url}/events" data-last="${last}">${joinHtml(items)}</ul></div>${JUMP_NEWEST}`;
+  const list = html`<div class="msgs">${anchorHtml}<ul id="msg-list" data-stream="${room.url}/events" data-last="${last}" data-at="${String(Date.now())}">${joinHtml(items)}</ul></div>${JUMP_NEWEST}`;
   const main = html`${head}${list}${composer(room, viewer, 'Reply in thread')}`;
   return layout(`Thread in ${parent.title}`, main, { viewer, root, active: parent.url });
 }

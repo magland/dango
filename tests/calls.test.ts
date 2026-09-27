@@ -246,6 +246,17 @@ test('a page can join only as the person whose page it is, and a call holds at m
   assert.throws(() => joinCall(root, room, 'alice', a.id), /full/);
 });
 
+test('one person holds at most two of a call’s places, however many pages they have', () => {
+  const { root, room } = workspace();
+  const [a1, a2, a3] = [open('alice', 301), open('alice', 302), open('alice', 303)];
+  joinCall(root, room, 'alice', a1.id);
+  joinCall(root, room, 'alice', a2.id);
+  assert.throws(() => joinCall(root, room, 'alice', a3.id), /2 other pages/);
+  joinCall(root, room, 'alice', a2.id);
+  leaveCall(room.url, a1.id);
+  joinCall(root, room, 'alice', a3.id);
+});
+
 test('a page’s id stays its person’s after its stream closes, so nobody else can take it', () => {
   const { root, room } = workspace();
   const a = open('alice', 1);

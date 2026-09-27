@@ -43,6 +43,8 @@ import {
   MAX_ATTACHMENTS,
   MAX_ATTACHMENTS_BYTES,
   MAX_FILE_NAME_BYTES,
+  changedSince,
+  countAfter,
   isValidNonce,
   lastMessageId,
   readMessage,
@@ -699,6 +701,8 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
   };
 
   const BASES = ['/c/:channel', '/d/:dm'];
+  /** The most a stream catches up with; a page further behind is loaded again. */
+  const CATCH_UP = 200;
   const ROOM_PATHS = (suffix: string) => BASES.flatMap((b) => [`${b}${suffix}`, `${b}/t/:tid${suffix}`]);
 
   // Rendering a room is reading it: the viewer's marker moves to the newest
@@ -789,21 +793,31 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     );
   });
 
-  // The event stream: catch up from ?after, then live.
+  // The event stream: catch up from ?after, then live. A page opening its
+  // stream again after losing it also says ?since, the time its last stream
+  // was caught up (see serveEvents), and is sent the messages it already
+  // shows that changed after that, less a margin for the time between reading
+  // a message and saying so.
   app.get(ROOM_PATHS('/events'), (req, res) =>
     withRoom(req, res, (viewer, room) => {
-      const after = parseInt(String(req.query.after ?? '0'), 10);
-      const catchUp: RoomEvent[] = readMessages(room.dir, {
-        after: Number.isInteger(after) && after >= 0 ? after : 0,
-        limit: 200,
-      }).map((m) => ({ type: 'message' as const, message: m }));
+      const rawAfter = parseInt(String(req.query.after ?? '0'), 10);
+      const after = Number.isInteger(rawAfter) && rawAfter >= 0 ? rawAfter : 0;
+      const since = parseInt(String(req.query.since ?? ''), 10);
+      let catchUp: RoomEvent[] | 'reload' = 'reload';
+      if (after === 0 || countAfter(room.dir, after) <= CATCH_UP) {
+        const changed = Number.isInteger(since) && since > 0 && after > 0 ? changedSince(room.dir, after, since - 2000, CATCH_UP) : [];
+        catchUp = [
+          ...changed.map((m) => ({ type: 'update' as const, message: m })),
+          ...readMessages(room.dir, { after, limit: CATCH_UP }).map((m) => ({ type: 'message' as const, message: m })),
+        ];
+      }
       // Whether this viewer may still read the room, asked afresh: the same
       // session, still valid, and the same room still resolving for it.
       const allowed = () => {
         const now = getViewer(req, root);
         return now !== null && now.auth.username === viewer.auth.username && resolveRoom(req, now)?.dir === room.dir;
       };
-      serveEvents(res, room.url, catchUp, (ev) => views.messageHtml(root, room, ev.message, viewer).text, allowed);
+      serveEvents(res, viewer.auth.username, room.url, catchUp, (ev) => views.messageHtml(root, room, ev.message, viewer).text, allowed);
     })
   );
 

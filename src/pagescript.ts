@@ -310,11 +310,24 @@ function openStream(list) {
   var url = list.getAttribute('data-stream');
   if (!url || !window.EventSource || !list.isConnected) return;
   var after = list.getAttribute('data-last') || '0';
-  var es = new EventSource(url + '?after=' + encodeURIComponent(after));
+  var since = list.getAttribute('data-at') || '';
+  var es = new EventSource(url + '?after=' + encodeURIComponent(after) + '&since=' + encodeURIComponent(since));
   roomStream = es;
   es.onmessage = function (ev) {
     var msg;
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    // Caught up: the time is what the next stream asks for changes since.
+    if (msg.type === 'synced') {
+      list.setAttribute('data-at', String(msg.at));
+      streamRetry.room = 0;
+      return;
+    }
+    // Further behind than a stream catches up with, after a long sleep say.
+    if (msg.type === 'reload') {
+      es.close();
+      if (roomStream === es) { roomStream = null; reloadPage(); }
+      return;
+    }
     var existing = document.getElementById('msg-' + msg.id);
     var pane = scrollPane();
     var follow = pane ? nearBottom(pane) : false;
@@ -339,19 +352,48 @@ function openStream(list) {
       if (attended()) markReadHere(msg.id);
     }
   };
-  // The browser retries a dropped stream by itself, but gives up for good
-  // when a retry is answered with an error status, which is what a proxy says
-  // while the server restarts for a deploy. So a stream the browser has closed
-  // is reopened here, after a pause, from the newest message on the page:
-  // the server replays everything after it, and anything already shown is
-  // replaced rather than repeated.
+  // A dropped stream is reopened here rather than by the browser, which
+  // would ask again with the address it first had, and gives up for good
+  // when a retry is answered with an error status (what a proxy says while
+  // the server restarts for a deploy). The new stream asks from the newest
+  // message on the page, and for what changed since the last one caught up,
+  // so an edit, a reaction, or a deletion made meanwhile is repainted too.
   es.onerror = function () {
+    es.close();
     var items = list.querySelectorAll('[data-mid]');
     if (items.length) list.setAttribute('data-last', items[items.length - 1].getAttribute('data-mid'));
-    if (es.readyState === 2 && roomStream === es) {
-      setTimeout(function () { if (roomStream === es) openStream(list); }, 5000);
-    }
+    if (roomStream === es) retryStream('room', function () { if (roomStream === es) openStream(list); });
   };
+}
+
+// How long each stream waits before trying again: two seconds, doubling to
+// a minute while it keeps failing, back to the start once one connects. A
+// page that is signed out stops trying and says so, rather than asking every
+// few seconds for as long as it is left open.
+var streamRetry = { room: 0, user: 0 };
+var signedOutShown = false;
+function retryStream(which, reopen) {
+  var wait = streamRetry[which] = Math.min(60000, streamRetry[which] ? streamRetry[which] * 2 : 2000);
+  setTimeout(function () {
+    if (signedOutShown) return;
+    fetch('/assets/users.json', { credentials: 'same-origin' }).then(function (r) {
+      if (r.status === 401) showSignedOut();
+      else reopen();
+    }, reopen);
+  }, wait);
+}
+function showSignedOut() {
+  if (signedOutShown) return;
+  signedOutShown = true;
+  var box = document.createElement('div');
+  box.className = 'signed-out';
+  box.setAttribute('role', 'alert');
+  box.appendChild(document.createTextNode('You are signed out, so nothing new will appear here. '));
+  var a = document.createElement('a');
+  a.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+  a.textContent = 'Sign in again';
+  box.appendChild(a);
+  document.body.appendChild(box);
 }
 
 // ---- unread counts ----
@@ -472,6 +514,7 @@ function openUserStream() {
   if (!f || !window.EventSource) return;
   var es = new EventSource('/events?client=' + clientId);
   es.onopen = function () {
+    streamRetry.user = 0;
     if (window.dangoCall) window.dangoCall.streamOpened();
   };
   es.onmessage = function (ev) {
@@ -487,7 +530,8 @@ function openUserStream() {
     setCount(msg.url, msg.count, msg.mentions);
   };
   es.onerror = function () {
-    if (es.readyState === 2) setTimeout(openUserStream, 5000);
+    es.close();
+    retryStream('user', openUserStream);
   };
 }
 document.addEventListener('DOMContentLoaded', function () {
@@ -1375,7 +1419,11 @@ function showPage(request, hash, opts) {
       // error from before the frame, say) is shown as the browser would have
       // shown it, rather than fetched again: the address a form posts to may
       // be one only a POST answers, and the form has already done its work.
-      if (opts.form && !page.redirected) { document.open(); document.write(page.text); document.close(); }
+      // Except while a call is on: writing a page over this one would leave
+      // the call's camera and microphone running with nothing on screen to
+      // end it, so what the answer says is shown over the page instead.
+      if (opts.form && !page.redirected && window.dangoCall && window.dangoCall.active()) window.alert(pageMessage(page.text));
+      else if (opts.form && !page.redirected) { document.open(); document.write(page.text); document.close(); }
       else location.assign(page.url);
       return;
     }
@@ -1399,6 +1447,12 @@ function showPage(request, hash, opts) {
     if (!opts.form) location.assign(opts.href);
     else window.alert('That did not work: the connection to the workspace failed.');
   });
+}
+// The sentence an error page says, for showing it without the page.
+function pageMessage(text) {
+  var d = new DOMParser().parseFromString(text, 'text/html');
+  var p = d.querySelector('main p, .doc p, body p');
+  return p && p.textContent ? p.textContent : 'That did not work; try again in a moment.';
 }
 function swapIn(text) {
   var next = new DOMParser().parseFromString(text, 'text/html');

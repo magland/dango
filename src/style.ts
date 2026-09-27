@@ -174,6 +174,14 @@ const CHAT_CSS = `
 .jump-newest:hover { background: var(--surface-hover); }
 .msg-edited { font-size: var(--t-xs); color: var(--fg-subtle); }
 
+/* Over the top of the page once its streams find it signed out. */
+.signed-out {
+  position: fixed; top: var(--s2); left: 50%; transform: translateX(-50%); z-index: 100;
+  max-width: calc(100vw - 32px); padding: var(--s2) var(--s3);
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); color: var(--fg);
+  font-size: var(--t-sm); box-shadow: 0 4px 12px var(--shadow);
+}
+
 /* The tools sit in a small bordered strip that appears on hover, the shape a
    control always has in this vocabulary. */
 .msg-tools {

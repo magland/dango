@@ -157,6 +157,35 @@ export function watchClients(fn: (clientId: string, open: boolean) => void): voi
   clientWatchers.push(fn);
 }
 
+/**
+ * How many event streams one person may hold open at once, across every tab
+ * and device: two a page (the room's and their own), so this is some twenty
+ * pages. Each open stream costs the server a connection and a render of every
+ * message in its room, and a host has a limited number of connections (Fly's
+ * is a thousand), so one person scripting streams could otherwise shut
+ * everyone else out. A stream past the limit is refused, and the page tries
+ * again later (see retryStream in the page script).
+ */
+export const MAX_STREAMS_PER_PERSON = 40;
+const streamsOf = new Map<string, number>();
+
+/** Hold one of a person's streams, or answer 429 and say false when they hold their limit. */
+function admit(res: Response, username: string): boolean {
+  const n = streamsOf.get(username) ?? 0;
+  if (n >= MAX_STREAMS_PER_PERSON) {
+    res.status(429).setHeader('Retry-After', '60');
+    res.end();
+    return false;
+  }
+  streamsOf.set(username, n + 1);
+  res.on('close', () => {
+    const left = (streamsOf.get(username) ?? 1) - 1;
+    if (left > 0) streamsOf.set(username, left);
+    else streamsOf.delete(username);
+  });
+  return true;
+}
+
 function openStream(res: Response): {
   write: (id: string, payload: unknown) => void;
   close: (fn: () => void) => void;
@@ -199,12 +228,21 @@ function openStream(res: Response): {
  */
 export function serveEvents(
   res: Response,
+  username: string,
   roomUrl: string,
-  catchUp: RoomEvent[],
+  catchUp: RoomEvent[] | 'reload',
   render: (event: RoomEvent) => string,
   allowed: () => boolean
 ): void {
+  if (!admit(res, username)) return;
   const stream = openStream(res);
+  // More was missed than a catch-up carries: the page is told to load
+  // itself again rather than shown the newest few with a gap above them.
+  if (catchUp === 'reload') {
+    stream.write('0', { type: 'reload' });
+    stream.end();
+    return;
+  }
   const send = (event: RoomEvent) => {
     if (!allowed()) {
       stream.end();
@@ -222,6 +260,10 @@ export function serveEvents(
   // message seen both ways renders once.
   for (const event of catchUp) send(event);
   stream.close(subscribe(roomUrl, send));
+  // Everything up to now is on the page. The page keeps this time and gives
+  // it back when it opens its stream again, as the point from which changes
+  // to messages it already shows are to be repainted.
+  stream.write('0', { type: 'synced', at: Date.now() });
 }
 
 /**
@@ -231,6 +273,7 @@ export function serveEvents(
  * its stream again (after a drop) replaces its own earlier one.
  */
 export function serveUserEvents(res: Response, username: string, allowed: () => boolean, clientId?: string): void {
+  if (!admit(res, username)) return;
   const stream = openStream(res);
   // Asked again before every event, as a room's stream is (see serveEvents):
   // a person removed, or whose tokens were revoked, stops hearing at once.

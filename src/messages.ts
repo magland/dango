@@ -207,6 +207,35 @@ export function readMessages(
   return out;
 }
 
+/** How many messages came after this one. */
+export function countAfter(room: string, after: number): number {
+  return messageIds(room).filter((n) => n > after).length;
+}
+
+/**
+ * Among the newest `limit` messages up to `upTo`, those changed after
+ * `sinceMs`: edited, reacted to, deleted, pinned, or replied to (a reply
+ * changes its thread's directory, not the message's own file). What a page
+ * that lost its stream for a while needs repainted, beside what is new.
+ */
+export function changedSince(room: string, upTo: number, sinceMs: number, limit = 200): Message[] {
+  const out: Message[] = [];
+  for (const id of messageIds(room).filter((n) => n <= upTo).slice(-limit)) {
+    let changed = 0;
+    for (const f of [messageFile(room, id), messagesDir(threadRoomDir(room, id))]) {
+      try {
+        changed = Math.max(changed, fs.statSync(f).mtimeMs);
+      } catch {
+        // No thread, or a file gone since the listing.
+      }
+    }
+    if (changed <= sinceMs) continue;
+    const m = readMessage(room, id);
+    if (m) out.push(m);
+  }
+  return out;
+}
+
 /** The id of the newest message, or 0 in an empty room. */
 export function lastMessageId(room: string): number {
   const ids = messageIds(room);

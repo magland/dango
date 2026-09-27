@@ -39,6 +39,13 @@ import { Room, channelRoom, dmRoom } from './rooms';
  * server, which is what this design does without.
  */
 export const MAX_IN_CALL = 8;
+/**
+ * How many of the places in one call a person may hold: a call connects
+ * pages, and someone on a laptop and a phone at once is two, but without a
+ * bound one person with eight tabs would fill a call and keep everyone else
+ * out of it.
+ */
+export const MAX_PAGES_PER_PERSON = 2;
 
 /**
  * How long a page whose event stream closed stays in its call, waiting for it
@@ -152,6 +159,9 @@ export function joinCall(root: string, room: Room, user: string, peer: string, r
   if (held && held.user !== user) throw new OpError('That page is someone else’s.', 'conflict');
   if (call && !held && call.participants.size >= MAX_IN_CALL) {
     throw new OpError(`The call is full: up to ${MAX_IN_CALL} can be in a call at once.`, 'conflict');
+  }
+  if (call && !held && [...call.participants.values()].filter((p) => p.user === user).length >= MAX_PAGES_PER_PERSON) {
+    throw new OpError(`You are already in this call from ${MAX_PAGES_PER_PERSON} other pages; leave it on one of them first.`, 'conflict');
   }
   let entry: Message | null = null;
   if (!call) {

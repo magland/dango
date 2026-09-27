@@ -9,7 +9,7 @@ import { parseReport } from '../src/calllog';
 import { createChannel, readChannel } from '../src/channels';
 import { loadConfig, moveTurnSecrets } from '../src/config';
 import { openDm, readDm } from '../src/dms';
-import { MAX_ATTACHMENTS, addMessage, readMessage, readMessages, toggleReaction } from '../src/messages';
+import { MAX_ATTACHMENTS, addMessage, changedSince, countAfter, editMessage, readMessage, readMessages, toggleReaction } from '../src/messages';
 import { forgetRoom, readPrefs, setMuted } from '../src/notify';
 import { postMessage } from '../src/post';
 import { markRead, readMarkers } from '../src/reads';
@@ -132,4 +132,19 @@ test('a deleted room is forgotten in everyone’s markers and mutes', () => {
   forgetRoom(root, '/c/bar');
   assert.deepStrictEqual(readMarkers(root, 'bob'), { 'c/barn': 5 });
   assert.deepStrictEqual(readPrefs(root, 'bob').muted, ['c/barn']);
+});
+
+test('a page that lost its stream is told what changed meanwhile, and how far behind it is', () => {
+  const room = tmp();
+  const ids = [1, 2, 3, 4].map((i) => addMessage(room, { author: 'alice', body: `m${i}` }).id);
+  assert.strictEqual(countAfter(room, 1), 3);
+  const old = Date.now() - 60000;
+  for (const id of ids) fs.utimesSync(path.join(room, 'messages', `${id}.md`), old / 1000, old / 1000);
+  const since = Date.now() - 30000;
+  assert.deepStrictEqual(changedSince(room, 4, since), []);
+  editMessage(room, 2, 'edited');
+  toggleReaction(room, 3, '👍', 'bob');
+  addMessage(path.join(room, 'threads', '1'), { author: 'bob', body: 'a reply' });
+  assert.deepStrictEqual(changedSince(room, 4, since).map((m) => m.id), [1, 2, 3]);
+  assert.deepStrictEqual(changedSince(room, 2, since).map((m) => m.id), [1, 2], 'only what the page already has');
 });
