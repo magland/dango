@@ -259,6 +259,46 @@ curl -s -b "$JAR" "$BASE/assets/users.json" | grep_all -q '"name":"bob"' || fail
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/assets/users.json")" = "401" ] || fail "users.json answered an anonymous request"
 ok "the member list for @-completion, signed-in only"
 
+# ---- what losing access takes away ----
+
+DANA="$(api "$OWNER" POST /users '{"username":"dana"}' | jget token)"
+api "$OWNER" POST /channels/secret/members '{"user":"dana"}' >/dev/null
+DMC="$(api "$ALICE" POST /dms '{"users":["dana"]}' | jget id)"
+api "$ALICE" POST "/dms/$DMC/messages" '{"body":"for the first dana"}' >/dev/null
+DJAR="$TMP/dana.jar"
+curl -s -c "$DJAR" -o /dev/null -d "token=$DANA" "$BASE/login"
+curl -s -b "$DJAR" -o /dev/null "$BASE/d/$DMC"
+( curl -s -N -b "$DJAR" --max-time 4 "$BASE/c/secret/events?after=999999" > "$TMP/dana-events.txt" || true ) &
+STREAM=$!
+sleep 1
+api "$OWNER" DELETE /channels/secret/members/dana >/dev/null
+api "$ALICE" POST /channels/secret/messages '{"body":"after dana left"}' >/dev/null
+wait "$STREAM"
+grep -q "after dana left" "$TMP/dana-events.txt" && fail "a stream opened before its viewer was removed from the channel went on delivering"
+ok "an open stream stops when its viewer loses the room"
+api "$OWNER" POST /channels/secret/members '{"user":"dana"}' >/dev/null
+[ -f "$WS/users/dana/read.json" ] || fail "dana has no read markers to be forgotten"
+api "$OWNER" DELETE /users/dana >/dev/null
+[ -e "$WS/users/dana" ] && fail "removing a user left users/dana behind"
+DANA2="$(api "$OWNER" POST /users '{"username":"dana"}' | jget token)"
+[ "$(status "$DANA2" GET /channels/secret)" = "404" ] || fail "a new user given a removed user's name inherited a private channel"
+[ "$(status "$DANA2" GET "/dms/$DMC/messages")" = "404" ] || fail "a new user given a removed user's name inherited a conversation"
+[ "$(api "$DANA2" GET /dms | jget dms.length)" = "0" ] || fail "a new user given a removed user's name was listed a conversation"
+api "$ALICE" GET /dms | grep_all -q '"former":\["dana"\]' || fail "the conversation does not remember dana as a former participant"
+[ "$(api "$ALICE" POST /dms '{"users":["dana"]}' | jget id)" != "$DMC" ] || fail "a new conversation with the new dana reused the old one"
+ok "removing a user takes them out of every room, so their name can be given again"
+
+[ "$(curl -s -b "$JAR" -o /dev/null -w '%{redirect_url}' "$BASE/login?next=/%5Cevil.example")" = "$BASE/" ] || fail "a signed-in visitor was sent off the site by next="
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H 'origin: https://evil.example' -d "token=$ALICE" "$BASE/login")" = "403" ] || fail "a sign-in posted from another site was accepted"
+ok "sign-in neither redirects off the site nor accepts a post from another"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -F "body=x" -F "files=@$TMP/note.txt" "$BASE/c/general/messages")" = "303" ] || fail "an anonymous upload was not sent to sign in"
+ok "an anonymous form is refused before its body is read"
+api "$BOB" POST /channels/general/messages '{"body":"is it read?"}' >/dev/null
+curl -s -b "$JAR" -o /dev/null -H 'sec-fetch-dest: image' "$BASE/c/general"
+[ "$(api "$ALICE" GET /unread | jget rooms.length)" = "1" ] || fail "a room page loaded as an image marked the room read"
+curl -s -b "$JAR" -o /dev/null "$BASE/c/general"
+ok "a room loaded as an image is not marked read"
+
 # ---- invite links ----
 
 INVITE="$("${DANGO[@]}" user add carol --json | jget invite)"

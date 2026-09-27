@@ -43,7 +43,7 @@ function page(username: string, id: string) {
       if (ev === 'close') closers.push(fn);
     },
   } as unknown as Response;
-  serveUserEvents(res, username, id);
+  serveUserEvents(res, username, () => true, id);
   return {
     id,
     events,

@@ -59,8 +59,9 @@ export interface ConnectionReport {
 const KIND = /^(?:host|srflx|prflx|relay)$/;
 const PROTO = /^(?:udp|tcp|tls)$/;
 
+/** A page's text, shortened, and with control characters (a newline most of all) made spaces, since it is written to the server's log a line at a time. */
 function clip(v: unknown, n: number): string {
-  return typeof v === 'string' ? v.slice(0, n) : '';
+  return typeof v === 'string' ? v.slice(0, n).replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ') : '';
 }
 
 /** What a page sent, reduced to the report's shape, or null when it is not one. */

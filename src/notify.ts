@@ -10,8 +10,8 @@ import { Message, readMessage, readMessages } from './messages';
 import { canSeeChannel, canSeeDm } from './perms';
 import { PushTarget, isPushEndpoint, sendPush } from './push';
 import { Room } from './rooms';
-import { audienceOf, mentionsUser, readKey, readMarkers, unreadRooms } from './reads';
-import { userDir } from './workspace';
+import { audienceOf, forgetMarkers, isKeyOf, mentionsUser, readKey, readMarkers, unreadRooms } from './reads';
+import { isValidWorkspaceUserName, userDir, usersDir } from './workspace';
 
 // Notifications: who is told about a message when they have no page open to
 // see it arrive, and on which of their devices.
@@ -172,6 +172,27 @@ export function setMuted(root: string, username: string, roomUrl: string, muted:
     ...p,
     muted: muted ? [...p.muted.filter((k) => k !== key), key] : p.muted.filter((k) => k !== key),
   }));
+}
+
+/**
+ * Forget a deleted room in everyone's state: where each person had read to,
+ * and whether they had muted it. A channel made later under the same name
+ * is a new room and starts as one.
+ */
+export function forgetRoom(root: string, roomUrl: string): void {
+  let names: string[];
+  try {
+    names = fs.readdirSync(usersDir(root));
+  } catch {
+    return;
+  }
+  for (const username of names) {
+    if (!isValidWorkspaceUserName(username)) continue;
+    forgetMarkers(root, username, roomUrl);
+    if (readPrefs(root, username).muted.some((k) => isKeyOf(k, roomUrl))) {
+      updatePrefs(root, username, (p) => ({ ...p, muted: p.muted.filter((k) => !isKeyOf(k, roomUrl)) }));
+    }
+  }
 }
 
 export function isMuted(prefs: NotifyPrefs, roomUrl: string): boolean {

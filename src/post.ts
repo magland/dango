@@ -1,6 +1,6 @@
 import { loadVault } from '../../mochiforge/src/vault';
 import { listeningUsers, publish, publishToUser } from './events';
-import { Attachment, CallRecord, Message, addMessage, findByNonce, readMessage } from './messages';
+import { Attachment, CallRecord, Message, addMessage, findByNonce, readMessage, unsendMessage } from './messages';
 import { queueNotifications } from './notify';
 import { Room } from './rooms';
 import { audienceOf, isNewsFor, markRead, unreadIn } from './reads';
@@ -33,7 +33,15 @@ export function postMessage(
   }
   opts.charge?.();
   const m = addMessage(room.dir, input);
-  opts.settle?.(m.id);
+  try {
+    opts.settle?.(m.id);
+  } catch (e) {
+    // The disk refused a file (full, or a name it will not take). The send
+    // fails as a whole, so a retry with the same nonce sends it afresh
+    // instead of finding a message whose attachments are missing.
+    unsendMessage(room.dir, m.id);
+    throw e;
+  }
   markRead(root, input.author, room.url, m.id);
   publish(room.url, { type: 'message', message: m });
   queueNotifications(root, room, m);

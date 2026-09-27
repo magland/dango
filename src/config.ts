@@ -224,6 +224,44 @@ export function seedTrustProxy(root: string): boolean {
   });
 }
 
+/**
+ * Move TURN credentials written into config.json, by hand or by the version
+ * that kept them there, into .turn, where a backup without secrets leaves
+ * them out. Called on startup; a value .turn already holds is kept over the
+ * one in config.json, and the rest of config.json is left as it was.
+ * Answers whether anything moved.
+ */
+export function moveTurnSecrets(root: string): boolean {
+  return withFileLock(`${configFilePath(root)}.lock`, () => {
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(fs.readFileSync(configFilePath(root), 'utf8')) as Record<string, unknown>;
+    } catch {
+      return false;
+    }
+    const calls = typeof parsed.calls === 'object' && parsed.calls !== null ? (parsed.calls as Record<string, unknown>) : null;
+    const turn = calls && typeof calls.turn === 'object' && calls.turn !== null ? { ...(calls.turn as Record<string, unknown>) } : null;
+    if (!calls || !turn || !SECRET_FIELDS.some((k) => k in turn)) return false;
+    const file = path.join(root, TURN_SECRETS_FILE);
+    let held: Record<string, unknown> = {};
+    try {
+      held = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+    } catch {
+      held = {};
+    }
+    const secrets: Record<string, string> = {};
+    for (const k of SECRET_FIELDS) {
+      const kept = typeof held[k] === 'string' ? (held[k] as string) : '';
+      const found = typeof turn[k] === 'string' ? (turn[k] as string) : '';
+      secrets[k] = kept || found;
+      delete turn[k];
+    }
+    writeFileAtomic(file, JSON.stringify(secrets, null, 2) + '\n', { mode: 0o600 });
+    writeFileAtomic(configFilePath(root), JSON.stringify({ ...parsed, calls: { ...calls, turn } }, null, 2) + '\n', { mode: 0o600 });
+    return true;
+  });
+}
+
 /** Rewrite config.json with some fields changed, keeping the rest. */
 export function updateConfig(root: string, changes: Partial<WorkspaceConfig>): WorkspaceConfig {
   const current = loadConfig(root);

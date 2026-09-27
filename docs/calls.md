@@ -45,7 +45,20 @@ min-port=49152
 max-port=65535
 fingerprint
 no-cli
+no-multicast-peers
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=::1
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 ```
+
+The `denied-peer-ip` lines matter. Anyone who has joined a call holds a credential, and a relay that would forward to any address would let them reach the machine's own network, its cloud provider's metadata service included; browsers in a call reach each other at public addresses, so nothing is lost by refusing the private ranges.
 
 Open 3478 (UDP and TCP), 5349 (TCP), and the relay range (UDP) in the machine's firewall. On the Admin page, choose coturn and list both `turn:turn.example.org:3478` and `turns:turn.example.org:5349`; a `turns:` URL on port 443 (with `tls-listening-port=443`) is what reaches people on the most restrictive networks.
 

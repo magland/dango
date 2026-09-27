@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { writeFileAtomic } from '../../mochiforge/src/atomic';
+import { withFileLock, writeFileAtomic } from '../../mochiforge/src/atomic';
 import { OpError } from '../../mochiforge/src/ops';
 import { dmDir, dmsDir } from './workspace';
 
@@ -19,8 +19,20 @@ export const MAX_PARTICIPANTS = 9;
 
 export interface DmInfo {
   id: number;
+  /** Who can read and write it now. */
   participants: string[];
+  /**
+   * Who was in it and has since been removed from the workspace. They still
+   * name the conversation and its messages, but no longer see it, so a new
+   * person given a removed person's name does not inherit what was theirs.
+   */
+  former?: string[];
   created?: string;
+}
+
+/** Everyone a conversation is between, for naming it: its participants and its former ones. */
+export function dmPeople(dm: DmInfo): string[] {
+  return [...dm.participants, ...(dm.former ?? [])];
 }
 
 function conversationFile(root: string, id: number): string {
@@ -37,13 +49,14 @@ export function readDm(root: string, id: number): DmInfo | null {
   }
   try {
     const parsed = JSON.parse(text) as Record<string, unknown>;
-    const participants = Array.isArray(parsed.participants)
-      ? parsed.participants.filter((p): p is string => typeof p === 'string')
-      : [];
-    if (participants.length < 2) return null;
+    const names = (v: unknown) => (Array.isArray(v) ? v.filter((p): p is string => typeof p === 'string') : []);
+    const participants = names(parsed.participants);
+    const former = names(parsed.former).filter((p) => !participants.includes(p));
+    if (participants.length < 1 || participants.length + former.length < 2) return null;
     return {
       id,
       participants: [...participants].sort(),
+      ...(former.length ? { former: [...former].sort() } : {}),
       ...(typeof parsed.created === 'string' ? { created: parsed.created } : {}),
     };
   } catch {
@@ -90,9 +103,11 @@ export function openDm(root: string, participants: string[]): DmInfo {
   if (set.length > MAX_PARTICIPANTS) {
     throw new OpError(`A conversation holds at most ${MAX_PARTICIPANTS} people; a channel holds everyone.`);
   }
+  // A conversation someone has been removed from is not reused: its history
+  // was among more people than the ones now asking for it.
   for (const id of dmIds(root)) {
     const dm = readDm(root, id);
-    if (dm && sameSet(dm.participants, set)) return dm;
+    if (dm && !dm.former && sameSet(dm.participants, set)) return dm;
   }
   fs.mkdirSync(dmsDir(root), { recursive: true });
   let id = (dmIds(root).pop() ?? 0) + 1;
@@ -118,6 +133,34 @@ export function openDm(root: string, participants: string[]): DmInfo {
 
 /** How a conversation is titled for one of its participants: the other people. */
 export function dmTitle(dm: DmInfo, viewer: string): string {
-  const others = dm.participants.filter((p) => p !== viewer);
+  const others = dmPeople(dm).filter((p) => p !== viewer);
   return others.length ? others.join(', ') : viewer;
+}
+
+/**
+ * Take a person removed from the workspace out of every conversation they
+ * were in, keeping their name as a former participant. Each file is
+ * rewritten under its own lock, as every other edit to shared state is.
+ */
+export function leaveAllDms(root: string, user: string): void {
+  for (const id of dmIds(root)) {
+    const file = conversationFile(root, id);
+    withFileLock(`${file}.lock`, () => {
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      const participants = Array.isArray(parsed.participants) ? parsed.participants : [];
+      if (!participants.includes(user)) return;
+      const former = Array.isArray(parsed.former) ? parsed.former : [];
+      const next = {
+        ...parsed,
+        participants: participants.filter((p) => p !== user),
+        former: [...new Set([...former, user])],
+      };
+      writeFileAtomic(file, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 });
+    });
+  }
 }

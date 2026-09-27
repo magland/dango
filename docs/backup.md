@@ -29,13 +29,13 @@ The copy includes `workspace.json`, so everyone's tokens work against it exactly
 
 The server offers two routes, both for site admins only: a manifest listing every file in the workspace with its size and modification time, and a bulk fetch of named files. The client compares the manifest against what it already holds and fetches only what differs, so after the first run a nightly backup moves that day's messages and uploads and little else. A workspace has no git repositories, so unlike a vault backup there are no mirrors; every part of it is an ordinary file.
 
-What the manifest covers: `workspace.json`, `config.json`, and `.secret` at the root, every file under `channels/` and `dms/`, which is every message, thread, conversation, and upload, and `users/`, which holds what each person has read.
+What the manifest covers: `workspace.json`, `config.json`, and `.secret` at the root, every file under `channels/` and `dms/`, which is every message, thread, conversation, and upload, and `users/`, which holds what each person has read, what they want to be notified of, and the browsers their notifications go to.
 
 ## Options
 
 `--snapshot` takes a hardlinked snapshot after a successful sync and prunes old ones under the retention policy (`--keep-daily`, `--keep-weekly`, `--keep-monthly`; 7, 4, and 6 by default). A snapshot costs inodes rather than bytes, since nothing in the backup is ever modified in place.
 
-`--no-files` leaves out uploaded attachments, which are usually most of a workspace's bytes, and backs up the conversation alone. `--no-secrets` leaves out `workspace.json`, `.secret`, `.vapid` (the key pair notifications are signed with), and `.turn` (the credentials of a TURN relay for calls, where one is set); a backup made that way is not directly servable, since it has no users, and a workspace restored from it makes new push keys, so everyone turns notifications on again, but it is safe to keep somewhere less trusted. Exclusions are remembered in `backup.json`, so a cron entry is the command and the directory.
+`--no-files` leaves out uploaded attachments, which are usually most of a workspace's bytes, and backs up the conversation alone. `--no-secrets` leaves out `workspace.json`, `.secret`, `.vapid` (the key pair notifications are signed with), `.turn` (the credentials of a TURN relay for calls, where one is set), and each person's `push.json` (the browsers their notifications go to, each with the secret that lets it renew its own subscription); a backup made that way is not directly servable, since it has no users, and a workspace restored from it makes new push keys, so everyone turns notifications on again, but it is safe to keep somewhere less trusted. Exclusions are remembered in `backup.json`, so a cron entry is the command and the directory.
 
 `dango backup verify <dir>` asks the workspace for hashes of every file and reports anything missing, extra, or different. `dango backup list <dir>` shows the snapshots and how the last run went, and `dango backup prune <dir>` applies the retention policy without syncing.
 

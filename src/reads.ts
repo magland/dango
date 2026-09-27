@@ -4,7 +4,7 @@ import { withFileLock, writeFileAtomic } from '../../mochiforge/src/atomic';
 import { fileCache } from '../../mochiforge/src/filecache';
 import { AuthResult } from '../../mochiforge/src/vault';
 import { ChannelInfo, listChannels } from './channels';
-import { DmInfo, dmTitle, listDmsFor } from './dms';
+import { DmInfo, dmPeople, dmTitle, listDmsFor } from './dms';
 import { Message, readMessages } from './messages';
 import { canSeeChannel } from './perms';
 import { channelDir, dmDir, userDir } from './workspace';
@@ -82,6 +82,33 @@ export function markRead(root: string, username: string, roomUrl: string, id: nu
   });
 }
 
+/** Whether a read.json key is this room's, or one of its threads'. */
+export function isKeyOf(key: string, roomUrl: string): boolean {
+  const k = readKey(roomUrl);
+  return key === k || key.startsWith(`${k}/t/`);
+}
+
+/**
+ * Forget one person's markers for a room and its threads: a deleted channel's,
+ * so that a channel made later under the same name starts unread rather than
+ * read up to where the old one was.
+ */
+export function forgetMarkers(root: string, username: string, roomUrl: string): void {
+  const file = readFile(root, username);
+  if (!fs.existsSync(file)) return;
+  withFileLock(`${file}.lock`, () => {
+    let markers: Record<string, number>;
+    try {
+      markers = normalize(JSON.parse(fs.readFileSync(file, 'utf8')));
+    } catch {
+      return;
+    }
+    const kept = Object.fromEntries(Object.entries(markers).filter(([k]) => !isKeyOf(k, roomUrl)));
+    if (Object.keys(kept).length === Object.keys(markers).length) return;
+    writeFileAtomic(file, JSON.stringify(kept, null, 2) + '\n', { mode: 0o600 });
+  });
+}
+
 /** Whether a message body names a user, by the rule the markdown renderer links mentions with. */
 export function mentionsUser(body: string, username: string): boolean {
   const escaped = username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -136,7 +163,7 @@ export function unreadRooms(root: string, auth: AuthResult): RoomUnread[] {
   }
   for (const d of listDmsFor(root, auth.username)) {
     const url = `/d/${d.id}`;
-    const others = d.participants.filter((p) => p !== auth.username);
+    const others = dmPeople(d).filter((p) => p !== auth.username);
     out.push({ url, title: dmTitle(d, auth.username), kind: 'dm', with: others, ...unreadIn(root, auth.username, url, dmDir(root, d.id)) });
   }
   return out;

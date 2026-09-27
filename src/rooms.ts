@@ -1,9 +1,10 @@
-import { AuthResult } from '../../mochiforge/src/vault';
-import { ChannelInfo, readChannel } from './channels';
-import { DmInfo, dmTitle, readDm } from './dms';
+import * as fs from 'fs';
+import { AuthResult, removeUser } from '../../mochiforge/src/vault';
+import { ChannelInfo, leaveAllChannels, readChannel } from './channels';
+import { DmInfo, dmTitle, leaveAllDms, readDm } from './dms';
 import { readMessage, threadRoomDir } from './messages';
 import { canSeeChannel, canSeeDm } from './perms';
-import { channelDir, dmDir } from './workspace';
+import { channelDir, dmDir, isValidWorkspaceUserName, userDir } from './workspace';
 
 // One description of "the place a message lives", resolved from a URL and
 // already checked against the viewer. Channels, conversations, and threads
@@ -70,4 +71,20 @@ export function threadRoom(parent: Room, id: number): Room | null {
     parent,
     threadOf: id,
   };
+}
+
+/**
+ * Remove a person from the workspace. Their tokens go with their entry in
+ * workspace.json, and so does everything else that is decided by their
+ * name: private channels and conversations let people in by name, and
+ * users/<name>/ holds the browsers their notifications go to. Leaving those
+ * behind would hand them to whoever is given the same name next. Their
+ * messages stay, signed with the name they were written under.
+ */
+export function removeWorkspaceUser(root: string, username: string): boolean {
+  if (!removeUser(root, username)) return false;
+  leaveAllChannels(root, username);
+  leaveAllDms(root, username);
+  if (isValidWorkspaceUserName(username)) fs.rmSync(userDir(root, username), { recursive: true, force: true });
+  return true;
 }

@@ -89,13 +89,24 @@ export function searchMessages(root: string, auth: AuthResult, query: string): S
     if (!canSeeChannel(auth, c)) continue;
     if (needle.in !== undefined && c.name !== needle.in) continue;
     scanRoom(channelDir(root, c.name), `/c/${encodeURIComponent(c.name)}`, `#${c.name}`, needle, out, true);
+    keepNewest(out);
   }
   for (const dm of listDmsFor(root, auth.username)) {
     if (needle.in !== undefined && !dm.participants.some((p) => p !== auth.username && p.toLowerCase() === needle.in)) continue;
     scanRoom(dmDir(root, dm.id), `/d/${dm.id}`, dmTitle(dm, auth.username), needle, out, true);
+    keepNewest(out);
   }
+  return out;
+}
+
+/**
+ * Cut the hits so far to the newest MAX_HITS, after each room, so that what
+ * a broad query holds is one room's matches and a hundred, not every match
+ * in the workspace until the end.
+ */
+function keepNewest(out: SearchHit[]): void {
   out.sort((a, b) => b.message.created.localeCompare(a.message.created));
-  return out.slice(0, MAX_HITS);
+  out.length = Math.min(out.length, MAX_HITS);
 }
 
 /** For completeness with readMessage's shape elsewhere. */

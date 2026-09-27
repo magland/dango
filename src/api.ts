@@ -6,7 +6,6 @@ import {
   AuthResult,
   addUserToken,
   loadVault,
-  removeUser,
   setSiteAdmin,
   tokenId,
   userExists,
@@ -38,7 +37,8 @@ import { CALL_NOT_EDITABLE, EDIT_WINDOW_PASSED, canDeleteMessage, canEditMessage
 import { pinMessage, pinOf, readPins, unpinMessage } from './pins';
 import { noteRead, postMessage } from './post';
 import { unreadRooms } from './reads';
-import { Room, channelRoom, dmRoom, threadRoom } from './rooms';
+import { forgetRoom } from './notify';
+import { Room, channelRoom, dmRoom, removeWorkspaceUser, threadRoom } from './rooms';
 import { inviteLink } from './views';
 import { searchMessages } from './search';
 import { isValidWorkspaceUserName } from './workspace';
@@ -54,7 +54,7 @@ function channelJson(c: ChannelInfo): Record<string, unknown> {
 }
 
 function dmJson(d: DmInfo): Record<string, unknown> {
-  return { id: d.id, participants: d.participants };
+  return { id: d.id, participants: d.participants, ...(d.former ? { former: d.former } : {}) };
 }
 
 function messageJson(m: Message): Record<string, unknown> {
@@ -170,6 +170,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         return;
       }
       deleteChannel(root, room.channel!.name);
+      forgetRoom(root, room.url);
       pruneCalls(root);
       res.json({ deleted: true });
     })
@@ -509,7 +510,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         apiError(res, 400, 'removing yourself is a job for another admin');
         return;
       }
-      const removed = removeUser(root, req.params.name);
+      const removed = removeWorkspaceUser(root, req.params.name);
       pruneCalls(root);
       res.json({ removed });
     })

@@ -10,13 +10,13 @@ import {
   clearSessionCookie,
   csrfMatches,
   getViewer,
+  originOk,
   setSessionCookie,
 } from '../../mochiforge/src/session';
 import {
   addUserToken,
   authenticateToken,
   loadVault,
-  removeUser,
   setSiteAdmin,
   setUserProfile,
   userExists,
@@ -40,7 +40,9 @@ import {
   deleteMessage,
   editMessage,
   filesDir,
+  MAX_ATTACHMENTS,
   MAX_ATTACHMENTS_BYTES,
+  MAX_FILE_NAME_BYTES,
   isValidNonce,
   lastMessageId,
   readMessage,
@@ -57,6 +59,7 @@ import {
   isTimeZone,
   deviceId,
   deviceLabel,
+  forgetRoom,
   parseSubscription,
   pushToUser,
   readDevices,
@@ -69,7 +72,7 @@ import {
 import { noteRead, postMessage } from './post';
 import { vapidKeys } from './push';
 import { readKey, readMarkers } from './reads';
-import { Room, channelRoom, dmRoom, threadRoom } from './rooms';
+import { Room, channelRoom, dmRoom, removeWorkspaceUser, threadRoom } from './rooms';
 import { searchMessages } from './search';
 import * as views from './views';
 import { isValidWorkspaceUserName } from './workspace';
@@ -101,6 +104,26 @@ function wantsJson(req: Request): boolean {
 // their own key.
 interface FormRequest extends Request {
   fileParts?: Part[];
+}
+
+/**
+ * An attachment's name shortened, if it must be, to what a filesystem will
+ * take (see MAX_FILE_NAME_BYTES), keeping its extension, so that a long name
+ * in a script of several bytes a character is stored rather than refused by
+ * the disk halfway through a send.
+ */
+function fitName(name: string): string {
+  if (Buffer.byteLength(name) <= MAX_FILE_NAME_BYTES) return name;
+  const dot = name.lastIndexOf('.');
+  const ext = dot > 0 && name.length - dot <= 16 ? name.slice(dot) : '';
+  let room = MAX_FILE_NAME_BYTES - Buffer.byteLength(ext);
+  let stem = '';
+  for (const ch of name.slice(0, name.length - ext.length)) {
+    room -= Buffer.byteLength(ch);
+    if (room < 0) break;
+    stem += ch;
+  }
+  return stem.trim() + ext;
 }
 
 function formBody(req: FormRequest, res: Response, next: NextFunction): void {
@@ -142,9 +165,15 @@ function originOf(req: Request): string {
   return `${req.protocol}://${req.get('host') ?? req.hostname}`;
 }
 
+/**
+ * Where to go after signing in: a path on this site, or the home page. A
+ * leading // is another host, and so is /\, which browsers read as //, and
+ * a control character can be dropped by the browser to make either of those;
+ * mochiforge's safeNext refuses the same three.
+ */
 function nextPath(raw: unknown): string {
   const n = typeof raw === 'string' ? raw : '';
-  return n.startsWith('/') && !n.startsWith('//') ? n : '/';
+  return n.startsWith('/') && !/^\/[/\\]/.test(n) && !/[\u0000-\u001f\u007f\\]/.test(n) ? n : '/';
 }
 
 export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter, limits: WriteLimits): void {
@@ -198,6 +227,15 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
 
   app.post('/login', urlenc, (req, res) => {
     const next = nextPath((req.body as Record<string, unknown>)?.next);
+    // A sign-in posted from another site is refused. The form carries no
+    // CSRF token (there is no session yet to bind one to), and without this a
+    // hostile page could sign a visitor in as its author, so that what the
+    // visitor then writes, or the notifications their browser subscribes to,
+    // land in the author's account.
+    if (!originOk(req) || req.get('sec-fetch-site') === 'cross-site') {
+      res.status(403).type('html').send(views.loginPage(next, 'Sign in from this workspace’s own page.'));
+      return;
+    }
     const token = String((req.body as Record<string, unknown>)?.token ?? '').trim();
     const state = loadVault(root);
     if (state.status !== 'ok') {
@@ -519,7 +557,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       fail(res, viewer, 400, 'Removing yourself is a job for another admin.');
       return;
     }
-    removeUser(root, username);
+    removeWorkspaceUser(root, username);
     pruneCalls(root);
     res.redirect(303, '/admin');
   });
@@ -644,15 +682,39 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     }
   };
 
+  /**
+   * Refuse a request from nobody before its body is read. A form's body can
+   * be the size of a message's attachments, and reading it for a visitor who
+   * is not signed in, only to redirect them afterwards, would let anyone make
+   * the server hold that much per request. withRoom asks again, and checks
+   * the CSRF token, which is in the body and so can only be read after.
+   */
+  const signedIn = (req: Request, res: Response, next: NextFunction): void => {
+    if (getViewer(req, root)) {
+      next();
+      return;
+    }
+    if (wantsJson(req)) res.status(401).json({ error: 'You are signed out. Sign in again, then send.' });
+    else res.redirect(303, `/login?next=${encodeURIComponent(req.originalUrl)}`);
+  };
+
   const BASES = ['/c/:channel', '/d/:dm'];
   const ROOM_PATHS = (suffix: string) => BASES.flatMap((b) => [`${b}${suffix}`, `${b}/t/:tid${suffix}`]);
 
   // Rendering a room is reading it: the viewer's marker moves to the newest
   // message shown, and their other pages hear that the count is now zero.
   // Where the marker stood before is returned, for the page's "New" rule.
-  const seen = (viewer: Viewer, room: Room, messages: Message[]): number => {
+  //
+  // Only a page that is shown reads the room: a navigation, or the page
+  // script's own fetch of the next page. A message can name a room page as
+  // an image (![](/d/3)), and the browser of everyone who reads that message
+  // would then load it; without this, that alone would mark the room read
+  // for each of them.
+  const seen = (req: Request, viewer: Viewer, room: Room, messages: Message[]): number => {
     const before = readMarkers(root, viewer.auth.username)[readKey(room.url)] ?? 0;
-    if (messages.length) noteRead(root, viewer.auth.username, room, messages[messages.length - 1].id);
+    const dest = req.get('sec-fetch-dest');
+    const shown = dest === undefined || dest === 'document' || dest === 'empty';
+    if (shown && messages.length) noteRead(root, viewer.auth.username, room, messages[messages.length - 1].id);
     return before;
   };
 
@@ -660,14 +722,14 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
   app.get('/c/:channel', (req, res) =>
     withRoom(req, res, (viewer, room) => {
       const messages = readMessages(room.dir, { limit: 100 });
-      const readUpTo = seen(viewer, room, messages);
+      const readUpTo = seen(req, viewer, room, messages);
       res.type('html').send(views.channelPage(root, room, messages, viewer, readUpTo));
     })
   );
   app.get('/d/:dm', (req, res) =>
     withRoom(req, res, (viewer, room) => {
       const messages = readMessages(room.dir, { limit: 100 });
-      const readUpTo = seen(viewer, room, messages);
+      const readUpTo = seen(req, viewer, room, messages);
       res.type('html').send(views.dmPage(root, room, messages, viewer, readUpTo));
     })
   );
@@ -679,14 +741,14 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         return;
       }
       const replies = readMessages(room.dir, { limit: 200 });
-      seen(viewer, room, replies);
+      seen(req, viewer, room, replies);
       res.type('html').send(views.threadPage(root, room, anchor, replies, viewer));
     })
   );
 
   // A page that is open and visible when a message arrives has read it, and
   // says so here, so the count does not sit at one on every other device.
-  app.post(ROOM_PATHS('/read'), formBody, (req, res) =>
+  app.post(ROOM_PATHS('/read'), signedIn, formBody, (req, res) =>
     withRoom(
       req,
       res,
@@ -705,7 +767,8 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     const viewer = requireViewer(req, res);
     if (!viewer) return;
     const client = req.query.client;
-    serveUserEvents(res, viewer.auth.username, isClientId(client) ? client : undefined);
+    const username = viewer.auth.username;
+    serveUserEvents(res, username, () => getViewer(req, root)?.auth.username === username, isClientId(client) ? client : undefined);
   });
 
   // Every member, as names, for the composer to complete an @ against
@@ -734,13 +797,19 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         after: Number.isInteger(after) && after >= 0 ? after : 0,
         limit: 200,
       }).map((m) => ({ type: 'message' as const, message: m }));
-      serveEvents(res, room.url, catchUp, (ev) => views.messageHtml(root, room, ev.message, viewer).text);
+      // Whether this viewer may still read the room, asked afresh: the same
+      // session, still valid, and the same room still resolving for it.
+      const allowed = () => {
+        const now = getViewer(req, root);
+        return now !== null && now.auth.username === viewer.auth.username && resolveRoom(req, now)?.dir === room.dir;
+      };
+      serveEvents(res, room.url, catchUp, (ev) => views.messageHtml(root, room, ev.message, viewer).text, allowed);
     })
   );
 
   // Sending. After a thread reply, the parent message's reply count changed,
   // so the parent room is told to repaint it.
-  app.post(ROOM_PATHS('/messages'), formBody, (req, res) =>
+  app.post(ROOM_PATHS('/messages'), signedIn, formBody, (req, res) =>
     withRoom(
       req,
       res,
@@ -749,13 +818,23 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         const parts = partFiles((req as FormRequest).fileParts ?? [], 'files').filter(
           (p) => p.filename && p.data.length > 0
         );
+        if (parts.length > MAX_ATTACHMENTS) {
+          fail(res, viewer, 413, `A message may carry at most ${MAX_ATTACHMENTS} files.`);
+          return;
+        }
         const files: Attachment[] = [];
         const names = new Set<string>();
+        // The next number to try for each name, so that many files of one
+        // name are told apart in one pass rather than each counting from 2.
+        const nextOf = new Map<string, number>();
         for (const p of parts) {
-          let name = path.basename(p.filename!).replace(/[\u0000-\u001f\\/]/g, '').trim();
+          let name = fitName(path.basename(p.filename!).replace(/[\u0000-\u001f\\/]/g, '').trim());
           if (name === '' || name === '.' || name === '..') name = 'file';
           let unique = name;
-          for (let i = 2; names.has(unique); i++) unique = `${i}-${name}`;
+          for (let i = nextOf.get(name) ?? 2; names.has(unique); i++) {
+            unique = `${i}-${name}`;
+            nextOf.set(name, i + 1);
+          }
           names.add(unique);
           files.push({ name: unique, size: p.data.length });
         }
@@ -797,7 +876,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     })
   );
 
-  app.post(ROOM_PATHS('/m/:mid/edit'), formBody, (req, res) =>
+  app.post(ROOM_PATHS('/m/:mid/edit'), signedIn, formBody, (req, res) =>
     withRoom(
       req,
       res,
@@ -837,7 +916,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     })
   );
 
-  app.post(ROOM_PATHS('/m/:mid/delete'), formBody, (req, res) =>
+  app.post(ROOM_PATHS('/m/:mid/delete'), signedIn, formBody, (req, res) =>
     withRoom(
       req,
       res,
@@ -860,7 +939,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     )
   );
 
-  app.post(ROOM_PATHS('/m/:mid/react'), formBody, (req, res) =>
+  app.post(ROOM_PATHS('/m/:mid/react'), signedIn, formBody, (req, res) =>
     withRoom(
       req,
       res,
@@ -881,7 +960,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
   // though the message a thread hangs from can be. The room's open pages hear
   // the message repainted, with the new count for the header.
   const pinRoute = (action: 'pin' | 'unpin') =>
-    app.post(BASES.map((b) => `${b}/m/:mid/${action}`), formBody, (req, res) =>
+    app.post(BASES.map((b) => `${b}/m/:mid/${action}`), signedIn, formBody, (req, res) =>
       withRoom(
         req,
         res,
@@ -907,7 +986,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
   // Muting, from the bell in a room's header: nothing from the room, or its
   // threads, is notified to the person who muted it. It is theirs alone, so
   // it is not published to anyone; the page it came from is shown again.
-  app.post(BASES.map((b) => `${b}/mute`), formBody, (req, res) =>
+  app.post(BASES.map((b) => `${b}/mute`), signedIn, formBody, (req, res) =>
     withRoom(
       req,
       res,
@@ -988,6 +1067,15 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         limits.action(viewer.auth.username);
         iceFor(loadConfig(root).calls, viewer.auth.username)
           .then((ice) => {
+            // Asking a relay for credentials can take seconds, and in that
+            // time the viewer may have been taken out of the room or the
+            // channel deleted; joining then would put them in a call they
+            // cannot see, or write the call's entry into a room that is gone.
+            const now = getViewer(req, root);
+            if (!now || resolveRoom(req, now)?.dir !== room.dir) {
+              fail(res, viewer, 404, 'Page not found');
+              return;
+            }
             try {
               const call = joinCall(root, room, viewer.auth.username, peer, resume);
               res.json({ call, ice, max: MAX_IN_CALL });
@@ -1029,7 +1117,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
   // sendBeacon, which posts a form; so this takes a form as well as JSON. A
   // closing page's stream may already be gone, so what is checked is that
   // the page in the call is the viewer's.
-  app.post(BASES.map((b) => `${b}/call/leave`), formBody, callJson, (req, res) =>
+  app.post(BASES.map((b) => `${b}/call/leave`), signedIn, formBody, callJson, (req, res) =>
     withRoom(
       req,
       res,
@@ -1148,6 +1236,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       (viewer, room) => {
         if (!isSiteAdmin(viewer.auth)) throw new OpError('Only a site admin may delete a channel.');
         deleteChannel(root, room.channel!.name);
+        forgetRoom(root, room.url);
         pruneCalls(root);
         res.redirect(303, '/');
       },
@@ -1159,6 +1248,13 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
 
   app.get('/:username', (req, res, next) => {
     const username = req.params.username;
+    // Signing in comes before whether the name is anyone's, so that a
+    // stranger is sent to sign in for every name alike and learns nothing
+    // of who is in the workspace.
+    if (isValidWorkspaceUserName(username) && !getViewer(req, root)) {
+      requireViewer(req, res);
+      return;
+    }
     if (!userExists(root, username)) {
       next();
       return;

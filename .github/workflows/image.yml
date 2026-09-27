@@ -34,9 +34,16 @@ jobs:
   image:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # A workflow_run's branch filter matches the head branch by name, and a
+    # pull request from a fork can name its branch main; ci runs on pull
+    # requests, so without the last two conditions a fork's commit would be
+    # built, pushed, and deployed here with this repository's credentials.
     if: >-
-      github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
+      github.event_name != 'workflow_run' || (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository
+      )
     permissions:
       contents: read
       packages: write
@@ -154,7 +161,14 @@ jobs:
   # few seconds and reconnect; see docs/deploying.md.
   deploy:
     needs: image
-    if: github.repository == 'magland/dango' && github.event_name != 'workflow_dispatch'
+    if: >-
+      github.repository == 'magland/dango' &&
+      github.event_name != 'workflow_dispatch' && (
+        github.event_name != 'workflow_run' || (
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_repository.full_name == github.repository
+        )
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:

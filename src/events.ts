@@ -157,7 +157,11 @@ export function watchClients(fn: (clientId: string, open: boolean) => void): voi
   clientWatchers.push(fn);
 }
 
-function openStream(res: Response): { write: (id: string, payload: unknown) => void; close: (fn: () => void) => void } {
+function openStream(res: Response): {
+  write: (id: string, payload: unknown) => void;
+  close: (fn: () => void) => void;
+  end: () => void;
+} {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -174,6 +178,10 @@ function openStream(res: Response): { write: (id: string, payload: unknown) => v
         fn();
       });
     },
+    // Ending the response closes it, and the close handler above then
+    // unsubscribes, so a stream ended from inside a listener is let go of the
+    // same way as one the browser dropped.
+    end: () => res.end(),
   };
 }
 
@@ -181,15 +189,27 @@ function openStream(res: Response): { write: (id: string, payload: unknown) => v
  * Serve one room's event stream. The caller has already resolved the room
  * and the viewer, and hands in the render that personalizes a message for
  * them; what remains is the SSE mechanics.
+ *
+ * A stream outlives the check that opened it: its viewer may be taken out of
+ * a private channel, or out of the workspace, or the channel deleted and a
+ * private one made under the same name, all while the page stays open. So
+ * the caller also hands in `allowed`, which asks again, and every event is
+ * sent only after it says yes; the first no ends the stream. The page's
+ * reconnect then meets the same check as any new request.
  */
 export function serveEvents(
   res: Response,
   roomUrl: string,
   catchUp: RoomEvent[],
-  render: (event: RoomEvent) => string
+  render: (event: RoomEvent) => string,
+  allowed: () => boolean
 ): void {
   const stream = openStream(res);
   const send = (event: RoomEvent) => {
+    if (!allowed()) {
+      stream.end();
+      return;
+    }
     stream.write(String(event.message.id), {
       type: event.type,
       id: event.message.id,
@@ -210,12 +230,18 @@ export function serveEvents(
  * id already held by someone else's page is not taken over; a page opening
  * its stream again (after a drop) replaces its own earlier one.
  */
-export function serveUserEvents(res: Response, username: string, clientId?: string): void {
+export function serveUserEvents(res: Response, username: string, allowed: () => boolean, clientId?: string): void {
   const stream = openStream(res);
-  const unsubscribe = subscribeUser(username, (event) => stream.write('0', event));
+  // Asked again before every event, as a room's stream is (see serveEvents):
+  // a person removed, or whose tokens were revoked, stops hearing at once.
+  const write = (event: UserEvent | ClientEvent) => {
+    if (!allowed()) stream.end();
+    else stream.write('0', event);
+  };
+  const unsubscribe = subscribeUser(username, write);
   let entry: ClientEntry | null = null;
   if (clientId && mayHold(clientId, username)) {
-    entry = { username, send: (event) => stream.write('0', event) };
+    entry = { username, send: write };
     clients.set(clientId, entry);
     owners.set(clientId, { username, closedAt: null });
     for (const fn of clientWatchers) fn(clientId, true);

@@ -55,8 +55,10 @@ export function readChannel(root: string, name: string): ChannelInfo | null {
     return normalize(name, JSON.parse(text));
   } catch {
     // A hand-edited file that does not parse still names a channel that
-    // exists; it reads as a public channel with no topic.
-    return normalize(name, null);
+    // exists. It reads as private with no members, so a mistake in the file
+    // hides the channel rather than opening it to everyone; fixing the file
+    // brings it back as it was.
+    return { ...normalize(name, null), private: true };
   }
 }
 
@@ -150,6 +152,20 @@ export function removeMember(root: string, name: string, user: string): ChannelI
     }
     info.members = info.members.filter((m) => m !== user);
   });
+}
+
+/**
+ * Take a person removed from the workspace off every private channel's
+ * member list, the last member included: a channel left with nobody is
+ * seen by nobody, which is what it was to everyone but them already.
+ */
+export function leaveAllChannels(root: string, user: string): void {
+  for (const c of listChannels(root)) {
+    if (!c.private || !c.members.includes(user)) continue;
+    editChannel(root, c.name, (info) => {
+      info.members = info.members.filter((m) => m !== user);
+    });
+  }
 }
 
 /** Remove a channel and everything in it. Site-admin only; the caller checks. */

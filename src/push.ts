@@ -180,7 +180,16 @@ export async function sendPush(
   if (opts.topic) headers.Topic = createHash('sha256').update(opts.topic).digest('base64url').slice(0, 32);
   let res: Response;
   try {
-    res = await fetch(target.endpoint, { method: 'POST', headers, body: new Uint8Array(body), signal: AbortSignal.timeout(15000) });
+    // A push service answers where it was asked and never redirects; not
+    // following one keeps the check on the endpoint's host (see
+    // isPushEndpoint) the only word on where the server sends a request.
+    res = await fetch(target.endpoint, {
+      method: 'POST',
+      headers,
+      body: new Uint8Array(body),
+      redirect: 'manual',
+      signal: AbortSignal.timeout(15000),
+    });
   } catch (e) {
     return { outcome: 'failed', status: 0, detail: e instanceof Error ? e.message : String(e) };
   }

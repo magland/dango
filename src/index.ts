@@ -25,7 +25,7 @@ import { makeBackupCommands } from '../../mochiforge/src/cli/backup-cmd';
 import { deployDestroyCmd, deployFlyCmd, deployShowCmd } from '../../mochiforge/src/deploy-cli';
 import { bootstrapVault } from '../../mochiforge/src/vault';
 import { DANGO_BACKUP } from './backup';
-import { seedTrustProxy } from './config';
+import { moveTurnSecrets, seedTrustProxy } from './config';
 import { DANGO_DEPLOY } from './deploy';
 
 // The dango command: serve a workspace, or talk to a served one the way `gh`
@@ -81,6 +81,7 @@ async function serveCmd(args: string[], usage: () => never) {
   // cannot write to the volume before the workspace exists. It only seeds the
   // setting; config.json remains the place it lives.
   const seeded = process.env.DANGO_TRUST_PROXY === '1' ? seedTrustProxy(root) : false;
+  if (moveTurnSecrets(root)) console.log('Moved the TURN relay credentials from config.json to .turn.');
   // Imported here rather than at the top of the file, for mochi's reason: the
   // server pulls in express and the whole rendering stack, and a command that
   // is not starting it should not pay for it.

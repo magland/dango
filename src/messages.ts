@@ -30,6 +30,18 @@ export const MAX_MESSAGE = 16 * 1024;
  * cost a small machine, and it caps any single file at the same size.
  */
 export const MAX_ATTACHMENTS_BYTES = 20 * 1024 * 1024;
+/**
+ * How many files one message may carry. The byte cap alone would let a
+ * message hold hundreds of thousands of tiny files, every one of them named in
+ * its frontmatter and so read back on every view of the room.
+ */
+export const MAX_ATTACHMENTS = 50;
+/**
+ * The longest an attachment's name may be, in bytes of UTF-8: under the 255
+ * that Linux and most filesystems allow a file name, with room for the "2-"
+ * that tells two files of one name apart.
+ */
+export const MAX_FILE_NAME_BYTES = 200;
 
 /**
  * How far back a send's nonce is looked for among its author's messages. A
@@ -108,13 +120,23 @@ function messageIds(room: string): number[] {
     .sort((a, b) => a - b);
 }
 
+/**
+ * A message's reactions, each the people who gave it. Built through a Map and
+ * Object.fromEntries, which define keys rather than assign them, so that a
+ * reaction spelled __proto__ is a key like any other instead of reaching the
+ * object's prototype.
+ */
 function parseReactions(v: unknown): Record<string, string[]> {
-  const out: Record<string, string[]> = {};
+  return Object.fromEntries(reactionMap(v));
+}
+
+function reactionMap(v: unknown): Map<string, string[]> {
+  const out = new Map<string, string[]>();
   if (typeof v !== 'object' || v === null) return out;
   for (const [emoji, users] of Object.entries(v as Record<string, unknown>)) {
     if (Array.isArray(users)) {
       const names = users.filter((u): u is string => typeof u === 'string');
-      if (names.length) out[emoji] = names;
+      if (names.length) out.set(emoji, names);
     }
   }
   return out;
@@ -220,6 +242,9 @@ export function addMessage(
   if (body.trim() === '' && !(input.files ?? []).length) {
     throw new OpError('A message needs something in it.');
   }
+  if ((input.files ?? []).length > MAX_ATTACHMENTS) {
+    throw new OpError(`A message may carry at most ${MAX_ATTACHMENTS} files.`);
+  }
   const total = (input.files ?? []).reduce((n, f) => n + f.size, 0);
   if (total > MAX_ATTACHMENTS_BYTES) {
     throw new OpError(`Attachments may come to at most ${MAX_ATTACHMENTS_BYTES / (1024 * 1024)} MB per message.`);
@@ -253,6 +278,17 @@ export function addMessage(
     };
   }
   throw new OpError('Could not allocate a message number; try again.', 'conflict');
+}
+
+/**
+ * Take back a message nobody has been told about yet, with any of its files
+ * already written: what a send does when writing its attachments fails, so
+ * that it leaves no message naming files that are not there. The number is
+ * free again, which is harmless, since nothing has linked to it.
+ */
+export function unsendMessage(room: string, id: number): void {
+  fs.rmSync(filesDir(room, id), { recursive: true, force: true });
+  fs.rmSync(messageFile(room, id), { force: true });
 }
 
 /**
@@ -325,13 +361,13 @@ export function toggleReaction(room: string, id: number, emoji: string, user: st
   }
   return editMessageFile(room, id, (meta, body) => {
     if (meta.deleted === true) throw new OpError('This message was deleted.', 'nochange');
-    const reactions = parseReactions(meta.reactions);
-    const users = reactions[e] ?? [];
+    const reactions = reactionMap(meta.reactions);
+    const users = reactions.get(e) ?? [];
     const next = users.includes(user) ? users.filter((u) => u !== user) : [...users, user];
-    if (next.length) reactions[e] = next;
-    else delete reactions[e];
+    if (next.length) reactions.set(e, next);
+    else reactions.delete(e);
     const out = { ...meta };
-    if (Object.keys(reactions).length) out.reactions = reactions;
+    if (reactions.size) out.reactions = Object.fromEntries(reactions);
     else delete out.reactions;
     return { meta: out, body };
   });

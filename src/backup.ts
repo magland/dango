@@ -3,6 +3,7 @@ import * as path from 'path';
 import { BackupLayout } from '../../mochiforge/src/api/backup';
 import { BackupProfile } from '../../mochiforge/src/cli/backup-cmd';
 import { CONFIG_FILE, TURN_SECRETS_FILE } from './config';
+import { PUSH_FILE } from './notify';
 import { VAPID_FILE } from './push';
 import { channelsDir, dmsDir, usersDir } from './workspace';
 
@@ -35,6 +36,14 @@ function isUploadsDir(name: string, abs: string): boolean {
   return name === 'files' && fs.existsSync(path.join(path.dirname(abs), 'messages'));
 }
 
+function sortedEntries(dir: string): fs.Dirent[] {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
 export function workspaceLayout(root: string): BackupLayout {
   return {
     rootFiles: ROOT_FILES,
@@ -47,7 +56,19 @@ export function workspaceLayout(root: string): BackupLayout {
       const skip = exclude.has('files') ? isUploadsDir : undefined;
       if (!(await w.tree(channelsDir(root), skip))) return false;
       if (!(await w.tree(dmsDir(root), skip))) return false;
-      return w.tree(usersDir(root));
+      if (!exclude.has('secrets')) return w.tree(usersDir(root));
+      // Each browser's push.json holds its subscription's auth secret, which
+      // is what /push/renew takes as proof in place of a session, so a copy
+      // without secrets leaves it out and keeps the rest of users/.
+      for (const user of sortedEntries(usersDir(root))) {
+        if (!user.isDirectory()) continue;
+        const dir = path.join(usersDir(root), user.name);
+        for (const f of sortedEntries(dir)) {
+          if (!f.isFile() || f.name === PUSH_FILE) continue;
+          if (!(await w.file(path.join(dir, f.name)))) return false;
+        }
+      }
+      return true;
     },
   };
 }
@@ -55,7 +76,7 @@ export function workspaceLayout(root: string): BackupLayout {
 export const DANGO_BACKUP: BackupProfile = {
   exclusions: [
     { category: 'files', summary: 'Leave out uploaded attachments (each room’s files/)' },
-    { category: 'secrets', summary: 'Leave out workspace.json, .secret, .vapid, and .turn' },
+    { category: 'secrets', summary: 'Leave out workspace.json, .secret, .vapid, .turn, and each person’s push.json' },
   ],
   repos: false,
   description: `A workspace is a directory, so a backup of one is a directory too, and this makes
