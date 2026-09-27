@@ -7,7 +7,7 @@ import { renderMarkdown } from '../../mochiforge/src/markdown';
 import { formatDay, formatSize, timeTag } from '../../mochiforge/src/render';
 import { Viewer } from '../../mochiforge/src/session';
 import { THEMES, activeTheme, darkFor } from '../../mochiforge/src/themes';
-import { UserProfile, Vault, loadVault, userExists } from '../../mochiforge/src/vault';
+import { UserProfile, Vault, loadVault, tokenId, userExists } from '../../mochiforge/src/vault';
 import { ConnectionReport, describeReport, readReports } from './calllog';
 import { liveCall, liveCallsByRoom } from './calls';
 import { callScript } from './callscript';
@@ -22,7 +22,7 @@ import { canDeleteMessage, canEditMessage, canSeeChannel, isSiteAdmin } from './
 import { Pin, pinOf, readPins } from './pins';
 import { READ_FILE, RoomUnread, UNREAD_CAP, isNewsFor, mentionsUser, readKey, unreadRooms } from './reads';
 import { Room, channelRoom, dmRoom } from './rooms';
-import { parseQuery } from './search';
+import { MAX_HITS, SCAN_LIMIT, parseQuery } from './search';
 import { styleSheet } from './style';
 import { userDir } from './workspace';
 
@@ -690,7 +690,22 @@ export interface SearchHit {
   root: string;
 }
 
-export function searchPage(root: string, viewer: Viewer, query: string, hits: { url: string; where: string; message: Message }[]): string {
+/** What the search page says of its hits: how many, and what the walk left out. */
+function searchSummary(n: number, partial: boolean): string {
+  const found =
+    n === 0 ? 'Nothing matched.' : n >= MAX_HITS ? `The newest ${MAX_HITS} matches.` : `${n} ${n === 1 ? 'message matches' : 'messages match'}.`;
+  return partial
+    ? `${found} Rooms with more than ${SCAN_LIMIT.toLocaleString('en-US')} messages were searched in their newest ${SCAN_LIMIT.toLocaleString('en-US')} only.`
+    : found;
+}
+
+export function searchPage(
+  root: string,
+  viewer: Viewer,
+  query: string,
+  hits: { url: string; where: string; message: Message }[],
+  partial = false
+): string {
   const rows = hits.map(
     (h) => html`<div class="search-result">
 <div class="where"><a href="${h.url}">${h.where}</a><span class="who">${avatar(h.message.author, 16)} ${h.message.author}</span>${timeTag(h.message.created)}</div>
@@ -701,7 +716,7 @@ export function searchPage(root: string, viewer: Viewer, query: string, hits: { 
   const content = html`<h1>Search</h1>
 <form method="get" action="/search" style="margin-bottom:24px;max-width:520px"><div class="field"><input type="text" name="q" value="${query}" placeholder="Search messages" autofocus aria-label="Search messages">
 <p class="muted">Narrow it with <code>from:alice</code> or <code>in:#general</code>.</p></div></form>
-${query === '' ? '' : html`<p class="muted">${hits.length === 0 ? 'Nothing matched.' : `${hits.length} ${hits.length === 1 ? 'message matches' : 'messages match'}.`}</p>`}
+${query === '' ? '' : html`<p class="muted">${searchSummary(hits.length, partial)}</p>`}
 <div data-highlight="${parseQuery(query).text}">${joinHtml(rows)}</div>`;
   return doc('Search', content, { viewer, root });
 }
@@ -727,6 +742,33 @@ export interface AccountNotifications {
   vapidKey: string;
 }
 
+/**
+ * The viewer's own tokens, each with when it was made and, where an
+ * administrator made it, by whom. A token is a complete way to sign in as its
+ * holder, and a site admin can mint one for anyone, so this is where someone
+ * sees whether that has happened and can revoke a token they did not ask
+ * for. The one this browser signed in with is not offered: revoking it would
+ * sign them out with no way back but a new token from an administrator.
+ */
+function tokensSection(viewer: Viewer): Html {
+  const current = tokenId(viewer.auth.token);
+  const rows = viewer.auth.user.tokens.map((t) => {
+    const id = tokenId(t);
+    const made = t.created ? html`made ${timeTag(t.created)}` : html`made before this was recorded`;
+    return html`<tr>
+<td><code>${id}</code></td>
+<td class="muted">${made}${t.by ? html` by ${t.by}` : ''}</td>
+<td class="actions">${
+      id === current
+        ? html`<span class="muted">this browser</span>`
+        : html`<form method="post" action="/account/tokens/revoke" style="display:inline" data-confirm="Revoke token ${id}? Whatever signed in with it is signed out.">${csrfField(viewer)}<input type="hidden" name="id" value="${id}"><button class="btn-link" type="submit">Revoke</button></form>`
+    }</td></tr>`;
+  });
+  return html`<h2>Sign-in tokens</h2>
+<p class="muted">Each is a way to sign in as you. One you do not recognise, or did not ask an administrator for, can be revoked here.</p>
+<table class="listing people"><tbody>${joinHtml(rows)}</tbody></table>`;
+}
+
 export function accountPage(root: string, viewer: Viewer, notify: AccountNotifications, opts: { flash?: string; error?: string } = {}): string {
   const profile = viewer.auth.user.profile;
   const content = html`<h1>Account</h1>
@@ -737,6 +779,7 @@ ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.fla
 <button class="btn btn-primary" type="submit">Save</button>
 </form>
 ${notificationsSection(root, viewer, notify)}
+${tokensSection(viewer)}
 <p class="muted" style="margin-top:24px">Signed in as <strong>${viewer.auth.username}</strong>. Tokens are minted by an administrator; ask one for a new token if you need to sign in elsewhere or use the API.</p>`;
   return doc('Account', content, { viewer, root });
 }
@@ -841,9 +884,29 @@ ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.fla
 <p class="muted">The workspace's own look; each person can still pick their own from the account menu.</p></div>
 <button class="btn btn-primary" type="submit">Save</button>
 </form>
-${callsSection(viewer, opts.calls ?? config.calls, readReports(root))}
-${connectionLog(root, viewer, readReports(root))}`;
+${callsSection(viewer, opts.calls ?? config.calls, reportsFor(root, viewer))}
+${connectionLog(root, viewer, reportsFor(root, viewer))}`;
   return doc('Admin', content, { viewer, root });
+}
+
+/** A connection report as the admin page shows it; `hidden` when its room is not the admin's to see. */
+type AdminReport = ConnectionReport & { hidden?: true };
+
+/** Where a report's call was, as a room the viewer can see, or null. */
+function reportRoom(root: string, viewer: Viewer, url: string): Room | null {
+  const m = /^\/(c|d)\/([^/]+)$/.exec(url);
+  if (!m) return null;
+  return m[1] === 'c' ? channelRoom(root, decodeURIComponent(m[2]), viewer.auth) : dmRoom(root, parseInt(m[2], 10), viewer.auth);
+}
+
+/**
+ * The call log as an admin may read it. A call in a room the admin cannot
+ * see keeps its outcome, its path, and its devices, which is what diagnosing
+ * a relay needs, but not who was in it: that a given pair spoke in a private
+ * conversation, and when, is itself something the room keeps from the admin.
+ */
+function reportsFor(root: string, viewer: Viewer): AdminReport[] {
+  return readReports(root).map((r) => (reportRoom(root, viewer, r.room) ? r : { ...r, user: 'someone', with: 'someone', hidden: true as const }));
 }
 
 /** Whether a connection report says the relay carried it. */
@@ -856,7 +919,7 @@ function relayed(r: ConnectionReport): boolean {
  * browser (see test in src/callscript.ts), and when a real call last went
  * through the relay, from the connection log.
  */
-function relayCheck(calls: CallsConfig, reports: ConnectionReport[]): Html {
+function relayCheck(calls: CallsConfig, reports: AdminReport[]): Html {
   const last = [...reports].reverse().find(relayed);
   return html`<div class="relay-test" data-relay-test style="max-width:720px">
 <h3>Does it work?</h3>
@@ -867,7 +930,9 @@ function relayCheck(calls: CallsConfig, reports: ConnectionReport[]): Html {
     calls.turn.mode === 'none'
       ? 'No relay is set.'
       : last
-        ? html`A call last went through the relay ${timeTag(last.at)}: ${last.user} and ${last.with}.`
+        ? last.hidden
+          ? html`A call last went through the relay ${timeTag(last.at)}.`
+          : html`A call last went through the relay ${timeTag(last.at)}: ${last.user} and ${last.with}.`
         : 'No call has gone through the relay yet, among the connections listed below.'
   }</p>
 </div>`;
@@ -875,19 +940,14 @@ function relayCheck(calls: CallsConfig, reports: ConnectionReport[]): Html {
 
 /**
  * The newest connections in calls, as the browsers in them reported them.
- * A room the admin cannot see is not named, since an admin does not see
- * other people's private rooms (see src/perms.ts).
+ * A room the admin cannot see is not named, nor who was in it (see
+ * reportsFor), since an admin does not see other people's private rooms.
  */
-function connectionLog(root: string, viewer: Viewer, reports: ConnectionReport[]): Html {
+function connectionLog(root: string, viewer: Viewer, reports: AdminReport[]): Html {
   if (!reports.length) {
     return html`<h3 id="call-log">Recent connections</h3><p class="muted">No call has connected anyone yet. Each browser in a call reports how each of its connections went, and they will be listed here.</p>`;
   }
-  const where = (url: string): string => {
-    const m = /^\/(c|d)\/([^/]+)$/.exec(url);
-    if (!m) return 'a room';
-    const room = m[1] === 'c' ? channelRoom(root, decodeURIComponent(m[2]), viewer.auth) : dmRoom(root, parseInt(m[2], 10), viewer.auth);
-    return room ? room.title : 'a room you cannot see';
-  };
+  const where = (url: string): string => reportRoom(root, viewer, url)?.title ?? 'a room you cannot see';
   const week = reports.filter((r) => Date.now() - Date.parse(r.at) < 7 * 86400000);
   const count = (f: (r: ConnectionReport) => boolean) => week.filter(f).length;
   const summary = `In the last week: ${count((r) => r.outcome === 'connected' && !relayed(r))} connected directly, ${count(relayed)} through a relay, ${count((r) => r.outcome === 'failed')} failed attempts, ${count((r) => r.outcome === 'dropped')} dropped.`;
@@ -897,7 +957,7 @@ function connectionLog(root: string, viewer: Viewer, reports: ConnectionReport[]
       r.relayOffered ? '' : 'no relay offered',
       ...r.errors.map((e) => `${e.code}${e.text ? ` ${e.text}` : ''} from ${e.url || 'an ICE server'}`),
     ].filter((x) => x !== '');
-    return html`<tr class="${r.outcome}"><td class="muted">${timeTag(r.at)}</td><td>${where(r.room)}</td><td>${r.user} <span class="muted">(${r.device})</span> to ${r.with}</td><td>${describeReport(r)}${
+    return html`<tr class="${r.outcome}"><td class="muted">${timeTag(r.at)}</td><td>${where(r.room)}</td><td>${r.hidden ? html`<span class="muted">(${r.device})</span>` : html`${r.user} <span class="muted">(${r.device})</span> to ${r.with}`}</td><td>${describeReport(r)}${
       r.path?.rtt !== undefined ? html` <span class="muted">${Math.round(r.path.rtt * 1000)} ms round trip</span>` : ''
     }<div class="muted">${details.join('; ')}</div></td></tr>`;
   });
@@ -910,7 +970,7 @@ function connectionLog(root: string, viewer: Viewer, reports: ConnectionReport[]
  * How calls connect. A secret is never written back into the page: its
  * field is blank, says whether one is saved, and a blank field keeps it.
  */
-function callsSection(viewer: Viewer, calls: CallsConfig, reports: ConnectionReport[]): Html {
+function callsSection(viewer: Viewer, calls: CallsConfig, reports: AdminReport[]): Html {
   const t = calls.turn;
   const mode = (value: string, label: string, hint: string) =>
     html`<label class="checkbox" style="display:block;margin-bottom:6px"><input type="radio" name="turn_mode" value="${value}" ${t.mode === value ? raw('checked') : ''}> ${label}<br><span class="muted">${hint}</span></label>`;
@@ -925,7 +985,7 @@ ${relayCheck(calls, reports)}
 <h3>TURN relay</h3>
 ${mode('none', 'None', 'Calls connect directly or not at all.')}
 ${mode('static', 'A TURN server with a fixed username and password', 'Any provider can give you these. They are handed to every member who joins a call.')}
-${mode('coturn', 'coturn, with a shared secret', "coturn's use-auth-secret. The secret stays on this server, which gives each member a credential that expires after 12 hours.")}
+${mode('coturn', 'coturn, with a shared secret', "coturn's use-auth-secret. The secret stays on this server, which gives each member a credential that expires after 2 hours.")}
 ${mode('cloudflare', 'Cloudflare Realtime TURN', 'A TURN key from the Cloudflare dashboard. The API token stays on this server, which asks Cloudflare for a credential for each member who joins.')}
 <div class="field"><label for="turn_urls">TURN server URLs</label><textarea id="turn_urls" name="turn_urls" rows="3" placeholder="turn:turn.example.org:3478&#10;turns:turn.example.org:5349">${t.urls.join('\n')}</textarea>
 <p class="muted">For a fixed password or coturn. One per line; listing both a turn: URL and a turns: URL on port 443 helps members on networks that allow little else.</p></div>

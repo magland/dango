@@ -118,15 +118,19 @@ The container needs both checkouts to build, since it compiles mochiforge's sour
 
 ```bash
 docker build -f Dockerfile -t dango ..
+mkdir workspace && sudo chown 1000:1000 workspace
 docker run -d --name dango -p 3000:3000 -v ./workspace:/workspace dango
 docker logs dango    # copy the one-time owner token
 ```
+
+The image runs as the `node` user, uid 1000, so the directory it keeps the workspace in has to be that user's. Docker creates a missing one as root, and the server then refuses to start, saying it cannot write there; hence the `chown` first. (A named volume, `-v dango-workspace:/workspace`, starts out owned by the right user and needs no such step, at the cost of the files living under Docker's own directory rather than beside you.)
 
 `Dockerfile.dockerignore` limits the context to the two source trees and the manifests, whatever else the parent directory holds; BuildKit, the default builder in current Docker, reads it because it sits beside the Dockerfile. The image runs no git and needs none.
 
 This serves plain HTTP, which is fine on a private network but not on the open internet, since session cookies are only marked `Secure` behind HTTPS. With a domain name pointed at the machine, the included `docker-compose.yml` adds Caddy for automatic HTTPS:
 
 ```bash
+mkdir workspace && sudo chown 1000:1000 workspace
 DOMAIN=chat.example.org docker compose up -d
 docker compose logs dango            # the owner token
 dango login https://chat.example.org

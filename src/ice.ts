@@ -27,8 +27,13 @@ export interface IceConfig {
   problems: string[];
 }
 
-/** How long a made credential lasts. A call longer than this refreshes. */
-export const CREDENTIAL_TTL_S = 12 * 60 * 60;
+/**
+ * How long a made credential lasts. A call longer than this refreshes it
+ * (/call/ice), which asks again whether the person can see the room; so this
+ * is also how long someone taken out of the room, or out of the workspace,
+ * can go on using the relay with what they already hold.
+ */
+export const CREDENTIAL_TTL_S = 2 * 60 * 60;
 
 // The four ICE schemes, and only the characters that belong in their URLs.
 // Port 53 is refused because browsers block it, so such a URL can only time out.

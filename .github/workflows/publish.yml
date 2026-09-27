@@ -31,16 +31,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  # The whole suite, in a job that can write nothing: installing runs every
+  # dependency's install scripts and the suite runs their code, and neither
+  # should happen where the publishing credential can be minted.
+  test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
-      contents: write # to push the release tag
-      id-token: write # to mint the OIDC token npm exchanges for a credential
-      actions: write # to start the image workflow for the tag (see the last step)
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
           path: dango
+          persist-credentials: false
 
       # Dango compiles mochiforge's sources in with its own; see ci.yml.
       - uses: actions/checkout@v4
@@ -48,6 +51,45 @@ jobs:
           repository: magland/mochiforge
           ref: main
           path: mochiforge
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - run: npm ci
+        working-directory: dango
+
+      # The shared modules' packages, where their sources look for them; see ci.yml.
+      - run: ln -s dango/node_modules node_modules
+
+      # The unit suite, then the end-to-end one, which builds the package and
+      # drives the compiled output: a release is the last place a quietly
+      # smaller suite should pass.
+      - run: npm test
+        working-directory: dango
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # to push the release tag
+      id-token: write # to mint the OIDC token npm exchanges for a credential
+      actions: write # to start the image workflow for the tag (see the last step)
+    steps:
+      # Without the checkout's token left in .git/config, where any later
+      # step could read it; the tag is pushed with it explicitly below.
+      - uses: actions/checkout@v4
+        with:
+          path: dango
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magland/mochiforge
+          ref: main
+          path: mochiforge
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -89,23 +131,18 @@ jobs:
           fi
           rm -f packument.json
 
+      # With no install scripts: the packages are only compiled against and
+      # shipped as dependencies here, and the test job above has already
+      # installed them the ordinary way and passed.
       - name: Install
         if: steps.plan.outputs.action != 'first'
         working-directory: dango
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       # The shared modules' packages, where their sources look for them; see ci.yml.
       - name: Link the packages for mochiforge's sources
         if: steps.plan.outputs.action != 'first'
         run: ln -s dango/node_modules node_modules
-
-      # The unit suite, then the end-to-end one, which builds the package and
-      # drives the compiled output: a release is the last place a quietly
-      # smaller suite should pass.
-      - name: Test
-        if: steps.plan.outputs.action != 'first'
-        working-directory: dango
-        run: npm test
 
       # No NODE_AUTH_TOKEN: the credential comes from the OIDC exchange.
       # Provenance is generated as part of trusted publishing; the flag makes
@@ -118,18 +155,21 @@ jobs:
       - name: Tag the release
         if: steps.plan.outputs.action != 'first'
         working-directory: dango
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           version="${{ steps.plan.outputs.version }}"
           # Asked of the remote: the checkout fetches no tags, so a local
           # look would call every existing tag new and fail pushing it.
-          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+          if git ls-remote --exit-code --tags "$remote" "refs/tags/v$version" >/dev/null; then
             echo "Tag v$version already exists; leaving it alone."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "v$version" -m "v$version"
-          git push origin "v$version"
+          git push "$remote" "v$version"
 
       # The image for the release, asked for by name: a tag pushed with the
       # workflow's own token starts no workflow, so image.yml's tag trigger

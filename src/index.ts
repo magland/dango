@@ -73,6 +73,18 @@ async function serveCmd(args: string[], usage: () => never) {
   if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
     throw new CliError(`Workspace directory does not exist: ${root}`);
   }
+  // Said in words, since otherwise the first sign is an EACCES from deep in
+  // a lock file. The usual cause is a Docker bind mount of a directory Docker
+  // created, which is root's, while the image runs as the node user.
+  try {
+    fs.accessSync(root, fs.constants.W_OK);
+  } catch {
+    const who = typeof process.getuid === 'function' ? ` (uid ${process.getuid()})` : '';
+    throw new CliError(
+      `This process${who} cannot write to the workspace directory ${root}. Give the directory to this user, ` +
+        'or, in Docker, use a named volume rather than a bind mount (see docs/deploying.md).'
+    );
+  }
   // A workspace with no workspace.json is initialized on first start, exactly
   // as a vault is: the owner token is minted and printed once, or supplied
   // through DANGO_OWNER_TOKEN and then not printed at all.

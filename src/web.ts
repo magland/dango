@@ -17,8 +17,10 @@ import {
   addUserToken,
   authenticateToken,
   loadVault,
+  revokeToken,
   setSiteAdmin,
   setUserProfile,
+  tokenId,
   userExists,
 } from '../../mochiforge/src/vault';
 import {
@@ -322,14 +324,34 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     const viewer = requireViewer(req, res);
     if (!viewer) return;
     const q = String(req.query.q ?? '');
-    const hits = q.trim() === '' ? [] : searchMessages(root, viewer.auth, q);
-    res.type('html').send(views.searchPage(root, viewer, q, hits));
+    const info = { partial: false };
+    const hits = q.trim() === '' ? [] : searchMessages(root, viewer.auth, q, info);
+    res.type('html').send(views.searchPage(root, viewer, q, hits, info.partial));
   });
 
   app.get('/account', (req, res) => {
     const viewer = requireViewer(req, res);
     if (!viewer) return;
     res.type('html').send(views.accountPage(root, viewer, accountNotifications(viewer)));
+  });
+
+  // Revoking one of your own tokens, from the list on the Account page. Not
+  // the one this browser signed in with (the page does not offer it), which
+  // would leave the person signed out with no token to come back with.
+  app.post('/account/tokens/revoke', urlenc, (req, res) => {
+    const viewer = requireForm(req, res);
+    if (!viewer) return;
+    const id = String((req.body as Record<string, unknown>).id ?? '');
+    if (id === tokenId(viewer.auth.token)) {
+      fail(res, viewer, 400, 'That is the token this browser signed in with; sign in with another to revoke it.');
+      return;
+    }
+    const { revoked } = revokeToken(root, viewer.auth.username, id);
+    if (!revoked) {
+      fail(res, viewer, 404, 'You hold no token of that id.');
+      return;
+    }
+    res.redirect(303, '/account');
   });
 
   app.post('/account', urlenc, (req, res) => {
@@ -517,7 +539,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       fail(res, viewer, 409, `There is already a user named ${username}.`);
       return;
     }
-    const { token, created } = addUserToken(root, username, { siteAdmin: body.admin === '1' });
+    const { token, created } = addUserToken(root, username, { siteAdmin: body.admin === '1', by: viewer.auth.username });
     res.type('html').send(views.tokenPage(root, viewer, username, token, created, originOf(req)));
   });
 
@@ -529,7 +551,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       fail(res, viewer, 404, `There is no user named ${username}.`);
       return;
     }
-    const { token } = addUserToken(root, username, {});
+    const { token } = addUserToken(root, username, { by: viewer.auth.username });
     res.type('html').send(views.tokenPage(root, viewer, username, token, false, originOf(req)));
   });
 

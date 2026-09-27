@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { withFileLock, writeFileAtomic } from '../../mochiforge/src/atomic';
+import { fileCache } from '../../mochiforge/src/filecache';
 import { OpError } from '../../mochiforge/src/ops';
 import { dmDir, dmsDir } from './workspace';
 
@@ -41,12 +42,28 @@ function conversationFile(root: string, id: number): string {
 
 export function readDm(root: string, id: number): DmInfo | null {
   if (!Number.isInteger(id) || id < 1) return null;
-  let text: string;
-  try {
-    text = fs.readFileSync(conversationFile(root, id), 'utf8');
-  } catch {
-    return null;
-  }
+  const dm = dmCache.get(conversationFile(root, id));
+  return dm && { ...dm, id };
+}
+
+/**
+ * Every page's sidebar lists the viewer's conversations, which is a read of
+ * every conversation.json in the workspace; kept parsed, and read again only
+ * when a file's stat changes (the forge's file cache). The id is filled in
+ * by readDm, since it is the directory's name rather than the file's content.
+ */
+const dmCache = fileCache<DmInfo | null>({
+  read: (file) => {
+    try {
+      return parseDm(fs.readFileSync(file, 'utf8'));
+    } catch {
+      return null;
+    }
+  },
+  missing: () => null,
+});
+
+function parseDm(text: string): DmInfo | null {
   try {
     const parsed = JSON.parse(text) as Record<string, unknown>;
     const names = (v: unknown) => (Array.isArray(v) ? v.filter((p): p is string => typeof p === 'string') : []);
@@ -54,7 +71,7 @@ export function readDm(root: string, id: number): DmInfo | null {
     const former = names(parsed.former).filter((p) => !participants.includes(p));
     if (participants.length < 1 || participants.length + former.length < 2) return null;
     return {
-      id,
+      id: 0,
       participants: [...participants].sort(),
       ...(former.length ? { former: [...former].sort() } : {}),
       ...(typeof parsed.created === 'string' ? { created: parsed.created } : {}),
@@ -161,6 +178,7 @@ export function leaveAllDms(root: string, user: string): void {
         former: [...new Set([...former, user])],
       };
       writeFileAtomic(file, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 });
+      dmCache.invalidate(file);
     });
   }
 }

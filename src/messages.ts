@@ -107,17 +107,55 @@ function messageFile(room: string, id: number): string {
   return path.join(messagesDir(room), `${id}.md`);
 }
 
+/**
+ * A room's message ids, oldest first, as its directory lists them. Listing
+ * and sorting a room of twenty thousand messages takes some milliseconds, and
+ * one send asks several times (and once more for each person with the room
+ * open), so the list is kept per directory and listed again only when the
+ * directory's modification time moves, which creating or removing a file in
+ * it does.
+ *
+ * This process's own creations and removals forget the list outright (see
+ * forgetIds), which is what keeps it right for every message the workspace
+ * writes. The modification time is for what arrives some other way, a file
+ * written by hand or restored from a backup; and file times are coarse (a
+ * few milliseconds on Linux), so a file created just after a listing can
+ * leave the time where it was. A list made within RACY_MS of the directory's
+ * last change is therefore trusted for RACY_MS and then made again, the way
+ * git treats an index entry as racy, so such a file shows within that long.
+ * Callers must not modify the array they are given.
+ */
+const idCache = new Map<string, { mtimeMs: number; listedAt: number; ids: number[] }>();
+const RACY_MS = 2000;
+
 function messageIds(room: string): number[] {
+  const dir = messagesDir(room);
+  let mtimeMs: number;
+  try {
+    mtimeMs = fs.statSync(dir).mtimeMs;
+  } catch {
+    idCache.delete(dir);
+    return [];
+  }
+  const hit = idCache.get(dir);
+  if (hit && hit.mtimeMs === mtimeMs && (hit.listedAt - mtimeMs >= RACY_MS || Date.now() - hit.listedAt < RACY_MS)) return hit.ids;
+  const listedAt = Date.now();
   let files: string[];
   try {
-    files = fs.readdirSync(messagesDir(room));
+    files = fs.readdirSync(dir);
   } catch {
     return [];
   }
-  return files
+  const ids = files
     .filter((f) => /^[1-9][0-9]*\.md$/.test(f))
     .map((f) => parseInt(f, 10))
     .sort((a, b) => a - b);
+  idCache.set(dir, { mtimeMs, listedAt, ids });
+  return ids;
+}
+
+function forgetIds(room: string): void {
+  idCache.delete(messagesDir(room));
 }
 
 /**
@@ -289,6 +327,8 @@ export function addMessage(
       fs.closeSync(fs.openSync(file, 'wx'));
     } catch {
       continue;
+    } finally {
+      forgetIds(room);
     }
     const meta: Record<string, unknown> = { author: input.author, created: now };
     if (input.files?.length) meta.files = input.files;
@@ -318,6 +358,7 @@ export function addMessage(
 export function unsendMessage(room: string, id: number): void {
   fs.rmSync(filesDir(room, id), { recursive: true, force: true });
   fs.rmSync(messageFile(room, id), { force: true });
+  forgetIds(room);
 }
 
 /**

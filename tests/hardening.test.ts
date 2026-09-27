@@ -7,13 +7,14 @@ import { test } from 'node:test';
 import { bootstrapVault, addUserToken } from '../../mochiforge/src/vault';
 import { parseReport } from '../src/calllog';
 import { createChannel, readChannel } from '../src/channels';
-import { loadConfig, moveTurnSecrets } from '../src/config';
+import { loadConfig, moveTurnSecrets, updateConfig } from '../src/config';
 import { openDm, readDm } from '../src/dms';
 import { MAX_ATTACHMENTS, addMessage, changedSince, countAfter, editMessage, readMessage, readMessages, toggleReaction } from '../src/messages';
 import { forgetRoom, readPrefs, setMuted } from '../src/notify';
 import { postMessage } from '../src/post';
 import { markRead, readMarkers } from '../src/reads';
 import { channelRoom, removeWorkspaceUser } from '../src/rooms';
+import { SCAN_LIMIT, searchMessages } from '../src/search';
 import { channelDir, userDir } from '../src/workspace';
 
 function tmp(): string {
@@ -147,4 +148,32 @@ test('a page that lost its stream is told what changed meanwhile, and how far be
   addMessage(path.join(room, 'threads', '1'), { author: 'bob', body: 'a reply' });
   assert.deepStrictEqual(changedSince(room, 4, since).map((m) => m.id), [1, 2, 3]);
   assert.deepStrictEqual(changedSince(room, 2, since).map((m) => m.id), [1, 2], 'only what the page already has');
+});
+
+test('saving settings keeps what was written into config.json by hand', () => {
+  const root = tmp();
+  fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify({ name: 'W', note: 'mine', limits: { future: 3 } }));
+  updateConfig(root, { name: 'Renamed' });
+  const raw = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
+  assert.strictEqual(raw.name, 'Renamed');
+  assert.strictEqual(raw.note, 'mine');
+  assert.strictEqual(raw.limits.future, 3);
+  assert.strictEqual(loadConfig(root).name, 'Renamed');
+});
+
+test('a search says when some room was longer than it reads', () => {
+  const root = tmp();
+  createChannel(root, 'long', { createdBy: 'alice' });
+  const dir = channelDir(root, 'long');
+  addMessage(dir, { author: 'alice', body: 'needle' });
+  // Settled long ago, so that the listing below is trusted until the
+  // directory changes (see messageIds).
+  const past = (Date.now() - 60000) / 1000;
+  fs.utimesSync(path.join(dir, 'messages'), past, past);
+  const info = { partial: false };
+  assert.strictEqual(searchMessages(root, auth('alice'), 'needle', info).length, 1);
+  assert.strictEqual(info.partial, false);
+  fs.writeFileSync(path.join(dir, 'messages', `${SCAN_LIMIT + 1}.md`), '---\nauthor: bob\ncreated: 2026-01-01T00:00:00.000Z\n---\nlate\n');
+  searchMessages(root, auth('alice'), 'needle', info);
+  assert.strictEqual(info.partial, true);
 });

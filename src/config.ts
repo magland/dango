@@ -262,8 +262,26 @@ export function moveTurnSecrets(root: string): boolean {
   });
 }
 
-/** Rewrite config.json with some fields changed, keeping the rest. */
+/**
+ * Rewrite config.json with some fields changed, keeping the rest: under the
+ * file's lock, so two admins saving at once do not lose one's change, and
+ * over what the file holds, so a field written by hand that this version does
+ * not know is kept rather than dropped by the save.
+ */
 export function updateConfig(root: string, changes: Partial<WorkspaceConfig>): WorkspaceConfig {
+  return withFileLock(`${configFilePath(root)}.lock`, () => updateConfigLocked(root, changes));
+}
+
+function updateConfigLocked(root: string, changes: Partial<WorkspaceConfig>): WorkspaceConfig {
+  cache.invalidate(configFilePath(root));
+  secretsCache.invalidate(path.join(root, TURN_SECRETS_FILE));
+  let raw: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(configFilePath(root), 'utf8')) as unknown;
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) raw = parsed as Record<string, unknown>;
+  } catch {
+    raw = {};
+  }
   const current = loadConfig(root);
   const next: WorkspaceConfig = {
     ...current,
@@ -279,6 +297,16 @@ export function updateConfig(root: string, changes: Partial<WorkspaceConfig>): W
     delete turn[k];
   }
   writeFileAtomic(path.join(root, TURN_SECRETS_FILE), JSON.stringify(secrets, null, 2) + '\n', { mode: 0o600 });
-  writeFileAtomic(configFilePath(root), JSON.stringify({ ...next, calls: { ...next.calls, turn } }, null, 2) + '\n', { mode: 0o600 });
+  const sub = (k: string) => (typeof raw[k] === 'object' && raw[k] !== null ? (raw[k] as Record<string, unknown>) : {});
+  const out = {
+    ...raw,
+    ...next,
+    network: { ...sub('network'), ...next.network },
+    limits: { ...sub('limits'), ...next.limits },
+    calls: { ...sub('calls'), ...next.calls, turn },
+  };
+  writeFileAtomic(configFilePath(root), JSON.stringify(out, null, 2) + '\n', { mode: 0o600 });
+  cache.invalidate(configFilePath(root));
+  secretsCache.invalidate(path.join(root, TURN_SECRETS_FILE));
   return next;
 }

@@ -415,12 +415,15 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
   app.get('/api/search', (req, res) =>
     withAuth(req, res, (auth) => {
       const q = String(req.query.q ?? '');
+      const info = { partial: false };
+      const hits = searchMessages(root, auth, q, info);
       res.json({
-        hits: searchMessages(root, auth, q).map((h) => ({
+        hits: hits.map((h) => ({
           url: h.url,
           where: h.where,
           message: messageJson(h.message),
         })),
+        ...(info.partial ? { partial: true } : {}),
       });
     })
   );
@@ -465,7 +468,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         apiError(res, 409, `there is already a user named ${username}`);
         return;
       }
-      const { token } = addUserToken(root, username, { siteAdmin: b.siteAdmin === true });
+      const { token } = addUserToken(root, username, { siteAdmin: b.siteAdmin === true, by: auth.username });
       res.status(201).json({ username, token, invite: inviteLink(originOf(req), token) });
     })
   );
@@ -477,7 +480,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         apiError(res, 404, `no user ${req.params.name}`);
         return;
       }
-      const { token, user } = addUserToken(root, req.params.name, {});
+      const { token, user } = addUserToken(root, req.params.name, { by: auth.username });
       res.status(201).json({
         username: req.params.name,
         token,

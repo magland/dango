@@ -25,8 +25,8 @@ export interface SearchHit {
   message: Message;
 }
 
-const MAX_HITS = 100;
-const SCAN_LIMIT = 5000;
+export const MAX_HITS = 100;
+export const SCAN_LIMIT = 5000;
 
 export interface SearchQuery {
   /** The text to find, lowercased; empty when the query is filters alone. */
@@ -63,14 +63,18 @@ function scanRoom(
   where: string,
   needle: SearchQuery,
   out: SearchHit[],
-  withThreads: boolean
+  withThreads: boolean,
+  info: SearchInfo
 ): void {
+  if (lastMessageId(dir) > SCAN_LIMIT) info.partial = true;
   const messages = readMessages(dir, { limit: SCAN_LIMIT });
   for (const m of messages) {
     if (matches(m, needle)) out.push({ url: `${url}#msg-${m.id}`, where, message: m });
     if (withThreads && m.replyCount > 0) {
       const tdir = threadRoomDir(dir, m.id);
-      if (lastMessageId(tdir) > 0) {
+      const replies = lastMessageId(tdir);
+      if (replies > SCAN_LIMIT) info.partial = true;
+      if (replies > 0) {
         for (const r of readMessages(tdir, { limit: SCAN_LIMIT })) {
           if (matches(r, needle)) {
             out.push({ url: `${url}/t/${m.id}#msg-${r.id}`, where: `${where} (thread)`, message: r });
@@ -81,19 +85,29 @@ function scanRoom(
   }
 }
 
-export function searchMessages(root: string, auth: AuthResult, query: string): SearchHit[] {
+/**
+ * What a search says about itself beside its hits: whether some room was
+ * longer than the walk reads (SCAN_LIMIT), so that its older messages were
+ * not searched. The page says so rather than letting "nothing matched" stand
+ * for "nothing in what was read matched".
+ */
+export interface SearchInfo {
+  partial: boolean;
+}
+
+export function searchMessages(root: string, auth: AuthResult, query: string, info: SearchInfo = { partial: false }): SearchHit[] {
   const needle = parseQuery(query);
   if (needle.text === '' && needle.from === undefined && needle.in === undefined) return [];
   const out: SearchHit[] = [];
   for (const c of listChannels(root)) {
     if (!canSeeChannel(auth, c)) continue;
     if (needle.in !== undefined && c.name !== needle.in) continue;
-    scanRoom(channelDir(root, c.name), `/c/${encodeURIComponent(c.name)}`, `#${c.name}`, needle, out, true);
+    scanRoom(channelDir(root, c.name), `/c/${encodeURIComponent(c.name)}`, `#${c.name}`, needle, out, true, info);
     keepNewest(out);
   }
   for (const dm of listDmsFor(root, auth.username)) {
     if (needle.in !== undefined && !dm.participants.some((p) => p !== auth.username && p.toLowerCase() === needle.in)) continue;
-    scanRoom(dmDir(root, dm.id), `/d/${dm.id}`, dmTitle(dm, auth.username), needle, out, true);
+    scanRoom(dmDir(root, dm.id), `/d/${dm.id}`, dmTitle(dm, auth.username), needle, out, true, info);
     keepNewest(out);
   }
   return out;
