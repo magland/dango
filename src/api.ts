@@ -121,7 +121,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
   app.post('/api/channels', json, (req, res) =>
     withAuth(req, res, (auth) => {
       const b = body(req);
-      limits.action(auth.username);
+      limits.newRoom(auth.username);
       const c = createChannel(root, String(b.name ?? '').toLowerCase(), {
         topic: typeof b.topic === 'string' ? b.topic : '',
         private: b.private === true,
@@ -157,6 +157,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         apiError(res, 400, 'send {"topic": "..."}');
         return;
       }
+      limits.action(auth.username);
       res.json(channelJson(setTopic(root, room.channel!.name, topic)));
     })
   );
@@ -185,6 +186,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         apiError(res, 404, `no user ${user}`);
         return;
       }
+      limits.action(auth.username);
       res.json(channelJson(addMember(root, room.channel!.name, user)));
     })
   );
@@ -198,6 +200,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         apiError(res, 403, 'you can remove yourself; removing others is for a site admin');
         return;
       }
+      limits.action(auth.username);
       const channel = removeMember(root, room.channel!.name, user);
       pruneCalls(root);
       res.json(channelJson(channel));
@@ -225,8 +228,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
           return;
         }
       }
-      limits.action(auth.username);
-      res.status(201).json(dmJson(openDm(root, [auth.username, ...users])));
+      res.status(201).json(dmJson(openDm(root, [auth.username, ...users], { charge: () => limits.newRoom(auth.username) })));
     })
   );
 
@@ -415,6 +417,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
   app.get('/api/search', (req, res) =>
     withAuth(req, res, (auth) => {
       const q = String(req.query.q ?? '');
+      limits.search(auth.username);
       const info = { partial: false };
       const hits = searchMessages(root, auth, q, info);
       res.json({

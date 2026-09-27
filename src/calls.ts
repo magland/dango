@@ -147,9 +147,13 @@ function resumable(room: Room, callId: string): Message | null {
  * Put a page into the room's call, starting the call if there is none. The
  * page must be the viewer's own open page. `resume` is the id of the call
  * the page was in before its stream dropped, so that a call carried on
- * through a restart of the workspace keeps its entry. Returns the call's id.
+ * through a restart of the workspace keeps its entry. `charge` is called when
+ * a new call is to post its entry: a call started is a message in the room,
+ * and in a direct conversation a notification, so starting calls is held to
+ * the limits on sending, lest joining and leaving over and over become a way
+ * around them. Returns the call's id.
  */
-export function joinCall(root: string, room: Room, user: string, peer: string, resume?: string): string {
+export function joinCall(root: string, room: Room, user: string, peer: string, resume?: string, charge?: () => void): string {
   if (room.kind === 'thread') throw new OpError('A call belongs to a channel or a conversation, not a thread.');
   if (clientOwner(peer) !== user) {
     throw new OpError('This page has lost its connection to the workspace. Wait a moment and try again, or reload the page.', 'conflict');
@@ -172,7 +176,7 @@ export function joinCall(root: string, room: Room, user: string, peer: string, r
       const id = randomBytes(8).toString('hex');
       // The entry is posted before the call is registered, and a refusal to
       // post (the room's limits, a full disk) is a refusal to start the call.
-      entry = postMessage(root, room, { author: user, body: 'started a call', call: { id, people: [user] } });
+      entry = postMessage(root, room, { author: user, body: 'started a call', call: { id, people: [user] } }, { charge });
       call = { id, root, room, started: Date.now(), messageId: entry.id, participants: new Map() };
     }
     calls.set(room.url, call);

@@ -3,14 +3,17 @@ import assert from 'node:assert';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
+import { Response } from 'express';
+import { readDoc, writeDoc } from '../../mochiforge/src/discussion';
 import { bootstrapVault, addUserToken } from '../../mochiforge/src/vault';
 import { parseReport } from '../src/calllog';
 import { createChannel, readChannel } from '../src/channels';
 import { loadConfig, moveTurnSecrets, updateConfig } from '../src/config';
 import { openDm, readDm } from '../src/dms';
-import { MAX_ATTACHMENTS, addMessage, changedSince, countAfter, editMessage, readMessage, readMessages, toggleReaction } from '../src/messages';
-import { forgetRoom, readPrefs, setMuted } from '../src/notify';
+import { MAX_ATTACHMENTS, MAX_REACTIONS, addMessage, changedSince, countAfter, editMessage, readMessage, readMessages, toggleReaction } from '../src/messages';
+import { MAX_UNSENT_BYTES, STALLED_BYTES, publish, serveEvents } from '../src/events';
+import { forgetRoom, isRoomKey, readPrefs, setMuted, writePrefs } from '../src/notify';
 import { postMessage } from '../src/post';
 import { markRead, readMarkers } from '../src/reads';
 import { channelRoom, removeWorkspaceUser } from '../src/rooms';
@@ -25,17 +28,39 @@ function auth(username: string) {
   return { username, user: { tokens: [] }, token: { hash: '' } };
 }
 
-test('a reaction may be spelled like a property every object has', () => {
+test('a reaction kept under a name every object has stays a key like any other', () => {
   const room = tmp();
   const m = addMessage(room, { author: 'alice', body: 'x' });
-  for (const e of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
-    const after = toggleReaction(room, m.id, e, 'bob');
-    assert.deepStrictEqual(after.reactions[e], ['bob'], e);
-  }
+  // Such names are not emoji and are refused as reactions, but a file edited
+  // by hand, or written by an earlier version, can still hold them.
+  const file = path.join(room, 'messages', `${m.id}.md`);
+  const doc = readDoc(file)!;
+  const names = ['__proto__', 'constructor', 'toString', 'hasOwnProperty'];
+  writeDoc(file, { ...doc.meta, reactions: Object.fromEntries(names.map((e) => [e, ['bob']])) }, doc.body);
+  for (const e of names) assert.throws(() => toggleReaction(room, m.id, e, 'carol'), /one emoji/, e);
+  const after = toggleReaction(room, m.id, '\u{1F44D}', 'bob');
+  for (const e of names) assert.deepStrictEqual(after.reactions[e], ['bob'], e);
   const back = readMessage(room, m.id)!;
-  assert.deepStrictEqual(Object.keys(back.reactions).sort(), ['__proto__', 'constructor', 'hasOwnProperty', 'toString']);
-  toggleReaction(room, m.id, '__proto__', 'bob');
-  assert.strictEqual(Object.keys(readMessage(room, m.id)!.reactions).includes('__proto__'), false);
+  assert.deepStrictEqual(Object.keys(back.reactions).sort(), ['__proto__', 'constructor', 'hasOwnProperty', 'toString', '\u{1F44D}'].sort());
+  assert.strictEqual(Object.getPrototypeOf(back.reactions), Object.prototype);
+});
+
+test('a reaction is one emoji, and a message gathers at most so many', () => {
+  const room = tmp();
+  const m = addMessage(room, { author: 'alice', body: 'x' });
+  for (const e of ['ok', 'you are wrong', '1', '#', '\u{1F44D}\u{1F44D}', 'x\u{1F44D}', '\u{1F1EB}', '"><b>x</b>']) {
+    assert.throws(() => toggleReaction(room, m.id, e, 'bob'), /one emoji/, e);
+  }
+  for (const e of ['\u{1F44D}\u{1F3FD}', '\u{1F1EB}\u{1F1F7}', '1\uFE0F\u20E3', '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}', ':tada:']) {
+    assert.doesNotThrow(() => toggleReaction(room, m.id, e, 'bob'), e);
+  }
+  // Fill the message to the cap with distinct pictographs, then one more.
+  const room2 = tmp();
+  const m2 = addMessage(room2, { author: 'alice', body: 'x' });
+  const faces = Array.from({ length: MAX_REACTIONS + 1 }, (_, i) => String.fromCodePoint(0x1f600 + i));
+  for (const e of faces.slice(0, MAX_REACTIONS)) toggleReaction(room2, m2.id, e, 'bob');
+  assert.throws(() => toggleReaction(room2, m2.id, faces[MAX_REACTIONS], 'bob'), /at most 50 different reactions/);
+  assert.doesNotThrow(() => toggleReaction(room2, m2.id, faces[0], 'carol'), 'joining a reaction already there still works');
 });
 
 test('a message carries at most so many files', () => {
@@ -176,4 +201,80 @@ test('a search says when some room was longer than it reads', () => {
   fs.writeFileSync(path.join(dir, 'messages', `${SCAN_LIMIT + 1}.md`), '---\nauthor: bob\ncreated: 2026-01-01T00:00:00.000Z\n---\nlate\n');
   searchMessages(root, auth('alice'), 'needle', info);
   assert.strictEqual(info.partial, true);
+});
+
+/** A stream's response, with its unsent output set by the test. */
+function stream() {
+  const closers: (() => void)[] = [];
+  const res = {
+    writableLength: 0,
+    destroyed: false,
+    writes: 0,
+    writeHead() {},
+    write() {
+      res.writes++;
+      return true;
+    },
+    end() {
+      res.destroy();
+    },
+    destroy() {
+      if (res.destroyed) return;
+      res.destroyed = true;
+      closers.forEach((f) => f());
+    },
+    on(ev: string, fn: () => void) {
+      if (ev === 'close') closers.push(fn);
+    },
+    status() {
+      return res;
+    },
+    setHeader() {},
+  };
+  return res;
+}
+
+test('a stream whose reader has stopped reading is let go', () => {
+  mock.timers.enable({ apis: ['setInterval'] });
+  try {
+    const url = '/c/stalled-test';
+    const message = { id: 1, author: 'a', created: '', body: '', reactions: {}, files: [], replyCount: 0 };
+    const slow = stream();
+    serveEvents(slow as unknown as Response, 'reader', url, [], () => 'x', () => true);
+    slow.writableLength = STALLED_BYTES + 10;
+    mock.timers.tick(25000);
+    assert.strictEqual(slow.destroyed, false, 'the first heartbeat sees the backlog');
+    mock.timers.tick(25000);
+    assert.strictEqual(slow.destroyed, true, 'a backlog that did not go down is a reader that stopped');
+
+    const draining = stream();
+    serveEvents(draining as unknown as Response, 'reader', url, [], () => 'x', () => true);
+    draining.writableLength = STALLED_BYTES * 3;
+    mock.timers.tick(25000);
+    draining.writableLength = STALLED_BYTES * 2;
+    mock.timers.tick(25000);
+    assert.strictEqual(draining.destroyed, false, 'a slow reader that is taking its backlog is kept');
+
+    const flooded = stream();
+    serveEvents(flooded as unknown as Response, 'reader', url, [], () => 'x', () => true);
+    flooded.writableLength = MAX_UNSENT_BYTES + 1;
+    publish(url, { type: 'message', message });
+    assert.strictEqual(flooded.destroyed, true, 'past the ceiling it goes at once');
+    const writes = flooded.writes;
+    publish(url, { type: 'message', message });
+    assert.strictEqual(flooded.writes, writes, 'and hears nothing more');
+    draining.destroy();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('the muted list holds only room keys, and only so many', () => {
+  const root = tmp();
+  for (const k of ['c/general', 'd/3']) assert.ok(isRoomKey(k), k);
+  for (const k of ['', 'general', 'c/', 'c/Not-A-Name', 'd/0', 'd/x', 'x/1', 'c/general/t/4']) assert.ok(!isRoomKey(k), k);
+  const many = Array.from({ length: 2000 }, (_, i) => `d/${i + 1}`);
+  const prefs = writePrefs(root, 'alice', { ...readPrefs(root, 'alice'), muted: ['junk', 'c/general', ...many] });
+  assert.strictEqual(prefs.muted[0], 'c/general');
+  assert.strictEqual(prefs.muted.length, 500);
 });

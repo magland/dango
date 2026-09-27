@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { withFileLock, writeFileAtomic } from '../../mochiforge/src/atomic';
 import { fileCache } from '../../mochiforge/src/filecache';
+import { createLimiter } from '../../mochiforge/src/limit';
 import { AuthResult, loadVault } from '../../mochiforge/src/vault';
 import { readChannel } from './channels';
 import { dmTitle, readDm } from './dms';
@@ -11,7 +12,7 @@ import { canSeeChannel, canSeeDm } from './perms';
 import { PushTarget, isPushEndpoint, sendPush } from './push';
 import { Room } from './rooms';
 import { audienceOf, forgetMarkers, isKeyOf, mentionsUser, readKey, readMarkers, unreadRooms } from './reads';
-import { isValidWorkspaceUserName, userDir, usersDir } from './workspace';
+import { isValidChannelName, isValidWorkspaceUserName, userDir, usersDir } from './workspace';
 
 // Notifications: who is told about a message when they have no page open to
 // see it arrive, and on which of their devices.
@@ -76,6 +77,15 @@ export interface NotifyPrefs {
   quiet: QuietHours | null;
 }
 
+/** The most rooms one person's preferences list as muted. */
+export const MAX_MUTED = 500;
+
+/** Whether a string names a room as read.json and the muted list key it: "c/general", "d/3". */
+export function isRoomKey(k: string): boolean {
+  const c = /^c\/(.+)$/.exec(k);
+  return c ? isValidChannelName(c[1]) : /^d\/[1-9][0-9]{0,15}$/.test(k);
+}
+
 export const DEFAULT_PREFS: NotifyPrefs = { level: 'direct', preview: true, muted: [], quiet: null };
 
 function defaults(): NotifyPrefs {
@@ -102,7 +112,7 @@ function normalizePrefs(parsed: unknown): NotifyPrefs {
   const rec = parsed as Record<string, unknown>;
   if (rec.level === 'all' || rec.level === 'direct' || rec.level === 'none') out.level = rec.level;
   if (typeof rec.preview === 'boolean') out.preview = rec.preview;
-  if (Array.isArray(rec.muted)) out.muted = [...new Set(rec.muted.filter((k): k is string => typeof k === 'string'))];
+  if (Array.isArray(rec.muted)) out.muted = [...new Set(rec.muted.filter((k): k is string => typeof k === 'string' && isRoomKey(k)))].slice(0, MAX_MUTED);
   const q = rec.quiet as Record<string, unknown> | null | undefined;
   if (q && isTimeOfDay(q.start) && isTimeOfDay(q.end) && q.start !== q.end) {
     out.quiet = { start: q.start, end: q.end, tz: isTimeZone(q.tz) ? q.tz : 'UTC' };
@@ -535,6 +545,17 @@ interface Pending {
 const pending = new Map<string, Pending>();
 
 /**
+ * The most notifications pushed to one person a minute, from every room
+ * together. The wait above makes a room's messages one notification every
+ * few seconds; this bounds what many rooms at once can do, whether a busy
+ * workspace heard at the `all` level or someone mentioning a person from one
+ * new conversation after another. Past it nothing is pushed until the minute
+ * is out, and what arrived is in the unread counts, where it would be read.
+ */
+export const MAX_PUSHES_PER_MINUTE = 10;
+const pushesTo = createLimiter({ limit: MAX_PUSHES_PER_MINUTE, windowMs: 60_000, maxKeys: 100000 });
+
+/**
  * Called for every new message. Works out, for each person the room reaches
  * who has a device to reach them on, whether they want to hear of it, and
  * queues it for them; the queue for a person and a room fires once, a few
@@ -589,6 +610,7 @@ async function deliver(root: string, username: string, entry: Pending): Promise<
     .map((id) => readMessage(entry.room.dir, id))
     .filter((x): x is Message => x !== null && wantsPush(prefs, entry.room, x, username, inThread));
   if (!messages.length) return;
+  if (!pushesTo.hit(username).ok) return;
   const note = composeNotification(root, entry.room, messages, username, prefs);
   const urgent = entry.room.dm !== undefined || messages.some((x) => mentionsUser(x.body, username));
   await pushToUser(root, username, note, { urgency: urgent ? 'high' : 'normal', topic: entry.room.url });

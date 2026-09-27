@@ -16,6 +16,7 @@ import { ClientEvent, clientOwner, serveUserEvents } from '../src/events';
 import { coturnCredential, iceFor, sanitizeIceServers, turnProblem } from '../src/ice';
 import { readMessages } from '../src/messages';
 import { DEFAULT_PREFS, wantsPush } from '../src/notify';
+import { RateLimited } from '../src/limits';
 import { canEditMessage } from '../src/perms';
 import { channelRoom, dmRoom } from '../src/rooms';
 import { callLength } from '../src/views';
@@ -357,4 +358,31 @@ test('how long a call lasted, in words', () => {
   assert.strictEqual(callLength(23 * 60 * 1000), '23 minutes');
   assert.strictEqual(callLength(60 * 60 * 1000), '1 hour');
   assert.strictEqual(callLength(125 * 60 * 1000), '2 hours 5 minutes');
+});
+
+test('starting a call is charged as a message, and joining one under way is not', () => {
+  const root = tmpRoot();
+  createChannel(root, 'general', { createdBy: 'alice' });
+  const room = channelRoom(root, 'general', auth('alice'))!;
+  const a = open('alice', 900);
+  const b = open('bob', 901);
+  let charged = 0;
+  const refuse = () => {
+    throw new RateLimited('slow down', 5);
+  };
+  assert.throws(() => joinCall(root, room, 'alice', a.id, undefined, refuse), RateLimited);
+  assert.strictEqual(liveCall(room.url), null, 'a refused start leaves no call');
+  assert.strictEqual(readMessages(room.dir, {}).length, 0, 'and no entry in the timeline');
+  joinCall(root, room, 'alice', a.id, undefined, () => charged++);
+  joinCall(root, room, 'bob', b.id, undefined, () => charged++);
+  assert.strictEqual(charged, 1);
+});
+
+test('a conversation is charged when it is made, not when it is opened again', () => {
+  const root = tmpRoot();
+  let charged = 0;
+  const first = openDm(root, ['alice', 'bob'], { charge: () => charged++ });
+  const again = openDm(root, ['bob', 'alice'], { charge: () => charged++ });
+  assert.strictEqual(again.id, first.id);
+  assert.strictEqual(charged, 1);
 });

@@ -112,9 +112,11 @@ function sameSet(a: string[], b: string[]): boolean {
  * The conversation among exactly these people, created if it does not exist.
  * One conversation per set of participants, found by scanning; the window in
  * which two people simultaneously start the same conversation and get two is
- * real but harmless, since both work and both are listed.
+ * real but harmless, since both work and both are listed. `charge` is called
+ * only when a conversation is to be made, so opening one that exists costs
+ * its opener nothing against their limits.
  */
-export function openDm(root: string, participants: string[]): DmInfo {
+export function openDm(root: string, participants: string[], opts: { charge?: () => void } = {}): DmInfo {
   const set = [...new Set(participants)].sort();
   if (set.length < 2) throw new OpError('A conversation needs someone besides you in it.');
   if (set.length > MAX_PARTICIPANTS) {
@@ -126,6 +128,7 @@ export function openDm(root: string, participants: string[]): DmInfo {
     const dm = readDm(root, id);
     if (dm && !dm.former && sameSet(dm.participants, set)) return dm;
   }
+  opts.charge?.();
   fs.mkdirSync(dmsDir(root), { recursive: true });
   let id = (dmIds(root).pop() ?? 0) + 1;
   for (let attempt = 0; attempt < 50; attempt++, id++) {

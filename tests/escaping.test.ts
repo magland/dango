@@ -6,7 +6,8 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import { Viewer } from '../../mochiforge/src/session';
 import { createChannel } from '../src/channels';
-import { addMessage, toggleReaction } from '../src/messages';
+import { readDoc, writeDoc } from '../../mochiforge/src/discussion';
+import { addMessage, readMessage } from '../src/messages';
 import { channelRoom } from '../src/rooms';
 import { channelPage, loginPage, messageHtml } from '../src/views';
 
@@ -43,8 +44,13 @@ test('a hostile topic and a hostile reaction render inert on the channel page', 
   const root = tmpRoot();
   createChannel(root, 'general', { topic: `"><img src=x onerror=alert(1)>`, createdBy: 'eve' });
   const room = channelRoom(root, 'general', viewer('eve').auth)!;
-  const m = addMessage(room.dir, { author: 'eve', body: 'hello' });
-  toggleReaction(room.dir, m.id, '"><b>x</b>', 'eve');
+  const added = addMessage(room.dir, { author: 'eve', body: 'hello' });
+  // The interface refuses a reaction that is not an emoji, so the hostile one
+  // is written into the file, as a hand edit or an older version could have.
+  const file = path.join(room.dir, 'messages', `${added.id}.md`);
+  const doc = readDoc(file)!;
+  writeDoc(file, { ...doc.meta, reactions: { '"><b>x</b>': ['eve'] } }, doc.body);
+  const m = readMessage(room.dir, added.id)!;
   const out = channelPage(root, room, [m], viewer('eve'));
   assert.ok(!out.includes('<img src=x'), 'the attribute break stayed text');
   assert.ok(!out.includes('"><b>'), 'the reaction stayed text');

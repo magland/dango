@@ -57,6 +57,13 @@ export function isValidNonce(v: unknown): v is string {
   return typeof v === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(v);
 }
 export const MAX_REACTION = 32;
+/**
+ * How many different reactions one message may gather, as Slack allows
+ * fifty. Each is kept in the message's frontmatter and drawn on every view of
+ * the room, so without a bound one person could hang thousands on a message.
+ * Joining a reaction already there is always possible.
+ */
+export const MAX_REACTIONS = 50;
 /** How many of a room's newest messages its page shows, and a thread's page its replies. */
 export const ROOM_PAGE = 100;
 export const THREAD_PAGE = 200;
@@ -447,14 +454,36 @@ export function reactionEmoji(input: string): string {
   return out;
 }
 
+const GRAPHEMES = new Intl.Segmenter('en', { granularity: 'grapheme' });
+
+/**
+ * Whether a string is one emoji: a single grapheme, made only of what emoji
+ * are made of (pictographs, and the joiners, selectors, skin tones, keycaps,
+ * and flag letters that combine with them), with at least one pictograph,
+ * flag letter, or keycap in it, so that a bare digit or # is not one. A
+ * reaction is a mark of assent, not a second channel for words.
+ */
+export function isOneEmoji(e: string): boolean {
+  if (!/^[\p{Extended_Pictographic}\p{Emoji_Component}]+$/u.test(e)) return false;
+  if (!/[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(e)) return false;
+  // Flag letters come in pairs; one alone is a letter in a box.
+  if ((e.match(/\p{Regional_Indicator}/gu)?.length ?? 0) % 2 === 1) return false;
+  let n = 0;
+  for (const _ of GRAPHEMES.segment(e)) if (++n > 1) return false;
+  return n === 1;
+}
+
 export function toggleReaction(room: string, id: number, emoji: string, user: string): Message {
   const e = reactionEmoji(emoji);
-  if (e === '' || e.length > MAX_REACTION || /[\n\r]/.test(e)) {
-    throw new OpError('That is not usable as a reaction.');
+  if (e.length > MAX_REACTION || !isOneEmoji(e)) {
+    throw new OpError('A reaction is one emoji.');
   }
   return editMessageFile(room, id, (meta, body) => {
     if (meta.deleted === true) throw new OpError('This message was deleted.', 'nochange');
     const reactions = reactionMap(meta.reactions);
+    if (!reactions.has(e) && reactions.size >= MAX_REACTIONS) {
+      throw new OpError(`A message may have at most ${MAX_REACTIONS} different reactions; add one of those it has.`);
+    }
     const users = reactions.get(e) ?? [];
     const next = users.includes(user) ? users.filter((u) => u !== user) : [...users, user];
     if (next.length) reactions.set(e, next);

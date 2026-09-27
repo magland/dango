@@ -31,6 +31,10 @@ export interface LimitsConfig {
   uploadMbPerHour: number;
   /** Reactions, edits, deletions, and new rooms, together, per person per minute. 0 disables. */
   actionsPerMinute: number;
+  /** New channels and conversations one person may start per hour. 0 disables. */
+  roomsPerHour: number;
+  /** Searches one person may run per minute; each walks the files. 0 disables. */
+  searchesPerMinute: number;
 }
 
 export interface NetworkConfig {
@@ -93,6 +97,8 @@ const DEFAULTS: WorkspaceConfig = {
     messagesPerHour: 300,
     uploadMbPerHour: 200,
     actionsPerMinute: 60,
+    roomsPerHour: 20,
+    searchesPerMinute: 20,
   },
   calls: {
     stun: DEFAULT_STUN,
@@ -160,6 +166,8 @@ function normalize(parsed: unknown): WorkspaceConfig {
     out.limits.messagesPerHour = num(l.messagesPerHour, DEFAULTS.limits.messagesPerHour);
     out.limits.uploadMbPerHour = num(l.uploadMbPerHour, DEFAULTS.limits.uploadMbPerHour);
     out.limits.actionsPerMinute = num(l.actionsPerMinute, DEFAULTS.limits.actionsPerMinute);
+    out.limits.roomsPerHour = num(l.roomsPerHour, DEFAULTS.limits.roomsPerHour);
+    out.limits.searchesPerMinute = num(l.searchesPerMinute, DEFAULTS.limits.searchesPerMinute);
   }
   out.calls = normalizeCalls(rec.calls);
   return out;

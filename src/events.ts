@@ -186,6 +186,15 @@ function admit(res: Response, username: string): boolean {
   return true;
 }
 
+/**
+ * How much unsent output a stream may hold. A catch-up of two hundred long
+ * messages is a few megabytes written at once, and a slow phone takes a while
+ * to take it, so the ceiling is well above that; a stalled reader is found
+ * sooner, by output that does not go down between heartbeats.
+ */
+export const MAX_UNSENT_BYTES = 16 * 1024 * 1024;
+export const STALLED_BYTES = 1024 * 1024;
+
 function openStream(res: Response): {
   write: (id: string, payload: unknown) => void;
   close: (fn: () => void) => void;
@@ -197,10 +206,30 @@ function openStream(res: Response): {
     'X-Accel-Buffering': 'no',
     Connection: 'keep-alive',
   });
-  // A comment heartbeat, so a proxy does not reap the idle connection.
-  const heartbeat = setInterval(() => res.write(': ping\n\n'), 25000);
+  // A comment heartbeat, so a proxy does not reap the idle connection. It
+  // also looks for a reader that has stopped reading: what is written to a
+  // stream nobody takes from waits in this process's memory, and one person
+  // holding streams open without reading them could otherwise make the server
+  // keep everything said in their rooms. A stream is let go when its unsent
+  // output was past STALLED_BYTES at one heartbeat and has not gone down by
+  // the next, or is past MAX_UNSENT_BYTES at any time; the page opens it again
+  // and catches up, as after any drop.
+  let unsentAtLastBeat = 0;
+  const heartbeat = setInterval(() => {
+    const unsent = res.writableLength;
+    if (unsentAtLastBeat > STALLED_BYTES && unsent >= unsentAtLastBeat) {
+      res.destroy();
+      return;
+    }
+    unsentAtLastBeat = unsent;
+    res.write(': ping\n\n');
+  }, 25000);
   return {
-    write: (id, payload) => res.write(`id: ${id}\ndata: ${JSON.stringify(payload)}\n\n`),
+    write: (id, payload) => {
+      if (res.destroyed) return;
+      res.write(`id: ${id}\ndata: ${JSON.stringify(payload)}\n\n`);
+      if (res.writableLength > MAX_UNSENT_BYTES) res.destroy();
+    },
     close: (fn) => {
       res.on('close', () => {
         clearInterval(heartbeat);

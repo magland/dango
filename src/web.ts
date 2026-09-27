@@ -55,12 +55,14 @@ import {
   ROOM_PAGE,
   THREAD_PAGE,
 } from './messages';
-import { RateLimited, WriteLimits, refusalStatus } from './limits';
+import { LARGE_BODY_BYTES, RateLimited, WriteLimits, createBodySlots, refusalStatus } from './limits';
 import { CALL_NOT_EDITABLE, EDIT_WINDOW_PASSED, canDeleteMessage, canEditMessage, isSiteAdmin } from './perms';
 import { Pin, pinMessage, pinOf, readPins, unpinMessage } from './pins';
 import {
+  MAX_MUTED,
   NotifyLevel,
   addDevice,
+  isRoomKey,
   isTimeOfDay,
   isTimeZone,
   deviceId,
@@ -92,6 +94,10 @@ import { channelNameFrom, isValidChannelName, isValidWorkspaceUserName } from '.
 // check the CSRF token, do the operation through the same functions the JSON
 // API uses, publish the event, redirect back. Forms work without script; the
 // page script only makes them quieter.
+
+/** How long a display name and a bio may be, as mochiforge's profile settings have them. */
+const MAX_DISPLAY_NAME = 80;
+const MAX_BIO = 500;
 
 /**
  * Whether the page script sent this request and wants an answer it can act
@@ -132,7 +138,7 @@ function fitName(name: string): string {
   return stem.trim() + ext;
 }
 
-function formBody(req: FormRequest, res: Response, next: NextFunction): void {
+function readForm(req: FormRequest, res: Response, next: NextFunction): void {
   const urlenc = express.urlencoded({ extended: false, limit: '128kb' });
   // The attachments' cap and a megabyte for the text fields and the framing.
   const raw = express.raw({ type: 'multipart/form-data', limit: MAX_ATTACHMENTS_BYTES + 1024 * 1024 });
@@ -318,7 +324,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       return;
     }
     try {
-      limits.action(viewer.auth.username);
+      limits.newRoom(viewer.auth.username);
       const c = createChannel(root, name, {
         topic: form.topic,
         private: form.private,
@@ -339,7 +345,16 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     if (!viewer) return;
     const q = String(req.query.q ?? '');
     const info = { partial: false };
-    const hits = q.trim() === '' ? [] : searchMessages(root, viewer.auth, q, info);
+    let hits: ReturnType<typeof searchMessages> = [];
+    if (q.trim() !== '') {
+      try {
+        limits.search(viewer.auth.username);
+      } catch (e) {
+        sendOpError(res, viewer, e);
+        return;
+      }
+      hits = searchMessages(root, viewer.auth, q, info);
+    }
     res.type('html').send(views.searchPage(root, viewer, q, hits, info.partial));
   });
 
@@ -372,10 +387,27 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     const viewer = requireForm(req, res);
     if (!viewer) return;
     const body = req.body as Record<string, unknown>;
-    setUserProfile(root, viewer.auth.username, {
-      name: String(body.name ?? ''),
-      bio: String(body.bio ?? ''),
-    });
+    const name = String(body.name ?? '').trim();
+    const bio = String(body.bio ?? '').trim();
+    // mochiforge's bounds for the same two fields. The display name is shown
+    // beside every message and in notifications, so it is one line and short.
+    const problem =
+      name.length > MAX_DISPLAY_NAME || /[\u0000-\u001f\u007f]/.test(name)
+        ? `A display name is one line of at most ${MAX_DISPLAY_NAME} characters.`
+        : bio.length > MAX_BIO || /[\u0000-\u0008\u000b-\u001f\u007f]/.test(bio)
+          ? `A bio may be at most ${MAX_BIO} characters.`
+          : null;
+    if (problem) {
+      res.status(400).type('html').send(views.accountPage(root, viewer, accountNotifications(viewer), { error: problem }));
+      return;
+    }
+    try {
+      limits.action(viewer.auth.username);
+    } catch (e) {
+      sendOpError(res, viewer, e);
+      return;
+    }
+    setUserProfile(root, viewer.auth.username, { name, bio });
     res.redirect(303, '/account');
   });
 
@@ -398,7 +430,9 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     if (!viewer) return;
     const body = req.body as Record<string, unknown>;
     const level: NotifyLevel = body.level === 'all' || body.level === 'none' ? body.level : 'direct';
-    const muted = (Array.isArray(body.mute) ? body.mute : [body.mute]).filter((k): k is string => typeof k === 'string' && k !== '');
+    const muted = (Array.isArray(body.mute) ? body.mute : [body.mute])
+      .filter((k): k is string => typeof k === 'string' && isRoomKey(k))
+      .slice(0, MAX_MUTED);
     const start = String(body.quiet_start ?? '');
     const end = String(body.quiet_end ?? '');
     if (body.quiet === '1' && (!isTimeOfDay(start) || !isTimeOfDay(end) || start === end)) {
@@ -409,6 +443,12 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       return;
     }
     const tz = String(body.tz ?? '');
+    try {
+      limits.action(viewer.auth.username);
+    } catch (e) {
+      sendOpError(res, viewer, e);
+      return;
+    }
     writePrefs(root, viewer.auth.username, {
       level,
       preview: body.preview === '1',
@@ -424,6 +464,12 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     const sub = parseSubscription((req.body as Record<string, unknown>).subscription);
     if (!sub) {
       fail(res, viewer, 400, 'This browser offered a push service the workspace does not send to.');
+      return;
+    }
+    try {
+      limits.action(viewer.auth.username);
+    } catch (e) {
+      sendOpError(res, viewer, e);
       return;
     }
     const device = addDevice(root, viewer.auth.username, sub, {
@@ -452,6 +498,9 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     const viewer = requireForm(req, res);
     if (!viewer) return;
     try {
+      // Each test is a request from the server to a push service for each
+      // device, so it is charged like any other write.
+      limits.action(viewer.auth.username);
       const endpoint = (req.body as Record<string, unknown>).endpoint;
       const only = typeof endpoint === 'string' ? deviceId(endpoint) : undefined;
       if (only && !readDevices(root, viewer.auth.username).some((d) => d.id === only)) {
@@ -466,7 +515,8 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       );
       res.json(result);
     } catch (e) {
-      next(e);
+      if (e instanceof OpError) sendOpError(res, viewer, e);
+      else next(e);
     }
   });
 
@@ -501,8 +551,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       .filter((u): u is string => typeof u === 'string' && u !== '')
       .filter((u) => userExists(root, u));
     try {
-      limits.action(viewer.auth.username);
-      const dm = openDm(root, [viewer.auth.username, ...users]);
+      const dm = openDm(root, [viewer.auth.username, ...users], { charge: () => limits.newRoom(viewer.auth.username) });
       res.redirect(303, `/d/${dm.id}`);
     } catch (e) {
       if (e instanceof OpError) {
@@ -734,6 +783,30 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     }
     if (wantsJson(req)) res.status(401).json({ error: 'You are signed out. Sign in again, then send.' });
     else res.redirect(303, `/login?next=${encodeURIComponent(req.originalUrl)}`);
+  };
+
+  /**
+   * Read a form, holding one of its sender's slots for large bodies while it
+   * arrives (see MAX_LARGE_BODIES); a body that does not say its length is
+   * counted as large, since nothing bounds it short of the cap. Always after
+   * signedIn, so there is a person to count against.
+   */
+  const bodySlots = createBodySlots();
+  const formBody = (req: FormRequest, res: Response, next: NextFunction): void => {
+    const viewer = getViewer(req, root);
+    const length = parseInt(req.get('content-length') ?? '', 10);
+    if (!viewer || (Number.isInteger(length) && length <= LARGE_BODY_BYTES)) {
+      readForm(req, res, next);
+      return;
+    }
+    const release = bodySlots.take(viewer.auth.username);
+    if (!release) {
+      res.setHeader('Retry-After', '10');
+      fail(res, viewer, 429, 'Another upload of yours is still arriving. Wait for it to finish, then send again.');
+      return;
+    }
+    res.on('close', release);
+    readForm(req, res, next);
   };
 
   const BASES = ['/c/:channel', '/d/:dm'];
@@ -1044,6 +1117,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       res,
       (viewer, room) => {
         const muted = (req.body as Record<string, unknown>).muted === '1';
+        limits.action(viewer.auth.username);
         setMuted(root, viewer.auth.username, room.url, muted);
         if (wantsJson(req)) res.json({ muted });
         else res.redirect(303, room.url);
@@ -1129,7 +1203,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
               return;
             }
             try {
-              const call = joinCall(root, room, viewer.auth.username, peer, resume);
+              const call = joinCall(root, room, viewer.auth.username, peer, resume, () => limits.message(viewer.auth.username, 0));
               res.json({ call, ice, max: MAX_IN_CALL });
             } catch (e) {
               sendOpError(res, viewer, e);
@@ -1239,7 +1313,8 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     withRoom(
       req,
       res,
-      (_viewer, room) => {
+      (viewer, room) => {
+        limits.action(viewer.auth.username);
         setTopic(root, room.channel!.name, String((req.body as Record<string, unknown>).topic ?? ''));
         res.redirect(303, `${room.url}/settings`);
       },
@@ -1251,9 +1326,10 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     withRoom(
       req,
       res,
-      (_viewer, room) => {
+      (viewer, room) => {
         const user = String((req.body as Record<string, unknown>).user ?? '').trim();
         if (!userExists(root, user)) throw new OpError(`There is no user named ${user}.`, 'notfound');
+        limits.action(viewer.auth.username);
         addMember(root, room.channel!.name, user);
         res.redirect(303, `${room.url}/settings`);
       },
@@ -1272,6 +1348,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         if (user !== viewer.auth.username && !isSiteAdmin(viewer.auth)) {
           throw new OpError('You can remove yourself; removing others is for a site admin.');
         }
+        limits.action(viewer.auth.username);
         removeMember(root, room.channel!.name, user);
         pruneCalls(root);
         const stillIn = user !== viewer.auth.username;

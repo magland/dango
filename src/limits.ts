@@ -34,8 +34,17 @@ export function refusalStatus(e: OpError, opErrorStatus: (kind: OpError['kind'])
 export interface WriteLimits {
   /** Charge one message with this many bytes of attachments, or throw RateLimited. */
   message(username: string, bytes: number): void;
-  /** Charge one other write (a reaction, an edit, a deletion, a new room), or throw RateLimited. */
+  /** Charge one other write (a reaction, an edit, a deletion, a change of settings), or throw RateLimited. */
   action(username: string): void;
+  /**
+   * Charge one new channel or conversation, as an action and against the
+   * hourly count of new rooms, or throw RateLimited. A public channel appears
+   * in everyone's sidebar and a conversation in each of its people's, so
+   * making rooms is making things other people have to look at.
+   */
+  newRoom(username: string): void;
+  /** Charge one search, which walks the files of every room its person can read, or throw RateLimited. */
+  search(username: string): void;
 }
 
 /** Bytes per person per window. mochi's limiter counts events, and an upload is weighed, not counted. */
@@ -66,7 +75,11 @@ export function createWriteLimits(cfg: LimitsConfig): WriteLimits {
   const perMinute = createLimiter({ limit: cfg.messagesPerMinute, windowMs: 60_000, maxKeys });
   const perHour = createLimiter({ limit: cfg.messagesPerHour, windowMs: 3_600_000, maxKeys });
   const actions = createLimiter({ limit: cfg.actionsPerMinute, windowMs: 60_000, maxKeys });
+  const rooms = createLimiter({ limit: cfg.roomsPerHour, windowMs: 3_600_000, maxKeys });
+  const searches = createLimiter({ limit: cfg.searchesPerMinute, windowMs: 60_000, maxKeys });
   const uploads = createByteBudget(cfg.uploadMbPerHour * 1024 * 1024, 3_600_000);
+  const tooFast = (d: { retryAfter: number }) =>
+    new RateLimited(`That is faster than this workspace allows. Wait ${wait(d.retryAfter)} and try again.`, d.retryAfter);
   return {
     message(username, bytes) {
       // Checked before charged, so a refusal by one window does not spend the
@@ -87,7 +100,60 @@ export function createWriteLimits(cfg: LimitsConfig): WriteLimits {
     },
     action(username) {
       const d = actions.hit(username);
-      if (!d.ok) throw new RateLimited(`That is faster than this workspace allows. Wait ${wait(d.retryAfter)} and try again.`, d.retryAfter);
+      if (!d.ok) throw tooFast(d);
+    },
+    newRoom(username) {
+      const a = actions.check(username);
+      if (!a.ok) throw tooFast(a);
+      const r = rooms.check(username);
+      if (!r.ok) {
+        throw new RateLimited(
+          `You have started ${cfg.roomsPerHour} channels and conversations in the last hour, which is this workspace's limit. Wait ${wait(r.retryAfter)} and try again.`,
+          r.retryAfter
+        );
+      }
+      actions.hit(username);
+      rooms.hit(username);
+    },
+    search(username) {
+      const d = searches.hit(username);
+      if (!d.ok) throw new RateLimited(`You are searching faster than this workspace allows. Wait ${wait(d.retryAfter)} and search again.`, d.retryAfter);
+    },
+  };
+}
+
+/**
+ * How many large form bodies one person may have arriving at once, and what
+ * counts as large. A form's body is held in memory until it has all arrived
+ * (up to a message's attachments, twenty megabytes and some), and the upload
+ * budget above can only weigh it once it has; so without a bound on how many
+ * arrive together, one person sending many at once could make the server
+ * hold far more than any one send is allowed to cost. The composer sends one
+ * message at a time, and two leaves room for a second tab.
+ */
+export const MAX_LARGE_BODIES = 2;
+export const LARGE_BODY_BYTES = 1024 * 1024;
+
+export interface BodySlots {
+  /** A slot for one large body, and the function that gives it back; null when the person holds them all. */
+  take(username: string): (() => void) | null;
+}
+
+export function createBodySlots(max = MAX_LARGE_BODIES): BodySlots {
+  const held = new Map<string, number>();
+  return {
+    take(username) {
+      const n = held.get(username) ?? 0;
+      if (n >= max) return null;
+      held.set(username, n + 1);
+      let given = false;
+      return () => {
+        if (given) return;
+        given = true;
+        const left = (held.get(username) ?? 1) - 1;
+        if (left > 0) held.set(username, left);
+        else held.delete(username);
+      };
     },
   };
 }
