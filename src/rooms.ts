@@ -2,9 +2,10 @@ import * as fs from 'fs';
 import { AuthResult, removeUser } from '../../mochiforge/src/vault';
 import { ChannelInfo, leaveAllChannels, readChannel } from './channels';
 import { DmInfo, dmTitle, leaveAllDms, readDm } from './dms';
+import { MeetingInfo, leaveAllMeetings, readMeeting } from './meetings';
 import { readMessage, threadRoomDir } from './messages';
-import { canSeeChannel, canSeeDm } from './perms';
-import { channelDir, dmDir, isValidWorkspaceUserName, userDir } from './workspace';
+import { canSeeChannel, canSeeDm, canSeeMeeting } from './perms';
+import { channelDir, dmDir, isValidWorkspaceUserName, meetingDir, userDir } from './workspace';
 
 // One description of "the place a message lives", resolved from a URL and
 // already checked against the viewer. Channels, conversations, and threads
@@ -16,13 +17,14 @@ import { channelDir, dmDir, isValidWorkspaceUserName, userDir } from './workspac
 export interface Room {
   /** The directory holding messages/, threads/, files/. */
   dir: string;
-  /** The room's page: /c/general, /d/3, /c/general/t/14. */
+  /** The room's page: /c/general, /d/3, /m/2, /c/general/t/14. */
   url: string;
-  kind: 'channel' | 'dm' | 'thread';
-  /** How the page titles it: "#general", "alice, bob", "Thread". */
+  kind: 'channel' | 'dm' | 'meeting' | 'thread';
+  /** How the page titles it: "#general", "alice, bob", "Weekly sync", "Thread". */
   title: string;
   channel?: ChannelInfo;
   dm?: DmInfo;
+  meeting?: MeetingInfo;
   /** For a thread: the room it hangs off and the message it hangs from. */
   parent?: Room;
   threadOf?: number;
@@ -53,6 +55,18 @@ export function dmRoom(root: string, id: number, auth: AuthResult | null): Room 
   };
 }
 
+export function meetingRoom(root: string, id: number, auth: AuthResult | null): Room | null {
+  const meeting = readMeeting(root, id);
+  if (!meeting || !canSeeMeeting(auth, meeting)) return null;
+  return {
+    dir: meetingDir(root, id),
+    url: `/m/${id}`,
+    kind: 'meeting',
+    title: meeting.title,
+    meeting,
+  };
+}
+
 /**
  * The thread hanging off one of a room's messages. The parent message must
  * exist, and threads do not nest: a thread's own messages have no threads.
@@ -68,6 +82,7 @@ export function threadRoom(parent: Room, id: number): Room | null {
     title: 'Thread',
     channel: parent.channel,
     dm: parent.dm,
+    meeting: parent.meeting,
     parent,
     threadOf: id,
   };
@@ -76,7 +91,7 @@ export function threadRoom(parent: Room, id: number): Room | null {
 /**
  * Remove a person from the workspace. Their tokens go with their entry in
  * workspace.json, and so does everything else that is decided by their
- * name: private channels and conversations let people in by name, and
+ * name: private channels, conversations, and meetings let people in by name, and
  * users/<name>/ holds the browsers their notifications go to. Leaving those
  * behind would hand them to whoever is given the same name next. Their
  * messages stay, signed with the name they were written under.
@@ -85,6 +100,7 @@ export function removeWorkspaceUser(root: string, username: string): boolean {
   if (!removeUser(root, username)) return false;
   leaveAllChannels(root, username);
   leaveAllDms(root, username);
+  leaveAllMeetings(root, username);
   if (isValidWorkspaceUserName(username)) fs.rmSync(userDir(root, username), { recursive: true, force: true });
   return true;
 }

@@ -339,7 +339,7 @@ ok "adding someone on the admin page shows their invite link"
 # The admin's call settings: an address that is not a STUN or TURN URL is
 # refused, as is a relay without what it needs, and a secret is kept on disk
 # and never written into the page, a blank field keeping it.
-calls_form() { curl -s -b "$ADMIN_JAR" -o /dev/null -w '%{http_code}' --data-urlencode "csrf=$ADMIN_CSRF" "$@" "$BASE/admin/calls"; }
+calls_form() { curl -s -b "$ADMIN_JAR" -o /dev/null -w '%{http_code}' --data-urlencode "csrf=$ADMIN_CSRF" -d guests=1 "$@" "$BASE/admin/calls"; }
 [ "$(calls_form --data-urlencode 'stun=http://not-stun.example' -d turn_mode=none)" = "400" ] || fail "a STUN server that is not a STUN URL was saved"
 [ "$(calls_form -d stun= -d turn_mode=coturn --data-urlencode 'turn_urls=turn:turn.example:3478')" = "400" ] || fail "coturn was saved without its secret"
 [ "$(calls_form -d stun= -d turn_mode=coturn --data-urlencode 'turn_urls=turn:turn.example:3478' -d turn_secret=smoke-turn-secret)" = "303" ] || fail "the call settings were not saved"
@@ -517,6 +517,82 @@ curl -s -c "$NJAR" -o /dev/null -d "token=$ALICE&next=/" "$BASE/login"
 curl -s -b "$NJAR" "$BASE/account" | grep_all -q 'data-device=' && fail "signing out did not remove the browser's subscription"
 ok "signing out removes that browser's subscription"
 
+# ---- meetings and guests ----
+
+MJSON="$(DANGO_TOKEN="$ALICE" "${DANGO[@]}" meeting create Weekly review --with bob --json 2>&1)"
+MID="$(echo "$MJSON" | jget id)"
+LINK="$(echo "$MJSON" | jget link)"
+case "$LINK" in
+  "$BASE/m/$MID/join#k="*) ;;
+  *) fail "meeting create did not give a guest link with its key in the fragment: $MJSON" ;;
+esac
+KEY="${LINK#*#k=}"
+[ "$(status "$CAROL" GET "/meetings/$MID")" = "404" ] || fail "someone outside a meeting could see it"
+[ "$(status "$BOB" GET "/meetings/$MID")" = "200" ] || fail "a member added to a meeting could not see it"
+ok "dango meeting create makes a meeting for its members, with a guest link"
+curl -s "$BASE/m/$MID/join" | grep_all -q 'Weekly review' && fail "the join page named the meeting before its key was checked"
+GJAR="$TMP/guest.jar"
+[ "$(curl -s -c "$GJAR" -o /dev/null -w '%{http_code}' -d "k=not-the-key&name=Dana" "$BASE/m/$MID/join")" = "404" ] || fail "a wrong key was accepted"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H 'origin: https://evil.example' --data-urlencode "k=$KEY" -d "name=Dana" "$BASE/m/$MID/join")" = "403" ] || fail "a join posted from another site was accepted"
+[ "$(curl -s -c "$GJAR" -o /dev/null -w '%{redirect_url}' --data-urlencode "k=$KEY" -d "name=Dana" "$BASE/m/$MID/join")" = "$BASE/m/$MID/lobby" ] || fail "a guest was not sent to wait in the lobby"
+curl -s -b "$GJAR" "$BASE/m/$MID/lobby" | grep_all -q 'Weekly review' || fail "the lobby does not name the meeting"
+[ "$(curl -s -b "$GJAR" "$BASE/m/$MID/lobby/state" | jget state)" = "waiting" ] || fail "the guest is not waiting"
+[ "$(curl -s -b "$GJAR" -o /dev/null -w '%{redirect_url}' "$BASE/m/$MID")" = "$BASE/m/$MID/lobby" ] || fail "a waiting guest reached the meeting"
+ok "a guest with the link waits in the lobby, and sees nothing of the meeting until let in"
+
+GID="$(curl -s -b "$JAR" "$BASE/m/$MID" | grep -o '~[0-9a-f]\{12\}' | head -1)"
+[ -n "$GID" ] || fail "a member's page does not say who is waiting"
+[ "$(curl -s -b "$TMP/carol.jar" -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -H 'accept: application/json' -d "{\"csrf\":\"$CAROL_CSRF\",\"guest\":\"$GID\"}" "$BASE/m/$MID/lobby/admit")" = "404" ] || fail "someone outside the meeting let a guest in"
+curl -s -b "$JAR" -H 'content-type: application/json' -H 'accept: application/json' -d "{\"csrf\":\"$CSRF\",\"guest\":\"$GID\"}" "$BASE/m/$MID/lobby/admit" | grep_all -q '"ok":true' || fail "a member could not let the guest in"
+[ "$(curl -s -b "$GJAR" "$BASE/m/$MID/lobby/state" | jget state)" = "admitted" ] || fail "the lobby does not say the guest was let in"
+GPAGE="$(curl -s -b "$GJAR" "$BASE/m/$MID")"
+echo "$GPAGE" | grep_all -q 'guest-app' || fail "the guest is not shown the meeting"
+echo "$GPAGE" | grep_all -q 'app-side' && fail "a guest was shown the workspace's sidebar"
+ok "a member lets the guest in, and the guest sees the meeting and no sidebar"
+[ "$(curl -s -b "$GJAR" -o /dev/null -w '%{http_code}' "$BASE/c/general")" = "303" ] || fail "a guest reached a channel"
+[ "$(curl -s -b "$GJAR" -o /dev/null -w '%{http_code}' "$BASE/search?q=hello")" = "303" ] || fail "a guest reached search"
+[ "$(curl -s -b "$GJAR" -o /dev/null -w '%{http_code}' "$BASE/api/channels")" = "401" ] || fail "a guest reached the API"
+[ "$(curl -s -b "$GJAR" -o /dev/null -w '%{http_code}' "$BASE/m/$MID/settings")" = "404" ] || fail "a guest reached the meeting's settings"
+[ "$(curl -s -b "$GJAR" "$BASE/assets/users.json" | jget length)" = "2" ] || fail "a guest was given more than the meeting's members to mention"
+ok "a guest reaches nothing but the meeting: no channel, no search, no API, no settings"
+
+GCSRF="$(csrf_in <<< "$GPAGE")"
+[ "$(curl -s -b "$GJAR" -o /dev/null -w '%{http_code}' -F "csrf=$GCSRF" -F "body=hello from outside" "$BASE/m/$MID/messages")" = "303" ] || fail "the guest could not write in the meeting"
+[ "$(api "$ALICE" GET "/meetings/$MID/messages?limit=1" | jget messages.0.author)" = "$GID" ] || fail "the guest's message is not theirs"
+curl -s -b "$JAR" "$BASE/m/$MID" | grep_all -q 'Dana (guest)' || fail "a member does not see the guest named as a guest"
+[ "$(curl -s -b "$GJAR" -o /dev/null -w '%{http_code}' -F "csrf=$GCSRF" -F "body=a file" -F "files=@$TMP/note.txt" "$BASE/m/$MID/messages")" = "403" ] || fail "a guest attached a file"
+[ -d "$WS/users/$GID" ] && fail "a guest was given a directory under users/"
+ok "a guest writes in the meeting under the name they gave, and attaches nothing"
+
+GPEER="fedcba9876543210fedcba9876543210"
+APEER="00112233445566778899aabbccddeeff"
+gcall() { curl -s -b "$1" -o "$TMP/gcall.json" -w '%{http_code}' -H 'content-type: application/json' -H 'accept: application/json' -d "{\"csrf\":\"$2\",\"peer\":\"$3\"}" "$BASE$4"; }
+( curl -s -N -b "$GJAR" --max-time 5 "$BASE/events?client=$GPEER" > "$TMP/guest-events.txt" || true ) &
+GSTREAM=$!
+( curl -s -N -b "$JAR" --max-time 5 "$BASE/events?client=$APEER" > /dev/null || true ) &
+ASTREAM=$!
+sleep 1
+[ "$(gcall "$GJAR" "$GCSRF" "$GPEER" "/m/$MID/call/join")" = "409" ] || fail "a guest started a call: $(cat "$TMP/gcall.json")"
+[ "$(gcall "$JAR" "$CSRF" "$APEER" "/m/$MID/call/join")" = "200" ] || fail "a member could not start the meeting's call: $(cat "$TMP/gcall.json")"
+[ "$(gcall "$GJAR" "$GCSRF" "$GPEER" "/m/$MID/call/join")" = "200" ] || fail "the guest could not join the call: $(cat "$TMP/gcall.json")"
+grep -q "\"username\":\"[0-9]*:$GID\"" "$TMP/gcall.json" || fail "the guest was not given a relay credential of their own: $(cat "$TMP/gcall.json")"
+gcall "$GJAR" "$GCSRF" "$GPEER" "/m/$MID/call/leave" >/dev/null
+gcall "$JAR" "$CSRF" "$APEER" "/m/$MID/call/leave" >/dev/null
+wait "$GSTREAM" "$ASTREAM"
+grep -q '"name":"Dana (guest)"' "$TMP/guest-events.txt" || fail "the call's roster does not name the guest"
+ok "a guest joins a call a member started, never starts one, and is given a credential of their own"
+
+MCSRF="$(curl -s -b "$JAR" "$BASE/m/$MID/settings" | csrf_in)"
+curl -s -b "$JAR" -o /dev/null -d "csrf=$MCSRF" "$BASE/m/$MID/link/reset"
+[ "$(curl -s -b "$GJAR" -o /dev/null -w '%{http_code}' "$BASE/m/$MID")" = "403" ] || fail "a guest let in under a reset link still reached the meeting"
+[ "$(curl -s -o /dev/null -w '%{http_code}' --data-urlencode "k=$KEY" -d "name=Eve" "$BASE/m/$MID/join")" = "404" ] || fail "a reset link still let someone in"
+NEWLINK="$(api "$ALICE" GET "/meetings/$MID" | jget link)"
+[ "$NEWLINK" != "$LINK" ] || fail "resetting the link did not make a new one"
+ok "resetting the link shuts out the old link and the guests let in with it"
+[ "$(curl -s -b "$TMP/carol.jar" -o /dev/null -w '%{redirect_url}' --data-urlencode "k=${NEWLINK#*#k=}" "$BASE/m/$MID/join")" = "$BASE/m/$MID" ] || fail "a member opening the link was not taken to the meeting"
+[ "$(status "$CAROL" GET "/meetings/$MID")" = "200" ] || fail "a member who opened the link was not made a member of the meeting"
+ok "a member of the workspace who opens the link joins as themselves"
+
 # ---- backup ----
 
 BK="$TMP/backup"
@@ -524,7 +600,8 @@ BK="$TMP/backup"
 [ -f "$BK/current/workspace.json" ] || fail "the backup has no workspace.json"
 [ -f "$BK/current/users/alice/read.json" ] || fail "the backup left out users/ (read markers)"
 [ -f "$BK/current/.vapid" ] || fail "the backup left out .vapid, which every push subscription depends on"
-ok "dango backup copies the workspace, read markers and push keys included"
+[ -f "$BK/current/meetings/$MID/meeting.json" ] || fail "the backup left out meetings/"
+ok "dango backup copies the workspace, read markers, meetings, and push keys included"
 AGAIN="$("${DANGO[@]}" backup "$BK" --json)"
 [ "$(echo "$AGAIN" | jget files.fetched)" = "0" ] || fail "an unchanged workspace was fetched again: $AGAIN"
 ok "a second backup fetches nothing"

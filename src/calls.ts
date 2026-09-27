@@ -3,12 +3,15 @@ import { avatar } from '../../mochiforge/src/avatar';
 import { OpError } from '../../mochiforge/src/ops';
 import { loadVault } from '../../mochiforge/src/vault';
 import { readChannel } from './channels';
+import { loadConfig } from './config';
 import { readDm } from './dms';
 import { clientOwner, listeningUsers, publish, publishToUser, sendToClient, watchClients } from './events';
+import { currentGuests, isCurrentGuest, personLabel, readMeeting } from './meetings';
 import { Message, readMessage, readMessages, updateCallRecord } from './messages';
 import { postMessage } from './post';
 import { audienceOf } from './reads';
-import { Room, channelRoom, dmRoom } from './rooms';
+import { Room, channelRoom, dmRoom, meetingRoom } from './rooms';
+import { isGuestName } from './workspace';
 
 // Calls: who is in each room's call, and the signaling that lets their
 // browsers connect to each other.
@@ -31,6 +34,12 @@ import { Room, channelRoom, dmRoom } from './rooms';
 // A call is between pages, not people. Somebody with the workspace open in a
 // tab on their laptop and in another on their phone can have both in a call;
 // each is its own participant, with its own connections.
+//
+// A meeting's call can also hold its guests (see src/meetings.ts). A guest
+// joins a call that a member started and never starts one, and a call left
+// with guests alone ends a little later (MEMBERLESS_MS), so that a meeting's
+// link is a way for outsiders to talk with the workspace's members and not
+// a free way for strangers to reach each other through its server and relay.
 
 /**
  * The most pages in one call. In a mesh every participant sends its video to
@@ -59,9 +68,21 @@ export const CLIENT_GRACE_MS = 20000;
 /** The most signals one request may carry: an offer or answer and a burst of candidates. */
 export const MAX_SIGNALS = 64;
 
+/**
+ * How long a call goes on with only guests in it before it ends for them.
+ * Long enough for a member to reload their page, or for the members' pages
+ * to find their way back after the workspace restarts; short enough that
+ * guests left behind are not kept talking through the workspace for long.
+ */
+export const MEMBERLESS_MS = 45000;
+
+export const NOT_STARTED = 'The call has not started yet. It starts when someone from the workspace joins it.';
+
 interface Participant {
   peer: string;
   user: string;
+  /** How the others see them named: a member's username, or a guest's name marked as a guest's. */
+  name: string;
   joined: number;
 }
 
@@ -77,27 +98,37 @@ interface LiveCall {
 
 const calls = new Map<string, LiveCall>();
 const graceTimers = new Map<string, NodeJS.Timeout>();
+const memberlessTimers = new Map<string, NodeJS.Timeout>();
 
 /** The people in a room's call right now, each once, in the order they joined. */
 function peopleOf(call: LiveCall): string[] {
   return [...new Set([...call.participants.values()].map((p) => p.user))];
 }
 
-/** A room's call, if one is going on: its id, who is in it, and its entry. */
-export function liveCall(roomUrl: string): { id: string; people: string[]; messageId: number; started: number } | null {
-  const call = calls.get(roomUrl);
-  return call ? { id: call.id, people: peopleOf(call), messageId: call.messageId, started: call.started } : null;
+/** The same, as they are named to others. */
+function namesOf(call: LiveCall): string[] {
+  const seen = new Map<string, string>();
+  for (const p of call.participants.values()) if (!seen.has(p.user)) seen.set(p.user, p.name);
+  return [...seen.values()];
 }
 
-/** Every call going on, by room, for the sidebar. */
+/** A room's call, if one is going on: its id, who is in it (and how they are named), and its entry. */
+export function liveCall(roomUrl: string): { id: string; people: string[]; names: string[]; messageId: number; started: number } | null {
+  const call = calls.get(roomUrl);
+  return call ? { id: call.id, people: peopleOf(call), names: namesOf(call), messageId: call.messageId, started: call.started } : null;
+}
+
+/** Every call going on, by room, with who is in it as they are named, for the sidebar. */
 export function liveCallsByRoom(): Map<string, string[]> {
-  return new Map([...calls.entries()].map(([url, call]) => [url, peopleOf(call)]));
+  return new Map([...calls.entries()].map(([url, call]) => [url, namesOf(call)]));
 }
 
 /** For tests: forget every call. */
 export function resetCalls(): void {
   for (const t of graceTimers.values()) clearTimeout(t);
+  for (const t of memberlessTimers.values()) clearTimeout(t);
   graceTimers.clear();
+  memberlessTimers.clear();
   calls.clear();
 }
 
@@ -112,12 +143,15 @@ function everyone(root: string): string[] {
  * pages. An empty list says the call ended.
  */
 function announce(call: LiveCall, message?: Message | null): void {
-  const people = peopleOf(call);
+  const people = namesOf(call);
   // Who can see the room now, not when the call started.
   if (call.room.channel) call.room.channel = readChannel(call.root, call.room.channel.name) ?? call.room.channel;
   if (call.room.dm) call.room.dm = readDm(call.root, call.room.dm.id) ?? call.room.dm;
+  if (call.room.meeting) call.room.meeting = readMeeting(call.root, call.room.meeting.id) ?? call.room.meeting;
   const listening = new Set(listeningUsers());
-  for (const username of audienceOf(call.room, () => everyone(call.root))) {
+  // A meeting's guests are told too: their page's call button is how they join.
+  const guests = call.room.meeting ? currentGuests(call.room.meeting) : [];
+  for (const username of [...audienceOf(call.room, () => everyone(call.root)), ...guests]) {
     if (listening.has(username)) publishToUser(username, { type: 'call', url: call.room.url, people });
   }
   const m = message ?? readMessage(call.room.dir, call.messageId);
@@ -126,7 +160,7 @@ function announce(call: LiveCall, message?: Message | null): void {
 
 /** Tell each page in the call who is in it, which is what it connects to. */
 function sendRoster(call: LiveCall): void {
-  const peers = [...call.participants.values()].map((p) => ({ peer: p.peer, user: p.user, face: avatar(p.user, 64).text }));
+  const peers = [...call.participants.values()].map((p) => ({ peer: p.peer, user: p.user, name: p.name, face: avatar(p.user, 64).text }));
   for (const p of call.participants.values()) {
     sendToClient(p.peer, { type: 'call-roster', url: call.room.url, call: call.id, peers });
   }
@@ -151,10 +185,13 @@ function resumable(room: Room, callId: string): Message | null {
  * a new call is to post its entry: a call started is a message in the room,
  * and in a direct conversation a notification, so starting calls is held to
  * the limits on sending, lest joining and leaving over and over become a way
- * around them. Returns the call's id.
+ * around them. A meeting's guest may join a call going on, or pick up one
+ * the workspace forgot in a restart, but not start one. Returns the call's id.
  */
 export function joinCall(root: string, room: Room, user: string, peer: string, resume?: string, charge?: () => void): string {
   if (room.kind === 'thread') throw new OpError('A call belongs to a channel or a conversation, not a thread.');
+  const guest = isGuestName(user);
+  if (guest && !room.meeting) throw new OpError('Only a meeting has guests.');
   if (clientOwner(peer) !== user) {
     throw new OpError('This page has lost its connection to the workspace. Wait a moment and try again, or reload the page.', 'conflict');
   }
@@ -170,6 +207,7 @@ export function joinCall(root: string, room: Room, user: string, peer: string, r
   let entry: Message | null = null;
   if (!call) {
     const earlier = resume ? resumable(room, resume) : null;
+    if (guest && !earlier) throw new OpError(NOT_STARTED, 'conflict');
     if (earlier) {
       call = { id: earlier.call!.id, root, room, started: Date.parse(earlier.created) || Date.now(), messageId: earlier.id, participants: new Map() };
     } else {
@@ -190,13 +228,44 @@ export function joinCall(root: string, room: Room, user: string, peer: string, r
   for (const other of calls.values()) {
     if (other !== call && other.participants.has(peer)) leaveCall(other.room.url, peer);
   }
-  call.participants.set(peer, call.participants.get(peer) ?? { peer, user, joined: Date.now() });
+  call.participants.set(peer, call.participants.get(peer) ?? { peer, user, name: personLabel(room.meeting, user), joined: Date.now() });
   if (!entry) {
     entry = updateCallRecord(room.dir, call.messageId, (rec) => (rec.people.includes(user) ? rec : { ...rec, people: [...rec.people, user] }));
   }
+  watchMembers(call);
   sendRoster(call);
   announce(call, entry);
   return call.id;
+}
+
+/**
+ * Keep an eye on whether a call still has a member in it. One that has only
+ * guests left is given MEMBERLESS_MS for a member to come back, and then ends
+ * for the guests, who are told why.
+ */
+function watchMembers(call: LiveCall): void {
+  const url = call.room.url;
+  const hasMember = [...call.participants.values()].some((p) => !isGuestName(p.user));
+  const timer = memberlessTimers.get(url);
+  if (hasMember || call.participants.size === 0) {
+    if (timer) {
+      clearTimeout(timer);
+      memberlessTimers.delete(url);
+    }
+    return;
+  }
+  if (timer) return;
+  const t = setTimeout(() => {
+    memberlessTimers.delete(url);
+    const now = calls.get(url);
+    if (now !== call || [...call.participants.values()].some((p) => !isGuestName(p.user))) return;
+    for (const p of [...call.participants.values()]) {
+      sendToClient(p.peer, { type: 'call-gone', url, reason: 'Everyone from the workspace has left, so the call has ended.' });
+      leaveCall(url, p.peer);
+    }
+  }, MEMBERLESS_MS);
+  t.unref?.();
+  memberlessTimers.set(url, t);
 }
 
 /** Take a page out of a room's call, ending the call when it was the last. */
@@ -210,10 +279,12 @@ export function leaveCall(roomUrl: string, peer: string): void {
   }
   if (call.participants.size === 0) {
     calls.delete(roomUrl);
+    watchMembers(call);
     const ended = updateCallRecord(call.room.dir, call.messageId, (rec) => ({ ...rec, ended: new Date().toISOString() }));
     announce(call, ended);
     return;
   }
+  watchMembers(call);
   sendRoster(call);
   announce(call);
 }
@@ -233,22 +304,30 @@ export function relaySignals(roomUrl: string, from: string, to: string, signals:
 
 /**
  * Take out of every call the people who can no longer see its room: removed
- * from a private channel, removed from the workspace, or the channel deleted.
- * Their pages are told, and the others drop them with the new roster. Called
- * by every route that takes access away.
+ * from a private channel, a meeting, or the workspace, or the room deleted,
+ * and a meeting's guests whose link was reset, who were taken out, or whom
+ * the workspace no longer allows. Their pages are told, and the others drop
+ * them with the new roster. Called by every route that takes access away.
  */
 export function pruneCalls(root: string): void {
   const state = loadVault(root);
+  const guestsOn = loadConfig(root).calls.guests;
   for (const call of [...calls.values()]) {
     const canSee = (user: string): boolean => {
+      if (isGuestName(user)) {
+        const meeting = call.room.meeting ? readMeeting(root, call.room.meeting.id) : null;
+        return guestsOn && meeting !== null && isCurrentGuest(meeting, user);
+      }
       const u = state.status === 'ok' ? state.vault.users[user] : undefined;
       if (!u) return false;
       const auth = { username: user, user: u, token: { hash: '' } } as Parameters<typeof channelRoom>[2];
+      if (call.room.meeting) return meetingRoom(root, call.room.meeting.id, auth) !== null;
       return call.room.dm ? dmRoom(root, call.room.dm.id, auth) !== null : channelRoom(root, call.room.channel!.name, auth) !== null;
     };
     for (const p of [...call.participants.values()]) {
       if (canSee(p.user)) continue;
-      sendToClient(p.peer, { type: 'call-gone', url: call.room.url, reason: 'You can no longer see this room, so you have left its call.' });
+      const reason = isGuestName(p.user) ? 'You are no longer a guest in this meeting, so you have left its call.' : 'You can no longer see this room, so you have left its call.';
+      sendToClient(p.peer, { type: 'call-gone', url: call.room.url, reason });
       leaveCall(call.room.url, p.peer);
     }
   }

@@ -1,6 +1,8 @@
 import { AuthResult } from '../../mochiforge/src/vault';
 import { ChannelInfo } from './channels';
 import { DmInfo } from './dms';
+import { MeetingInfo, isCurrentGuest } from './meetings';
+import { isGuestName } from './workspace';
 
 // Who may do what, in one place, the way mochiforge keeps it in its perms.ts.
 // The model is smaller than a forge's because a chat's is: there are members
@@ -15,23 +17,37 @@ import { DmInfo } from './dms';
 //    rooms. (The operator can read the files on disk; that is stated rather
 //    than pretended away.)
 //  - A direct conversation is visible to its participants and to nobody else.
+//  - A meeting is visible to its members, and to the guests let in through
+//    its link. A guest is not a member of the workspace and sees nothing
+//    else in it: every other check below says no to a guest by name, so a
+//    guest's identity handed somewhere it was not meant for opens nothing.
 //  - A message may be edited by its author, and deleted by its author or by a
 //    site admin where the admin can see it at all.
 //  - Site admins create and remove users, delete channels, and change
 //    workspace settings.
 
+/** Whether this is a meeting's guest rather than a member of the workspace. */
+export function isGuest(auth: AuthResult | null): boolean {
+  return auth !== null && isGuestName(auth.username);
+}
+
 export function isSiteAdmin(auth: AuthResult | null): boolean {
-  return auth !== null && auth.user.siteAdmin === true;
+  return auth !== null && !isGuest(auth) && auth.user.siteAdmin === true;
 }
 
 export function canSeeChannel(auth: AuthResult | null, channel: ChannelInfo): boolean {
-  if (!auth) return false;
+  if (!auth || isGuest(auth)) return false;
   if (!channel.private) return true;
   return channel.members.includes(auth.username);
 }
 
 export function canSeeDm(auth: AuthResult | null, dm: DmInfo): boolean {
-  return auth !== null && dm.participants.includes(auth.username);
+  return auth !== null && !isGuest(auth) && dm.participants.includes(auth.username);
+}
+
+export function canSeeMeeting(auth: AuthResult | null, meeting: MeetingInfo): boolean {
+  if (!auth) return false;
+  return isGuest(auth) ? isCurrentGuest(meeting, auth.username) : meeting.members.includes(auth.username);
 }
 
 /**

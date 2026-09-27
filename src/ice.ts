@@ -1,5 +1,6 @@
 import { createHmac } from 'crypto';
 import { CallsConfig } from './config';
+import { isGuestName } from './workspace';
 
 // The ICE servers a call's browsers are given, as the workspace's config
 // says. A call's media goes straight from browser to browser; what the
@@ -115,7 +116,12 @@ export async function iceFor(calls: CallsConfig, username: string, now = Date.no
   const missing = turnProblem(calls);
   if (missing) problems.push(`The relay is not used: ${missing}.`);
   if (missing === null) {
-    if (t.mode === 'static' && urls.length) {
+    // A fixed password is handed to whoever joins, and a guest is anyone
+    // with a meeting's link, so guests are not given it: they connect
+    // directly or not at all. The other modes make a credential that lapses.
+    if (t.mode === 'static' && urls.length && isGuestName(username)) {
+      problems.push('The relay is not offered to guests, since its password is fixed.');
+    } else if (t.mode === 'static' && urls.length) {
       iceServers.push({ urls, username: t.username, credential: t.credential });
     } else if (t.mode === 'coturn' && urls.length) {
       const c = coturnCredential(t.secret, username, now);

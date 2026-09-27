@@ -5,9 +5,10 @@ import { fileCache } from '../../mochiforge/src/filecache';
 import { AuthResult } from '../../mochiforge/src/vault';
 import { ChannelInfo, listChannels } from './channels';
 import { DmInfo, dmPeople, dmTitle, listDmsFor } from './dms';
+import { MeetingInfo, listMeetingsFor } from './meetings';
 import { Message, readMessages } from './messages';
 import { canSeeChannel } from './perms';
-import { channelDir, dmDir, userDir } from './workspace';
+import { channelDir, dmDir, isGuestName, meetingDir, userDir } from './workspace';
 
 // What each person has read, kept on the server so that every device agrees.
 //
@@ -64,7 +65,9 @@ export function readMarkers(root: string, username: string): Record<string, numb
  * page already read.
  */
 export function markRead(root: string, username: string, roomUrl: string, id: number): boolean {
-  if (!Number.isInteger(id) || id < 1) return false;
+  // A meeting's guest has no directory under users/, and is given none: what
+  // they have read is not kept.
+  if (!Number.isInteger(id) || id < 1 || isGuestName(username)) return false;
   const file = readFile(root, username);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   return withFileLock(`${file}.lock`, () => {
@@ -148,7 +151,7 @@ export function isNewsFor(m: Message, username: string): boolean {
 export interface RoomUnread extends Unread {
   url: string;
   title: string;
-  kind: 'channel' | 'dm';
+  kind: 'channel' | 'dm' | 'meeting';
   /** For a conversation, the people in it other than the viewer. */
   with?: string[];
 }
@@ -156,6 +159,7 @@ export interface RoomUnread extends Unread {
 /** Every room the user can see, with what is unread in it, in sidebar order. */
 export function unreadRooms(root: string, auth: AuthResult): RoomUnread[] {
   const out: RoomUnread[] = [];
+  if (isGuestName(auth.username)) return out;
   for (const c of listChannels(root)) {
     if (!canSeeChannel(auth, c)) continue;
     const url = `/c/${encodeURIComponent(c.name)}`;
@@ -166,11 +170,20 @@ export function unreadRooms(root: string, auth: AuthResult): RoomUnread[] {
     const others = dmPeople(d).filter((p) => p !== auth.username);
     out.push({ url, title: dmTitle(d, auth.username), kind: 'dm', with: others, ...unreadIn(root, auth.username, url, dmDir(root, d.id)) });
   }
+  for (const m of listMeetingsFor(root, auth.username)) {
+    const url = `/m/${m.id}`;
+    out.push({ url, title: m.title, kind: 'meeting', ...unreadIn(root, auth.username, url, meetingDir(root, m.id)) });
+  }
   return out;
 }
 
-/** The people a room's news reaches: everyone in the workspace for a public channel, or its members. */
-export function audienceOf(room: { channel?: ChannelInfo; dm?: DmInfo }, everyone: () => string[]): string[] {
+/**
+ * The people a room's news reaches: everyone in the workspace for a public
+ * channel, or its members. A meeting's guests are not among them: they have
+ * no counts and no notifications, only the meeting's page while it is open.
+ */
+export function audienceOf(room: { channel?: ChannelInfo; dm?: DmInfo; meeting?: MeetingInfo }, everyone: () => string[]): string[] {
+  if (room.meeting) return room.meeting.members;
   if (room.dm) return room.dm.participants;
   if (room.channel?.private) return room.channel.members;
   return everyone();

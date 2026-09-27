@@ -67,7 +67,7 @@ afterEach(() => {
 });
 
 function calls(over: Partial<CallsConfig['turn']> = {}, stun = ['stun:stun.example.org:3478']): CallsConfig {
-  return { stun, turn: { mode: 'none', urls: [], username: '', credential: '', secret: '', keyId: '', apiToken: '', ...over } };
+  return { stun, turn: { mode: 'none', urls: [], username: '', credential: '', secret: '', keyId: '', apiToken: '', ...over }, guests: true };
 }
 
 // ---- ICE servers ----

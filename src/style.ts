@@ -213,6 +213,32 @@ dialog.ask p { margin: 0 0 var(--s4); }
   font-size: var(--t-sm); box-shadow: 0 4px 12px var(--shadow);
 }
 
+/* Someone waiting to be let in to a meeting: a notice over the page, one row
+   a guest, above the composer's height so it covers no send button. */
+.lobby-notice {
+  position: fixed; top: var(--s2); right: var(--s2); z-index: 90;
+  display: flex; flex-direction: column; gap: var(--s2); max-width: min(440px, calc(100vw - 16px));
+  padding: var(--s2) var(--s3); border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg); color: var(--fg); font-size: var(--t-sm); box-shadow: 0 4px 12px var(--shadow);
+}
+.lobby-row { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.lobby-row > span { flex: 1 1 180px; min-width: 0; }
+
+/* A meeting: what it says of itself before anything is said in it. */
+.meeting-intro { flex: none; max-width: 720px; margin: var(--s3) var(--s4) 0; padding: var(--s3); border: 1px solid var(--border-soft); border-radius: var(--radius); background: var(--surface); font-size: var(--t-sm); }
+.meeting-intro p { margin: 0 0 var(--s2); }
+.meeting-intro .copy-row { margin-bottom: 0; }
+.room-tools .guest-link-btn { white-space: nowrap; }
+.call-button:disabled { opacity: 0.5; cursor: default; }
+
+/* A guest's frame is the meeting alone: no sidebar beside it, so the column
+   of messages is centred rather than left against an empty side. */
+.app.guest-app { grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 761px) {
+  .guest-app .msgs, .guest-app .composer { padding-left: max(var(--s4), calc((100% - 920px) / 2)); padding-right: max(var(--s4), calc((100% - 920px) / 2)); }
+  .guest-app .meeting-intro { margin-left: max(var(--s4), calc((100% - 920px) / 2)); }
+}
+
 /* The tools sit in a small bordered strip that appears on hover, the shape a
    control always has in this vocabulary. */
 .msg-tools {

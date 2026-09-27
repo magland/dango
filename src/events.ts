@@ -62,8 +62,10 @@ export type UserEvent =
       count: number;
       mentions: number;
     }
-  /** Who is in a room's call now; an empty list when it has ended. */
-  | { type: 'call'; url: string; people: string[] };
+  /** Who is in a room's call now, as they are named there; an empty list when it has ended. */
+  | { type: 'call'; url: string; people: string[] }
+  /** Who is waiting to be let in to one of the person's meetings; an empty list when nobody is. */
+  | { type: 'lobby'; url: string; title: string; waiting: { id: string; name: string }[] };
 
 /**
  * What only one page is told: a call's roster and the signals another page
@@ -71,7 +73,7 @@ export type UserEvent =
  * in two tabs is two pages, and a call connects pages, not people.
  */
 export type ClientEvent =
-  | { type: 'call-roster'; url: string; call: string; peers: { peer: string; user: string; face: string }[] }
+  | { type: 'call-roster'; url: string; call: string; peers: { peer: string; user: string; name: string; face: string }[] }
   | { type: 'call-signal'; url: string; from: string; signals: unknown[] }
   /** This page was taken out of the room's call by the workspace. */
   | { type: 'call-gone'; url: string; reason: string };

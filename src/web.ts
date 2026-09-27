@@ -35,6 +35,23 @@ import { MAX_IN_CALL, joinCall, leaveCall, participantUser, pruneCalls, relaySig
 import { CallsConfig, TurnMode, loadConfig, updateConfig } from './config';
 import { openDm } from './dms';
 import { RoomEvent, clientOwner, isClientId, publish, serveEvents, serveUserEvents } from './events';
+import {
+  Guest,
+  admittedGuest,
+  askToJoin,
+  asViewer,
+  chargeEntry,
+  clearGuestCookie,
+  clearLobby,
+  guestCsrfMatches,
+  guestsAllowed,
+  issueGuest,
+  leaveLobby,
+  readGuestCookie,
+  renewGuest,
+  sweepLobbies,
+  waitingGuest,
+} from './guests';
 import { iceFor, isIceUrl, turnProblem } from './ice';
 import {
   Attachment,
@@ -56,7 +73,24 @@ import {
   THREAD_PAGE,
 } from './messages';
 import { LARGE_BODY_BYTES, RateLimited, WriteLimits, createBodySlots, refusalStatus } from './limits';
-import { CALL_NOT_EDITABLE, EDIT_WINDOW_PASSED, canDeleteMessage, canEditMessage, isSiteAdmin } from './perms';
+import {
+  addMeetingMember,
+  admitGuest,
+  cleanGuestName,
+  createMeeting,
+  deleteMeeting,
+  guestKeyMatches,
+  isCurrentGuest,
+  mayDeleteMeeting,
+  personLabel,
+  readMeeting,
+  removeGuest,
+  removeMeetingMember,
+  resetGuestLink,
+  setLobby,
+  setMeetingTitle,
+} from './meetings';
+import { CALL_NOT_EDITABLE, EDIT_WINDOW_PASSED, canDeleteMessage, canEditMessage, isGuest, isSiteAdmin } from './perms';
 import { Pin, pinMessage, pinOf, readPins, unpinMessage } from './pins';
 import {
   MAX_MUTED,
@@ -68,6 +102,7 @@ import {
   deviceId,
   deviceLabel,
   forgetRoom,
+  notifyKnock,
   parseSubscription,
   pushToUser,
   readDevices,
@@ -80,15 +115,22 @@ import {
 import { noteRead, postMessage } from './post';
 import { vapidKeys } from './push';
 import { readKey, readMarkers } from './reads';
-import { Room, channelRoom, dmRoom, removeWorkspaceUser, threadRoom } from './rooms';
+import { Room, channelRoom, dmRoom, meetingRoom, removeWorkspaceUser, threadRoom } from './rooms';
 import { searchMessages } from './search';
 import * as views from './views';
 import { channelNameFrom, isValidChannelName, isValidWorkspaceUserName } from './workspace';
 
-// Every page and form of the web interface. Anonymous requests reach exactly
-// two things, the sign-in page and the assets; everything else resolves a
-// viewer first and redirects to /login without one, because a workspace is
-// members-only all the way down.
+// Every page and form of the web interface. Anonymous requests reach the
+// sign-in page, the assets, and a meeting's guest link; everything else
+// resolves a viewer first and redirects to /login without one, because a
+// workspace is members-only all the way down.
+//
+// The one exception is a meeting's guest (see src/meetings.ts and
+// src/guests.ts). Their cookie is not a session, and getViewer never reads
+// it; the routes of a meeting, and only those, also take a guest let in to
+// that meeting (viewerOf below), so a guest reaches their meeting's page,
+// timeline, threads, files, and call, and every other route treats them as
+// the stranger they otherwise are.
 //
 // The shape of a state-changing route is mochiforge's: resolve the viewer,
 // check the CSRF token, do the operation through the same functions the JSON
@@ -192,8 +234,14 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
   const urlenc = express.urlencoded({ extended: false, limit: '128kb' });
 
   const fail = (res: Response, viewer: Viewer | null, status: number, message: string) => {
-    if (wantsJson(res.req)) res.status(status).json({ error: message });
-    else res.status(status).type('html').send(views.errorPage(status, message, { viewer, root }));
+    if (wantsJson(res.req)) {
+      res.status(status).json({ error: message });
+      return;
+    }
+    // A guest's way back is their meeting; the rest of the workspace is not theirs.
+    const meeting = (res.req.params as Record<string, string>).meeting;
+    const back = viewer && isGuest(viewer.auth) && meeting ? { url: `/m/${parseInt(meeting, 10)}`, label: 'Back to the meeting' } : undefined;
+    res.status(status).type('html').send(views.errorPage(status, message, { viewer, root, back }));
   };
 
   /** The signed-in viewer, or null having already redirected to /login. */
@@ -688,6 +736,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         keyId: field(body.cf_key_id),
         apiToken: field(body.cf_api_token) || current.turn.apiToken,
       },
+      guests: body.guests === '1',
     };
     const bad = [...stun.filter((u) => !isIceUrl(u, 'stun')), ...urls.filter((u) => !isIceUrl(u, 'turn'))];
     const problem = bad.length
@@ -702,6 +751,8 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       return;
     }
     updateConfig(root, { calls: next });
+    // Guests turned off leave every call they are in.
+    pruneCalls(root);
     res.redirect(303, '/admin#calls');
   });
 
@@ -731,8 +782,47 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     let room: Room | null = null;
     if (p.channel !== undefined) room = channelRoom(root, p.channel, viewer.auth);
     else if (p.dm !== undefined) room = dmRoom(root, parseInt(p.dm, 10), viewer.auth);
+    else if (p.meeting !== undefined) room = meetingRoom(root, parseInt(p.meeting, 10), viewer.auth);
     if (room && p.tid !== undefined) room = threadRoom(room, parseInt(p.tid, 10));
     return room;
+  };
+
+  /**
+   * The guest this request comes from, as a viewer, when it is a request for
+   * a meeting's route and the guest is in that meeting. Anywhere else, and
+   * for anyone else, null: this is the only place a guest becomes a viewer.
+   */
+  const guestOf = (req: Request): Guest | null => {
+    const id = (req.params as Record<string, string>).meeting;
+    if (id === undefined) return null;
+    const found = admittedGuest(req, root);
+    return found && found.meeting.id === parseInt(id, 10) ? found.guest : null;
+  };
+
+  /** A signed-in member, or on a meeting's routes that meeting's guest. A member comes first. */
+  const viewerOf = (req: Request): Viewer | null => {
+    const member = getViewer(req, root);
+    if (member) return member;
+    const g = guestOf(req);
+    return g ? asViewer(g) : null;
+  };
+
+  /**
+   * Nobody we can serve: a member is sent to sign in, and a guest of this
+   * meeting who is not in it (still waiting, or taken out) is told where
+   * they stand rather than shown a sign-in page they have no token for.
+   */
+  const refuseStranger = (req: Request, res: Response): void => {
+    const meetingId = parseInt((req.params as Record<string, string>).meeting ?? '', 10);
+    const g = Number.isInteger(meetingId) ? readGuestCookie(req, root) : null;
+    if (g && g.meeting === meetingId) {
+      if (wantsJson(req)) res.status(403).json({ error: 'You are no longer a guest in this meeting.' });
+      else if (waitingGuest(meetingId, g.id)) res.redirect(303, `/m/${meetingId}/lobby`);
+      else res.status(403).type('html').send(views.guestGonePage('You are no longer a guest in this meeting. To come back, open its link again.'));
+      return;
+    }
+    if (wantsJson(req)) res.status(401).json({ error: 'You are signed out. Sign in again, then send.' });
+    else res.redirect(303, `/login?next=${encodeURIComponent(req.originalUrl)}`);
   };
 
   /** Resolve viewer and room, answering 404 for a room that is not this viewer's to see. */
@@ -742,11 +832,15 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     fn: (viewer: Viewer, room: Room) => void,
     opts: { form?: boolean } = {}
   ): void => {
-    const viewer = getViewer(req, root);
+    const viewer = viewerOf(req);
     if (!viewer) {
-      if (wantsJson(req)) res.status(401).json({ error: 'You are signed out. Sign in again, then send.' });
-      else res.redirect(303, `/login?next=${encodeURIComponent(req.originalUrl)}`);
+      refuseStranger(req, res);
       return;
+    }
+    // A guest in use is kept, as a session is.
+    if (isGuest(viewer.auth)) {
+      const g = guestOf(req);
+      if (g) renewGuest(req, res, root, g);
     }
     if (opts.form) {
       const presented = (req.body as Record<string, unknown> | undefined)?.csrf;
@@ -777,12 +871,11 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
    * the CSRF token, which is in the body and so can only be read after.
    */
   const signedIn = (req: Request, res: Response, next: NextFunction): void => {
-    if (getViewer(req, root)) {
+    if (viewerOf(req)) {
       next();
       return;
     }
-    if (wantsJson(req)) res.status(401).json({ error: 'You are signed out. Sign in again, then send.' });
-    else res.redirect(303, `/login?next=${encodeURIComponent(req.originalUrl)}`);
+    refuseStranger(req, res);
   };
 
   /**
@@ -793,7 +886,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
    */
   const bodySlots = createBodySlots();
   const formBody = (req: FormRequest, res: Response, next: NextFunction): void => {
-    const viewer = getViewer(req, root);
+    const viewer = viewerOf(req);
     const length = parseInt(req.get('content-length') ?? '', 10);
     if (!viewer || (Number.isInteger(length) && length <= LARGE_BODY_BYTES)) {
       readForm(req, res, next);
@@ -809,7 +902,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     readForm(req, res, next);
   };
 
-  const BASES = ['/c/:channel', '/d/:dm'];
+  const BASES = ['/c/:channel', '/d/:dm', '/m/:meeting'];
   /** The most a stream catches up with; a page further behind is loaded again. */
   const CATCH_UP = 200;
   const ROOM_PATHS = (suffix: string) => BASES.flatMap((b) => [`${b}${suffix}`, `${b}/t/:tid${suffix}`]);
@@ -831,7 +924,49 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     return before;
   };
 
+  // ---- meetings: making one ----
+  //
+  // Registered before the room pages, so /m/new is not taken for a meeting.
+
+  app.get('/m/new', (req, res) => {
+    const viewer = requireViewer(req, res);
+    if (!viewer) return;
+    res.type('html').send(views.newMeetingPage(root, viewer));
+  });
+
+  app.post('/m/new', urlenc, (req, res) => {
+    const viewer = requireForm(req, res);
+    if (!viewer) return;
+    const body = req.body as Record<string, unknown>;
+    const raw = body.user;
+    const users = (Array.isArray(raw) ? raw : [raw]).filter((u): u is string => typeof u === 'string' && u !== '' && userExists(root, u));
+    const form = { title: String(body.title ?? ''), users, lobby: body.lobby === '1' || !guestsAllowed(root) };
+    try {
+      const m = createMeeting(root, {
+        title: form.title,
+        createdBy: viewer.auth.username,
+        members: users,
+        lobby: form.lobby,
+        charge: () => limits.newRoom(viewer.auth.username),
+      });
+      res.redirect(303, `/m/${m.id}`);
+    } catch (e) {
+      if (e instanceof OpError) {
+        res.status(refusalStatus(e, opErrorStatus)).type('html').send(views.newMeetingPage(root, viewer, e.message, form));
+        return;
+      }
+      throw e;
+    }
+  });
+
   // The room pages themselves.
+  app.get('/m/:meeting', (req, res) =>
+    withRoom(req, res, (viewer, room) => {
+      const messages = readMessages(room.dir, { limit: ROOM_PAGE });
+      const readUpTo = seen(req, viewer, room, messages);
+      res.type('html').send(views.meetingPage(root, room, messages, viewer, originOf(req), readUpTo));
+    })
+  );
   app.get('/c/:channel', (req, res) =>
     withRoom(req, res, (viewer, room) => {
       const messages = readMessages(room.dir, { limit: ROOM_PAGE });
@@ -846,7 +981,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       res.type('html').send(views.dmPage(root, room, messages, viewer, readUpTo));
     })
   );
-  app.get(['/c/:channel/t/:tid', '/d/:dm/t/:tid'], (req, res) =>
+  app.get(['/c/:channel/t/:tid', '/d/:dm/t/:tid', '/m/:meeting/t/:tid'], (req, res) =>
     withRoom(req, res, (viewer, room) => {
       const anchor = readMessage(room.parent!.dir, room.threadOf!);
       if (!anchor) {
@@ -876,10 +1011,20 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
 
   // One stream per person, whichever page is open: their rooms' counts as
   // they change. What it says is only what the sidebar already shows.
+  //
+  // A meeting's guest holds one too, which is how their page hears its call:
+  // who is in it, and the signals the others' pages send it. Nothing else is
+  // published to a guest's name.
   app.get('/events', (req, res) => {
+    const client = req.query.client;
+    const guest = getViewer(req, root) ? null : admittedGuest(req, root);
+    if (guest) {
+      const id = guest.guest.id;
+      serveUserEvents(res, id, () => !getViewer(req, root) && admittedGuest(req, root)?.guest.id === id, isClientId(client) ? client : undefined);
+      return;
+    }
     const viewer = requireViewer(req, res);
     if (!viewer) return;
-    const client = req.query.client;
     const username = viewer.auth.username;
     serveUserEvents(res, username, () => getViewer(req, root)?.auth.username === username, isClientId(client) ? client : undefined);
   });
@@ -887,14 +1032,18 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
   // Every member, as names, for the composer to complete an @ against
   // without a round trip per keystroke. It says no more than the new
   // conversation page already lists to the same eyes.
+  //
+  // A guest is given their meeting's members, whom they can already see
+  // writing there, and nobody else.
   app.get('/assets/users.json', (req, res) => {
     const viewer = getViewer(req, root);
-    if (!viewer) {
+    const guest = viewer ? null : admittedGuest(req, root);
+    if (!viewer && !guest) {
       res.status(401).json([]);
       return;
     }
     const state = loadVault(root);
-    const users = state.status === 'ok' ? Object.entries(state.vault.users) : [];
+    const users = state.status === 'ok' ? Object.entries(state.vault.users).filter(([name]) => !guest || guest.meeting.members.includes(name)) : [];
     res.set('Cache-Control', 'private, no-cache').json(
       users
         .map(([name, u]) => (u.profile?.name ? { name, display: u.profile.name } : { name }))
@@ -923,7 +1072,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       // Whether this viewer may still read the room, asked afresh: the same
       // session, still valid, and the same room still resolving for it.
       const allowed = () => {
-        const now = getViewer(req, root);
+        const now = viewerOf(req);
         return now !== null && now.auth.username === viewer.auth.username && resolveRoom(req, now)?.dir === room.dir;
       };
       serveEvents(res, viewer.auth.username, room.url, catchUp, (ev) => views.messageHtml(root, room, ev.message, viewer).text, allowed);
@@ -941,6 +1090,10 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         const parts = partFiles((req as FormRequest).fileParts ?? [], 'files').filter(
           (p) => p.filename && p.data.length > 0
         );
+        if (parts.length && isGuest(viewer.auth)) {
+          fail(res, viewer, 403, 'A guest cannot attach files. Send the text alone.');
+          return;
+        }
         if (parts.length > MAX_ATTACHMENTS) {
           fail(res, viewer, 413, `A message may carry at most ${MAX_ATTACHMENTS} files.`);
           return;
@@ -1092,7 +1245,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         (viewer, room) => {
           const id = parseInt(req.params.mid, 10);
           const m = readMessage(room.dir, id);
-          if (!m || m.deleted) {
+          if (!m || m.deleted || isGuest(viewer.auth)) {
             fail(res, viewer, 404, 'Page not found');
             return;
           }
@@ -1116,6 +1269,10 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       req,
       res,
       (viewer, room) => {
+        if (isGuest(viewer.auth)) {
+          fail(res, viewer, 404, 'Page not found');
+          return;
+        }
         const muted = (req.body as Record<string, unknown>).muted === '1';
         limits.action(viewer.auth.username);
         setMuted(root, viewer.auth.username, room.url, muted);
@@ -1128,6 +1285,10 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
 
   app.get(BASES.map((b) => `${b}/pins`), (req, res) =>
     withRoom(req, res, (viewer, room) => {
+      if (isGuest(viewer.auth)) {
+        fail(res, viewer, 404, 'Page not found');
+        return;
+      }
       const pinned = readPins(room.dir)
         .map((pin) => ({ pin, message: readMessage(room.dir, pin.id) }))
         .filter((p): p is { pin: Pin; message: Message } => p.message !== null && !p.message.deleted);
@@ -1197,8 +1358,8 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
             // time the viewer may have been taken out of the room or the
             // channel deleted; joining then would put them in a call they
             // cannot see, or write the call's entry into a room that is gone.
-            const now = getViewer(req, root);
-            if (!now || resolveRoom(req, now)?.dir !== room.dir) {
+            const now = viewerOf(req);
+            if (!now || now.auth.username !== viewer.auth.username || resolveRoom(req, now)?.dir !== room.dir) {
               fail(res, viewer, 404, 'Page not found');
               return;
             }
@@ -1272,11 +1433,12 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         }
         const other = isClientId(body.to) ? participantUser(room.url, body.to) : null;
         const named = typeof body.toUser === 'string' && userExists(root, body.toUser) ? body.toUser : 'someone';
+        // A guest is logged by the name they gave, marked as a guest's.
         recordReport(root, {
           at: new Date().toISOString(),
           room: room.url,
-          user: viewer.auth.username,
-          with: other ?? named,
+          user: personLabel(room.meeting, viewer.auth.username),
+          with: other ? personLabel(room.meeting, other) : named,
           device: deviceLabel(req.get('user-agent') ?? ''),
           ...report,
         });
@@ -1372,6 +1534,310 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       { form: true }
     )
   );
+
+  // ---- meetings: their settings, their guests, and the way in ----
+
+  /** A meeting's route that is for its members: a guest is answered as if it were not there. */
+  const withMeeting = (req: Request, res: Response, fn: (viewer: Viewer, room: Room) => void, opts: { form?: boolean } = {}): void =>
+    withRoom(
+      req,
+      res,
+      (viewer, room) => {
+        if (room.kind !== 'meeting' || isGuest(viewer.auth)) {
+          fail(res, viewer, 404, 'Page not found');
+          return;
+        }
+        fn(viewer, room);
+      },
+      opts
+    );
+
+  app.get('/m/:meeting/settings', (req, res) =>
+    withMeeting(req, res, (viewer, room) => {
+      res.type('html').send(views.meetingSettingsPage(root, room, viewer, originOf(req)));
+    })
+  );
+
+  app.post('/m/:meeting/settings', urlenc, (req, res) =>
+    withMeeting(
+      req,
+      res,
+      (viewer, room) => {
+        const body = req.body as Record<string, unknown>;
+        limits.action(viewer.auth.username);
+        if (body.what === 'lobby') setLobby(root, room.meeting!.id, body.lobby === '1');
+        else setMeetingTitle(root, room.meeting!.id, String(body.title ?? ''));
+        res.redirect(303, `${room.url}/settings`);
+      },
+      { form: true }
+    )
+  );
+
+  app.post('/m/:meeting/members/add', urlenc, (req, res) =>
+    withMeeting(
+      req,
+      res,
+      (viewer, room) => {
+        const user = String((req.body as Record<string, unknown>).user ?? '').trim();
+        if (!userExists(root, user)) throw new OpError(`There is no user named ${user}.`, 'notfound');
+        limits.action(viewer.auth.username);
+        addMeetingMember(root, room.meeting!.id, user);
+        res.redirect(303, `${room.url}/settings`);
+      },
+      { form: true }
+    )
+  );
+
+  // Anyone may leave. Taking somebody else out is for whoever made the
+  // meeting, or anyone once they are gone, the rule deleting it follows.
+  app.post('/m/:meeting/members/remove', urlenc, (req, res) =>
+    withMeeting(
+      req,
+      res,
+      (viewer, room) => {
+        const user = String((req.body as Record<string, unknown>).user ?? '');
+        if (user !== viewer.auth.username && !mayDeleteMeeting(room.meeting!, viewer.auth.username)) {
+          throw new OpError('You can remove yourself; removing others is for whoever made the meeting.');
+        }
+        limits.action(viewer.auth.username);
+        removeMeetingMember(root, room.meeting!.id, user);
+        pruneCalls(root);
+        res.redirect(303, user === viewer.auth.username ? '/' : `${room.url}/settings`);
+      },
+      { form: true }
+    )
+  );
+
+  app.post('/m/:meeting/guests/remove', urlenc, (req, res) =>
+    withMeeting(
+      req,
+      res,
+      (viewer, room) => {
+        limits.action(viewer.auth.username);
+        removeGuest(root, room.meeting!.id, String((req.body as Record<string, unknown>).guest ?? ''));
+        pruneCalls(root);
+        res.redirect(303, `${room.url}/settings`);
+      },
+      { form: true }
+    )
+  );
+
+  app.post('/m/:meeting/link/reset', urlenc, (req, res) =>
+    withMeeting(
+      req,
+      res,
+      (viewer, room) => {
+        limits.action(viewer.auth.username);
+        resetGuestLink(root, room.meeting!.id);
+        clearLobby(root, room.meeting!.id);
+        pruneCalls(root);
+        res.redirect(303, `${room.url}/settings`);
+      },
+      { form: true }
+    )
+  );
+
+  app.post('/m/:meeting/delete', urlenc, (req, res) =>
+    withMeeting(
+      req,
+      res,
+      (viewer, room) => {
+        if (!mayDeleteMeeting(room.meeting!, viewer.auth.username)) throw new OpError('Only whoever made the meeting may delete it.');
+        clearLobby(root, room.meeting!.id);
+        deleteMeeting(root, room.meeting!.id);
+        forgetRoom(root, room.url);
+        pruneCalls(root);
+        res.redirect(303, '/');
+      },
+      { form: true }
+    )
+  );
+
+  // Letting a waiting guest in, or turning them away, from the notice every
+  // page of a member's shows while someone waits. The page script posts JSON.
+  const lobbyRoute = (action: 'admit' | 'deny') =>
+    app.post(`/m/:meeting/lobby/${action}`, urlenc, json, (req, res) =>
+      withMeeting(
+        req,
+        res,
+        (viewer, room) => {
+          const id = room.meeting!.id;
+          const guest = String((req.body as Record<string, unknown>).guest ?? '');
+          const waiting = waitingGuest(id, guest);
+          if (!waiting) throw new OpError('They are no longer waiting.', 'notfound');
+          limits.action(viewer.auth.username);
+          if (action === 'admit') admitGuest(root, id, guest, waiting.name);
+          leaveLobby(root, id, guest, action === 'deny');
+          if (wantsJson(req)) res.json({ ok: true });
+          else res.redirect(303, room.url);
+        },
+        { form: true }
+      )
+    );
+  lobbyRoute('admit');
+  lobbyRoute('deny');
+
+  // The guest link lands here. The key is in the fragment, so this page is
+  // the same for everyone and names nothing (see meetingJoinPage); a guest
+  // already in the meeting goes straight to it.
+  app.get('/m/:meeting/join', (req, res) => {
+    const id = parseInt(req.params.meeting, 10);
+    const inside = admittedGuest(req, root);
+    if (!getViewer(req, root) && inside && inside.meeting.id === id) {
+      res.redirect(303, `/m/${id}`);
+      return;
+    }
+    const viewer = getViewer(req, root);
+    res.set('Cache-Control', 'no-store').type('html').send(views.meetingJoinPage(id, viewer ? viewer.auth.username : null));
+  });
+
+  // The key presented. A member joins as themselves, and is added to the
+  // meeting; anyone else becomes a guest, let in at once where the meeting
+  // has no lobby, and otherwise sent to wait in it. Like /login, this has no
+  // CSRF token to check (there is no session to bind one to), so a form
+  // posted from another site is refused instead: it could otherwise put a
+  // visitor into a meeting of someone else's choosing.
+  app.post('/m/:meeting/join', urlenc, (req, res) => {
+    const id = parseInt(req.params.meeting, 10);
+    const body = req.body as Record<string, unknown>;
+    const again = (status: number, error: string) =>
+      res.status(status).type('html').send(views.meetingJoinPage(id, getViewer(req, root)?.auth.username ?? null, { error, name: String(body.name ?? '') }));
+    if (!originOk(req) || req.get('sec-fetch-site') === 'cross-site') {
+      again(403, 'Join from the meeting’s own link.');
+      return;
+    }
+    const allowed = authLimiter.allow(req, null);
+    if (!allowed.ok) {
+      again(429, 'Too many attempts; wait a few minutes.');
+      return;
+    }
+    const meeting = readMeeting(root, id);
+    if (!meeting || !guestKeyMatches(root, meeting, body.k)) {
+      authLimiter.fail(req, null);
+      again(404, 'This link does not work. It may have been replaced by a newer one, or the meeting deleted; ask whoever sent it.');
+      return;
+    }
+    const viewer = getViewer(req, root);
+    if (viewer) {
+      try {
+        if (!meeting.members.includes(viewer.auth.username)) {
+          limits.action(viewer.auth.username);
+          addMeetingMember(root, id, viewer.auth.username);
+        }
+      } catch (e) {
+        sendOpError(res, viewer, e);
+        return;
+      }
+      res.redirect(303, `/m/${id}`);
+      return;
+    }
+    if (!guestsAllowed(root)) {
+      again(403, 'This workspace does not let meetings have guests.');
+      return;
+    }
+    // A browser already waiting, or already in, under this link goes on as that guest.
+    const held = readGuestCookie(req, root);
+    if (held && held.meeting === id && held.gen === meeting.gen) {
+      if (isCurrentGuest(meeting, held.id)) {
+        res.redirect(303, `/m/${id}`);
+        return;
+      }
+      if (waitingGuest(id, held.id)) {
+        res.redirect(303, `/m/${id}/lobby`);
+        return;
+      }
+    }
+    const name = cleanGuestName(body.name);
+    if (!name) {
+      again(400, 'Give the name the people in the meeting will see you as, of at most 40 characters.');
+      return;
+    }
+    const address = req.ip ?? '';
+    try {
+      if (!meeting.lobby) {
+        chargeEntry(address);
+        const g = issueGuest(req, res, root, meeting, name);
+        admitGuest(root, id, g.id, name);
+        res.redirect(303, `/m/${id}`);
+        return;
+      }
+      const g = issueGuest(req, res, root, meeting, name);
+      if (askToJoin(root, g, address).knocked) notifyKnock(root, meeting, name);
+      res.redirect(303, `/m/${id}/lobby`);
+    } catch (e) {
+      if (!(e instanceof OpError)) throw e;
+      clearGuestCookie(res);
+      again(opErrorStatus(e.kind), e.message);
+    }
+  });
+
+  // Where a guest waits. What they have proved is that they had the link,
+  // so the meeting's title is shown, and nothing else of it.
+  app.get('/m/:meeting/lobby', (req, res) => {
+    const id = parseInt(req.params.meeting, 10);
+    const g = readGuestCookie(req, root);
+    const meeting = readMeeting(root, id);
+    if (!g || g.meeting !== id) {
+      res.redirect(303, `/m/${id}/join`);
+      return;
+    }
+    if (!meeting || meeting.gen !== g.gen || !guestsAllowed(root)) {
+      res.status(410).type('html').send(views.guestGonePage('This meeting’s link no longer works. Ask whoever sent it for a new one.'));
+      return;
+    }
+    if (isCurrentGuest(meeting, g.id)) {
+      res.redirect(303, `/m/${id}`);
+      return;
+    }
+    res.set('Cache-Control', 'no-store').type('html').send(views.meetingLobbyPage(id, meeting.title, g.name, g.csrf));
+  });
+
+  // Asked every few seconds by the lobby page: whether the guest has been
+  // let in, and, in asking, a knock that keeps them in the lobby.
+  app.get('/m/:meeting/lobby/state', (req, res) => {
+    const id = parseInt(req.params.meeting, 10);
+    const g = readGuestCookie(req, root);
+    res.set('Cache-Control', 'no-store');
+    if (!g || g.meeting !== id) {
+      res.json({ state: 'closed' });
+      return;
+    }
+    try {
+      const r = askToJoin(root, g, req.ip ?? '');
+      if (r.knocked) {
+        const meeting = readMeeting(root, id);
+        if (meeting) notifyKnock(root, meeting, g.name);
+      }
+      res.json({ state: r.state });
+    } catch (e) {
+      if (!(e instanceof OpError)) throw e;
+      res.json({ state: 'refused', error: e.message });
+    }
+  });
+
+  // A guest leaving, from the meeting's header or from the lobby. They are
+  // taken out of the meeting, so that their browser is not left holding a
+  // way back in, and their cookie is cleared.
+  app.post('/m/:meeting/guest/leave', urlenc, (req, res) => {
+    const id = parseInt(req.params.meeting, 10);
+    const g = readGuestCookie(req, root);
+    if (!g || g.meeting !== id || !originOk(req) || !guestCsrfMatches(g, (req.body as Record<string, unknown>).csrf)) {
+      res.status(403).type('html').send(views.guestGonePage('That did not work: the page went stale. Close it, or reload it and try again.'));
+      return;
+    }
+    leaveLobby(root, id, g.id);
+    const meeting = readMeeting(root, id);
+    if (meeting?.guests[g.id] && !meeting.guests[g.id].removed) {
+      removeGuest(root, id, g.id);
+      pruneCalls(root);
+    }
+    clearGuestCookie(res);
+    res.type('html').send(views.guestGonePage(meeting ? `You have left ${meeting.title}. To come back, open its link again.` : 'You have left the meeting.'));
+  });
+
+  // Guests who stopped waiting are let go of, and the members told.
+  const sweep = setInterval(() => sweepLobbies(root), 10000);
+  sweep.unref?.();
 
   // ---- profiles, last: /<name> is every name no route above claimed ----
 

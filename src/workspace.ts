@@ -24,6 +24,10 @@ import { isValidUserName } from '../../mochiforge/src/scan';
  *     1/
  *       conversation.json   participants
  *       messages/ threads/ files/   exactly as a channel holds them
+ *   meetings/
+ *     1/
+ *       meeting.json        title, members, the guests let in
+ *       messages/ threads/ files/   exactly as a channel holds them
  *   users/
  *     alice/
  *       read.json           the newest message she has seen in each room
@@ -38,6 +42,7 @@ import { isValidUserName } from '../../mochiforge/src/scan';
  */
 export const CHANNELS_DIR = 'channels';
 export const DMS_DIR = 'dms';
+export const MEETINGS_DIR = 'meetings';
 /** Per-user state that is not identity: what each person has read, and their notifications. */
 export const USERS_DIR = 'users';
 
@@ -63,6 +68,24 @@ export function dmsDir(root: string): string {
 
 export function dmDir(root: string, id: number): string {
   return path.join(root, DMS_DIR, String(id));
+}
+
+export function meetingsDir(root: string): string {
+  return path.join(root, MEETINGS_DIR);
+}
+
+export function meetingDir(root: string, id: number): string {
+  return path.join(root, MEETINGS_DIR, String(id));
+}
+
+/**
+ * The name a meeting's guest goes by inside the workspace: a tilde and twelve
+ * hex digits. A username starts with a letter or a digit, so no member can
+ * ever hold one of these, and every check that finds a guest where a member
+ * was expected (see src/perms.ts) can tell them apart by the name alone.
+ */
+export function isGuestName(name: string): boolean {
+  return /^~[0-9a-f]{12}$/.test(name);
 }
 
 /**
@@ -111,8 +134,10 @@ const RESERVED_USER_NAMES = new Set([
   'favicon.svg',
   'icon',
   'invite',
+  'join',
   'login',
   'logout',
+  'm',
   'manifest.webmanifest',
   'new',
   'push',

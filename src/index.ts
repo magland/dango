@@ -305,6 +305,72 @@ token once. Options: -p/--port <n> (default 3000), --host <addr> (default
     },
   },
   {
+    path: ['meeting', 'list'],
+    summary: 'List the meetings this token is a member of',
+    options: [...TARGET_OPTIONS, JSON_OPTION],
+    async run(inv) {
+      const target = await targetFrom(inv);
+      const data = await api(target, 'GET', '/api/meetings');
+      const meetings = (data.meetings ?? []) as { id: number; title: string; members: string[]; lobby: boolean }[];
+      const json = jsonMode(inv);
+      if (json.enabled) {
+        printJson({ meetings: pickFields(meetings as unknown as Record<string, unknown>[], json.fields) });
+        return;
+      }
+      if (!meetings.length) {
+        console.log(`No meetings on ${target.host}`);
+        return;
+      }
+      for (const m of meetings) console.log(`${String(m.id).padStart(4)}  ${m.title}  (${m.members.join(', ')})`);
+    },
+  },
+  {
+    path: ['meeting', 'create'],
+    summary: 'Create a meeting, and print its guest link',
+    description: `A meeting is a room for a call, with a link that lets people outside the
+workspace join it. Guests wait to be let in unless --open is given.
+
+  dango meeting create Weekly review --with alice,bob`,
+    args: [{ name: 'title', required: true, variadic: true }],
+    options: [
+      { name: 'with', type: 'string', value: '<names>', summary: 'Members to add, separated by commas' },
+      { name: 'open', type: 'boolean', summary: 'Let guests in on the link alone, without waiting' },
+      ...TARGET_OPTIONS,
+      JSON_OPTION,
+    ],
+    async run(inv) {
+      const target = await targetFrom(inv);
+      const users = (inv.str('with') ?? '').split(',').map((u) => u.trim()).filter((u) => u !== '');
+      const data = await api(target, 'POST', '/api/meetings', { title: inv.args.join(' '), users, lobby: !inv.bool('open') });
+      const json = jsonMode(inv);
+      if (json.enabled) printJson(pickObject(data, json.fields));
+      else console.log(`Created meeting ${data.id} on ${target.host}${data.link ? `\nGuest link: ${data.link}` : ''}`);
+    },
+  },
+  {
+    path: ['meeting', 'link'],
+    summary: 'Print a meeting’s guest link',
+    args: [{ name: 'id', required: true }],
+    options: [...TARGET_OPTIONS],
+    async run(inv) {
+      const target = await targetFrom(inv);
+      const data = await api(target, 'GET', `/api/meetings/${encodeURIComponent(inv.args[0])}`);
+      if (!data.link) throw new CliError('This workspace does not let meetings have guests.', EXIT_FAIL);
+      console.log(data.link);
+    },
+  },
+  {
+    path: ['meeting', 'delete'],
+    summary: 'Delete a meeting and everything said in it',
+    args: [{ name: 'id', required: true }],
+    options: [...TARGET_OPTIONS],
+    async run(inv) {
+      const target = await targetFrom(inv);
+      await api(target, 'DELETE', `/api/meetings/${encodeURIComponent(inv.args[0])}`);
+      console.log(`Deleted meeting ${inv.args[0]}`);
+    },
+  },
+  {
     path: ['send'],
     summary: 'Send a message to a channel',
     description: `The message is the words after the channel, or stdin when the one word is '-':
@@ -585,6 +651,7 @@ const cli: Cli = {
   name: 'dango',
   groups: [
     { name: 'channel', summary: 'Create, list, and delete channels' },
+    { name: 'meeting', summary: 'Create meetings and get their guest links' },
     { name: 'user', summary: 'Manage the workspace’s users (site admin)' },
     { name: 'deploy', summary: 'Put a workspace on Fly.io' },
     { name: 'backup', summary: 'Copy a workspace to a directory on this machine' },

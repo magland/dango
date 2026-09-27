@@ -134,6 +134,53 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 });
 
+// ---- a meeting's guest link, and its lobby ----
+// A guest link is /m/<id>/join#k=<key>. As with an invite, the key is moved
+// from the fragment into the form and out of the address bar; the person
+// then gives their name, or joins as themselves, by pressing the button.
+document.addEventListener('DOMContentLoaded', function () {
+  var box = document.querySelector('[data-meeting-join]');
+  if (!box) return;
+  var m = /(?:^#|&)k=([^&]+)/.exec(location.hash || '');
+  var field = box.querySelector('[data-meeting-key]');
+  if (m && field) {
+    try { field.value = decodeURIComponent(m[1]); } catch (e) { field.value = m[1]; }
+    try { sessionStorage.setItem('dango.meetingKey.' + location.pathname, field.value); } catch (e) {}
+    if (history.replaceState) history.replaceState(null, '', location.pathname + location.search);
+  } else if (field) {
+    // A refusal (a name left out, say) comes back without the fragment; the
+    // key is kept for the page's own address for that.
+    var kept = null;
+    try { kept = sessionStorage.getItem('dango.meetingKey.' + location.pathname); } catch (e) {}
+    if (kept) field.value = kept;
+    else box.querySelector('[data-meeting-key-missing]').hidden = false;
+  }
+});
+// The lobby page asks every few seconds whether its guest has been let in,
+// which is also what keeps them waiting there, and goes on when they are.
+document.addEventListener('DOMContentLoaded', function () {
+  var box = document.querySelector('[data-lobby-wait]');
+  if (!box || !window.fetch) return;
+  var noscript = box.querySelector('[data-lobby-noscript]');
+  if (noscript) noscript.hidden = true;
+  var status = box.querySelector('[data-lobby-status]');
+  var url = box.getAttribute('data-lobby-wait');
+  var room = box.getAttribute('data-lobby-room');
+  function say(text) { status.textContent = text; }
+  function ask() {
+    fetch(url, { credentials: 'same-origin', headers: { Accept: 'application/json' } }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d.state === 'admitted') { location.assign(room); return; }
+      if (d.state === 'turned-away') { say('You were not let in to this meeting.'); return; }
+      if (d.state === 'closed') { say('This meeting’s link no longer works. Ask whoever sent it for a new one.'); return; }
+      if (d.state === 'refused') say(d.error || 'The meeting cannot take you just now.');
+      setTimeout(ask, d.state === 'refused' ? 15000 : 3000);
+    }, function () {
+      setTimeout(ask, 5000);
+    });
+  }
+  ask();
+});
+
 // ---- copying ----
 function copyText(btn, text) {
   function done() {
@@ -425,6 +472,12 @@ function showSignedOut() {
   var box = document.createElement('div');
   box.className = 'signed-out';
   box.setAttribute('role', 'alert');
+  var f = frame();
+  if (f && f.guest) {
+    box.appendChild(document.createTextNode('You are no longer a guest in this meeting, so nothing new will appear here.'));
+    document.body.appendChild(box);
+    return;
+  }
   box.appendChild(document.createTextNode('You are signed out, so nothing new will appear here. '));
   var a = document.createElement('a');
   a.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
@@ -456,6 +509,7 @@ function frame() {
     room: app.getAttribute('data-current-room') || '',
     viewer: app.getAttribute('data-viewer') || '',
     csrf: app.getAttribute('data-csrf') || '',
+    guest: app.hasAttribute('data-guest'),
     title: t ? t.getAttribute('data-title') || t.textContent : document.title,
     icon: link,
     iconBase: link ? link.getAttribute('href').replace(/&unread=[a-z]+/, '') : ''
@@ -560,6 +614,7 @@ function openUserStream() {
     var msg;
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
     if (msg.type === 'call') { callChanged(msg.url, msg.people); return; }
+    if (msg.type === 'lobby') { lobbyChanged(msg.url, msg.title, msg.waiting); return; }
     if (msg.type === 'call-roster' || msg.type === 'call-signal' || msg.type === 'call-gone') {
       if (window.dangoCall) window.dangoCall.event(msg);
       return;
@@ -594,6 +649,7 @@ window.addEventListener('pageshow', function (e) {
 });
 document.addEventListener('DOMContentLoaded', function () {
   seedCounts();
+  seedLobby();
   openUserStream();
 });
 
@@ -647,7 +703,7 @@ document.addEventListener('visibilitychange', function () {
 // a push, and what makes the workspace installable. It does nothing else (see
 // src/sw.ts), so registering it changes nothing about how pages load.
 document.addEventListener('DOMContentLoaded', function () {
-  if (frame() && navigator.serviceWorker && window.isSecureContext) {
+  if (frame() && !frame().guest && navigator.serviceWorker && window.isSecureContext) {
     navigator.serviceWorker.register('/sw.js').catch(function () {});
   }
 });
@@ -1782,7 +1838,7 @@ function autofocusMain() {
 // fetch.
 var shownPath = location.pathname + location.search;
 var navSeq = 0;
-var NOT_IN_PLACE = /^[/](?:assets|api|icon|events|sw[.]js|favicon|manifest|logout|login|invite)(?:[/?.#]|$)|^[/][cd][/][^/]+(?:[/]t[/][0-9]+)?[/](?:files[/]|events$)/;
+var NOT_IN_PLACE = /^[/](?:assets|api|icon|events|sw[.]js|favicon|manifest|logout|login|invite)(?:[/?.#]|$)|^[/][cdm][/][^/]+(?:[/]t[/][0-9]+)?[/](?:files[/]|events$)|^[/]m[/][0-9]+[/](?:join|lobby|guest[/])/;
 function inPlacePath(url) {
   if (!frame() || !window.fetch || !window.DOMParser || !history.pushState) return false;
   return url.origin === location.origin && !NOT_IN_PLACE.test(url.pathname);
@@ -1859,11 +1915,14 @@ function swapIn(text, hash) {
   var app = f.app;
   app.className = nextApp.className;
   ['data-current-room', 'data-csrf', 'data-call-script'].forEach(function (a) { app.setAttribute(a, nextApp.getAttribute(a) || ''); });
+  // A guest's frame has no sidebar, and is only ever swapped for another of theirs.
   var side = app.querySelector('.app-side');
+  var nextSide = nextApp.querySelector('.app-side');
   var keep = side && side.querySelector('.side-rooms') ? side.querySelector('.side-rooms').scrollTop : 0;
-  side.replaceWith(document.adoptNode(nextApp.querySelector('.app-side')));
+  if (side && nextSide) side.replaceWith(document.adoptNode(nextSide));
   var rooms = app.querySelector('.side-rooms');
   if (rooms) rooms.scrollTop = keep;
+  app.setAttribute('data-lobby', nextApp.getAttribute('data-lobby') || '[]');
   app.querySelector('.app-main').replaceWith(document.adoptNode(nextApp.querySelector('.app-main')));
   var t = next.querySelector('title');
   f.room = app.getAttribute('data-current-room') || '';
@@ -1872,6 +1931,7 @@ function swapIn(text, hash) {
   counts = {};
   urgent = {};
   seedCounts();
+  seedLobby();
   closeMenus(null);
   window.scrollTo(0, 0);
   startMain(hash || '');
@@ -1903,6 +1963,8 @@ document.addEventListener('submit', function (e) {
   var form = e.target;
   if (e.defaultPrevented || !form.matches || form.matches('form[data-composer], form[data-quiet]')) return;
   if (form.target && form.target !== '_self') return;
+  // A form whose answer is a page outside the frame (a guest leaving) is the browser's.
+  if (form.hasAttribute('data-full-page')) return;
   var url = new URL(form.action || location.href, location.href);
   if (!inPlacePath(url) || form.querySelector('input[type="file"]')) return;
   var data = new FormData(form);
@@ -1962,6 +2024,11 @@ function callButtonsChanged() {
     if (people === undefined && url !== mine) continue;
     people = people || [];
     var label = url === mine ? 'You are in this call: show it full page' : people.length ? 'Join the call (' + people.join(', ') + ')' : 'Start a call';
+    // A guest joins a call someone from the workspace has started, and cannot start one.
+    var f = frame();
+    var waitingForCall = !!(f && f.guest) && url !== mine && !people.length;
+    if (waitingForCall) label = 'The call starts when someone from the workspace joins it';
+    b.disabled = waitingForCall;
     b.classList.toggle('live', people.length > 0);
     b.title = label;
     b.setAttribute('aria-label', label);
@@ -1975,6 +2042,82 @@ function callButtonsChanged() {
     joins[j].textContent = here ? 'You are in it' : 'Join';
   }
 }
+// ---- the lobby, as members see it ----
+// Someone waiting to be let in to one of the viewer's meetings is shown in a
+// notice over whatever page is on screen, with a button to let them in and
+// one to turn them away. The page is drawn with who is waiting (data-lobby),
+// and the viewer's stream says when that changes.
+var lobby = {};
+function seedLobby() {
+  var f = frame();
+  if (!f) return;
+  var list = [];
+  try { list = JSON.parse(f.app.getAttribute('data-lobby') || '[]'); } catch (e) {}
+  lobby = {};
+  for (var i = 0; i < list.length; i++) lobby[list[i].url] = list[i];
+  drawLobby();
+}
+function lobbyChanged(url, title, waiting) {
+  if (waiting.length) lobby[url] = { url: url, title: title, waiting: waiting };
+  else delete lobby[url];
+  drawLobby();
+}
+function drawLobby() {
+  var box = document.querySelector('.lobby-notice');
+  var rows = [];
+  for (var url in lobby) {
+    for (var i = 0; i < lobby[url].waiting.length; i++) rows.push({ url: url, title: lobby[url].title, guest: lobby[url].waiting[i] });
+  }
+  if (!rows.length) { if (box) box.remove(); return; }
+  if (!box) {
+    box = document.createElement('div');
+    box.className = 'lobby-notice';
+    box.setAttribute('role', 'status');
+    document.body.appendChild(box);
+  }
+  box.innerHTML = '';
+  rows.forEach(function (r) {
+    var row = document.createElement('div');
+    row.className = 'lobby-row';
+    var text = document.createElement('span');
+    var who = document.createElement('strong');
+    who.textContent = r.guest.name;
+    text.appendChild(who);
+    text.appendChild(document.createTextNode(' is waiting to join ' + r.title));
+    row.appendChild(text);
+    [['admit', 'Let in', 'btn btn-primary'], ['deny', 'Turn away', 'btn']].forEach(function (a) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = a[2];
+      b.textContent = a[1];
+      b.addEventListener('click', function () { answerLobby(r.url, r.guest.id, a[0], b); });
+      row.appendChild(b);
+    });
+    box.appendChild(row);
+  });
+}
+function answerLobby(url, guest, action, button) {
+  var f = frame();
+  button.disabled = true;
+  fetch(url + '/lobby/' + action, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ csrf: f ? f.csrf : '', guest: guest })
+  }).then(function (r) {
+    if (r.ok) return;
+    return r.json().then(function (d) { notice(d.error || 'That did not work: the server answered ' + r.status + '.'); }, function () {
+      notice('That did not work: the server answered ' + r.status + '.');
+    });
+  }, function () {
+    notice('That did not work: the connection to the workspace failed.');
+  }).then(function () {
+    button.disabled = false;
+    // Whatever the answer, whoever it was is no longer waiting for this page to decide.
+    if (lobby[url]) lobbyChanged(url, lobby[url].title, lobby[url].waiting.filter(function (w) { return w.id !== guest; }));
+  });
+}
+
 function withCallScript(then) {
   if (window.dangoCall) { then(window.dangoCall); return; }
   var f = frame();

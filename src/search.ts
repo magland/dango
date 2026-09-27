@@ -1,9 +1,10 @@
 import { AuthResult } from '../../mochiforge/src/vault';
 import { listChannels } from './channels';
 import { dmTitle, listDmsFor } from './dms';
+import { listMeetingsFor } from './meetings';
 import { Message, ROOM_PAGE, THREAD_PAGE, lastMessageId, readMessage, readMessages, threadRoomDir } from './messages';
 import { canSeeChannel } from './perms';
-import { channelDir, dmDir } from './workspace';
+import { channelDir, dmDir, meetingDir } from './workspace';
 
 // Search is a walk over the files, the way mochiforge's repository search is
 // a git grep: the messages are already on disk in a shape made for reading,
@@ -29,8 +30,8 @@ export interface SearchHit {
   room: string;
   /** How that place is named for this viewer: "#general", "alice, bob". */
   where: string;
-  /** Whether it was said in a channel or a direct conversation. */
-  kind: 'channel' | 'dm';
+  /** Whether it was said in a channel, a direct conversation, or a meeting. */
+  kind: 'channel' | 'dm' | 'meeting';
   message: Message;
 }
 
@@ -123,6 +124,11 @@ export function searchMessages(root: string, auth: AuthResult, query: string, in
   for (const dm of listDmsFor(root, auth.username)) {
     if (needle.in !== undefined && !dm.participants.some((p) => p !== auth.username && p.toLowerCase() === needle.in)) continue;
     scanRoom(dmDir(root, dm.id), `/d/${dm.id}`, dmTitle(dm, auth.username), 'dm', needle, out, true, info);
+    keepNewest(out);
+  }
+  for (const m of listMeetingsFor(root, auth.username)) {
+    if (needle.in !== undefined && m.title.toLowerCase() !== needle.in) continue;
+    scanRoom(meetingDir(root, m.id), `/m/${m.id}`, m.title, 'meeting', needle, out, true, info);
     keepNewest(out);
   }
   return out;

@@ -22,6 +22,9 @@ import {
 } from './channels';
 import { DmInfo, listDmsFor, openDm } from './dms';
 import { publish } from './events';
+import { clearLobby } from './guests';
+import { MeetingInfo, createMeeting, currentGuests, deleteMeeting, guestLink, listMeetingsFor, mayDeleteMeeting } from './meetings';
+import { loadConfig } from './config';
 import {
   Message,
   deleteMessage,
@@ -38,7 +41,7 @@ import { pinMessage, pinOf, readPins, unpinMessage } from './pins';
 import { noteRead, postMessage } from './post';
 import { unreadRooms } from './reads';
 import { forgetRoom } from './notify';
-import { Room, channelRoom, dmRoom, removeWorkspaceUser, threadRoom } from './rooms';
+import { Room, channelRoom, dmRoom, meetingRoom, removeWorkspaceUser, threadRoom } from './rooms';
 import { inviteLink } from './views';
 import { searchMessages } from './search';
 import { isValidWorkspaceUserName } from './workspace';
@@ -55,6 +58,18 @@ function channelJson(c: ChannelInfo): Record<string, unknown> {
 
 function dmJson(d: DmInfo): Record<string, unknown> {
   return { id: d.id, participants: d.participants, ...(d.former ? { former: d.former } : {}) };
+}
+
+/** A meeting, with its guest link where the workspace allows guests. */
+function meetingJson(root: string, m: MeetingInfo, origin: string): Record<string, unknown> {
+  return {
+    id: m.id,
+    title: m.title,
+    members: m.members,
+    lobby: m.lobby,
+    guests: currentGuests(m).map((g) => ({ id: g, name: m.guests[g].name })),
+    ...(loadConfig(root).calls.guests ? { link: guestLink(root, origin, m) } : {}),
+  };
 }
 
 function messageJson(m: Message): Record<string, unknown> {
@@ -232,6 +247,60 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
     })
   );
 
+  // ---- meetings ----
+
+  app.get('/api/meetings', (req, res) =>
+    withAuth(req, res, (auth) => {
+      res.json({ meetings: listMeetingsFor(root, auth.username).map((m) => meetingJson(root, m, originOf(req))) });
+    })
+  );
+
+  app.post('/api/meetings', json, (req, res) =>
+    withAuth(req, res, (auth) => {
+      const b = body(req);
+      const users = b.users === undefined ? [] : b.users;
+      if (typeof b.title !== 'string' || !Array.isArray(users) || !users.every((u): u is string => typeof u === 'string')) {
+        apiError(res, 400, 'send {"title": "...", "users": ["name", ...], "lobby": true}');
+        return;
+      }
+      for (const u of users) {
+        if (!userExists(root, u)) {
+          apiError(res, 404, `no user ${u}`);
+          return;
+        }
+      }
+      const m = createMeeting(root, { title: b.title, createdBy: auth.username, members: users, lobby: b.lobby !== false, charge: () => limits.newRoom(auth.username) });
+      res.status(201).json(meetingJson(root, m, originOf(req)));
+    })
+  );
+
+  app.get('/api/meetings/:meeting', (req, res) =>
+    withAuth(req, res, (auth) => {
+      const room = meetingRoom(root, intParam(req.params.meeting), auth);
+      if (!room) apiError(res, 404, 'no such meeting');
+      else res.json(meetingJson(root, room.meeting!, originOf(req)));
+    })
+  );
+
+  app.delete('/api/meetings/:meeting', (req, res) =>
+    withAuth(req, res, (auth) => {
+      const room = meetingRoom(root, intParam(req.params.meeting), auth);
+      if (!room) {
+        apiError(res, 404, 'no such meeting');
+        return;
+      }
+      if (!mayDeleteMeeting(room.meeting!, auth.username)) {
+        apiError(res, 403, 'only whoever made the meeting may delete it');
+        return;
+      }
+      clearLobby(root, room.meeting!.id);
+      deleteMeeting(root, room.meeting!.id);
+      forgetRoom(root, room.url);
+      pruneCalls(root);
+      res.json({ deleted: true });
+    })
+  );
+
   // ---- messages, over every kind of room ----
 
   const resolveRoom = (req: Request, auth: AuthResult): Room | null => {
@@ -239,6 +308,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
     let room: Room | null = null;
     if (p.channel !== undefined) room = channelRoom(root, p.channel, auth);
     else if (p.dm !== undefined) room = dmRoom(root, intParam(p.dm), auth);
+    else if (p.meeting !== undefined) room = meetingRoom(root, intParam(p.meeting), auth);
     if (room && p.tid !== undefined) room = threadRoom(room, intParam(p.tid));
     return room;
   };
@@ -254,7 +324,7 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
     });
   };
 
-  const BASES = ['/api/channels/:channel', '/api/dms/:dm'];
+  const BASES = ['/api/channels/:channel', '/api/dms/:dm', '/api/meetings/:meeting'];
   const ROOM_PATHS = (suffix: string) => BASES.flatMap((b) => [`${b}${suffix}`, `${b}/threads/:tid${suffix}`]);
 
   app.get(ROOM_PATHS('/messages'), (req, res) =>

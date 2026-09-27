@@ -5,8 +5,9 @@ import { addUserToken } from '../../mochiforge/src/vault';
 import { createChannel } from '../src/channels';
 import { updateConfig } from '../src/config';
 import { openDm } from '../src/dms';
+import { createMeeting } from '../src/meetings';
 import { addMessage, threadRoomDir, toggleReaction } from '../src/messages';
-import { channelDir, dmDir } from '../src/workspace';
+import { channelDir, dmDir, meetingDir } from '../src/workspace';
 
 // An example workspace with sample people and conversation, for npm run dev.
 // The tokens are fixed and known, which is fine for a workspace that only
@@ -44,6 +45,9 @@ addMessage(channelDir(root, 'random'), { author: 'alice', body: 'Anyone else hun
 const dm = openDm(root, ['alice', 'bob']);
 addMessage(dmDir(root, dm.id), { author: 'alice', body: 'Direct messages are their own rooms.' });
 addMessage(dmDir(root, dm.id), { author: 'bob', body: 'Visible to the two of us and nobody else.' });
+
+const meeting = createMeeting(root, { title: 'Weekly review', createdBy: 'alice', members: ['bob'] });
+addMessage(meetingDir(root, meeting.id), { author: 'alice', body: 'A meeting has a guest link for people outside the workspace; its settings page shows it.' });
 
 console.log(`Example workspace at ${root}`);
 console.log('  site admin: dev    token dango_example_dev_token_000000');

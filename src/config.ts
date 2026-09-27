@@ -66,6 +66,12 @@ export interface CallsConfig {
     keyId: string;
     apiToken: string;
   };
+  /**
+   * Whether a meeting may have a guest link, through which people outside
+   * the workspace join its call. Off, every link stops working and every
+   * guest is taken out of the meeting they are in.
+   */
+  guests: boolean;
 }
 
 export interface WorkspaceConfig {
@@ -103,6 +109,7 @@ const DEFAULTS: WorkspaceConfig = {
   calls: {
     stun: DEFAULT_STUN,
     turn: { mode: 'none', urls: [], username: '', credential: '', secret: '', keyId: '', apiToken: '' },
+    guests: true,
   },
 };
 
@@ -123,10 +130,11 @@ function text(v: unknown): string {
 }
 
 function normalizeCalls(v: unknown): CallsConfig {
-  const out: CallsConfig = { stun: [...DEFAULTS.calls.stun], turn: { ...DEFAULTS.calls.turn, urls: [] } };
+  const out: CallsConfig = { stun: [...DEFAULTS.calls.stun], turn: { ...DEFAULTS.calls.turn, urls: [] }, guests: DEFAULTS.calls.guests };
   if (typeof v !== 'object' || v === null) return out;
   const rec = v as Record<string, unknown>;
   out.stun = strings(rec.stun) ?? out.stun;
+  if (rec.guests === false) out.guests = false;
   const t = rec.turn;
   if (typeof t === 'object' && t !== null) {
     const r = t as Record<string, unknown>;

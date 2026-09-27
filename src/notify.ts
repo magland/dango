@@ -7,12 +7,13 @@ import { createLimiter } from '../../mochiforge/src/limit';
 import { AuthResult, loadVault } from '../../mochiforge/src/vault';
 import { readChannel } from './channels';
 import { dmTitle, readDm } from './dms';
+import { MeetingInfo, personLabel, readMeeting } from './meetings';
 import { Message, readMessage, readMessages } from './messages';
-import { canSeeChannel, canSeeDm } from './perms';
+import { canSeeChannel, canSeeDm, canSeeMeeting } from './perms';
 import { PushTarget, isPushEndpoint, sendPush } from './push';
 import { Room } from './rooms';
 import { audienceOf, forgetMarkers, isKeyOf, mentionsUser, readKey, readMarkers, unreadRooms } from './reads';
-import { isValidChannelName, isValidWorkspaceUserName, userDir, usersDir } from './workspace';
+import { isGuestName, isValidChannelName, isValidWorkspaceUserName, userDir, usersDir } from './workspace';
 
 // Notifications: who is told about a message when they have no page open to
 // see it arrive, and on which of their devices.
@@ -80,10 +81,10 @@ export interface NotifyPrefs {
 /** The most rooms one person's preferences list as muted. */
 export const MAX_MUTED = 500;
 
-/** Whether a string names a room as read.json and the muted list key it: "c/general", "d/3". */
+/** Whether a string names a room as read.json and the muted list key it: "c/general", "d/3", "m/2". */
 export function isRoomKey(k: string): boolean {
   const c = /^c\/(.+)$/.exec(k);
-  return c ? isValidChannelName(c[1]) : /^d\/[1-9][0-9]{0,15}$/.test(k);
+  return c ? isValidChannelName(c[1]) : /^[dm]\/[1-9][0-9]{0,15}$/.test(k);
 }
 
 export const DEFAULT_PREFS: NotifyPrefs = { level: 'direct', preview: true, muted: [], quiet: null };
@@ -441,10 +442,10 @@ export function wantsPush(
 ): boolean {
   if (m.deleted || m.author === username || prefs.level === 'none') return false;
   if (prefs.muted.includes(readKey(baseRoom(room).url))) return false;
-  // A call starting is pushed in a direct conversation, where it is a call to
-  // the people in it; in a channel it is shown beside the channel's name, and
-  // not pushed to the whole workspace.
-  if (m.call && room.dm === undefined) return false;
+  // A call starting is pushed in a direct conversation and in a meeting,
+  // where it is a call to the people in it; in a channel it is shown beside
+  // the channel's name, and not pushed to the whole workspace.
+  if (m.call) return room.dm !== undefined || room.meeting !== undefined;
   const addressed = room.dm !== undefined || mentionsUser(m.body, username) || (room.kind === 'thread' && inThread().has(username));
   if (addressed) return true;
   return prefs.level === 'all' && room.kind !== 'thread';
@@ -478,7 +479,8 @@ export interface Notification {
   time: number;
 }
 
-function displayName(root: string, username: string): string {
+function displayName(root: string, username: string, meeting?: MeetingInfo): string {
+  if (isGuestName(username)) return personLabel(meeting, username);
   const state = loadVault(root);
   return (state.status === 'ok' && state.vault.users[username]?.profile?.name) || username;
 }
@@ -495,7 +497,7 @@ export function composeNotification(root: string, room: Room, messages: Message[
   const base = baseRoom(room);
   const where = base.dm ? dmTitle(base.dm, username) : base.title;
   const title = room.kind === 'thread' ? `Thread in ${where}` : where;
-  const who = displayName(root, newest.author);
+  const who = displayName(root, newest.author, base.meeting);
   let body: string;
   if (prefs.preview) {
     const text = previewText(newest.body) || (newest.files.length ? `sent ${newest.files.length === 1 ? 'a file' : `${newest.files.length} files`}` : '');
@@ -595,9 +597,16 @@ async function deliver(root: string, username: string, entry: Pending): Promise<
   const auth = authFor(root, username);
   if (!auth) return;
   const base = baseRoom(entry.room);
-  const room = base.dm ? readDm(root, base.dm.id) : readChannel(root, base.channel!.name);
-  if (!room) return;
-  if ('participants' in room ? !canSeeDm(auth, room) : !canSeeChannel(auth, room)) return;
+  if (base.meeting) {
+    const meeting = readMeeting(root, base.meeting.id);
+    if (!meeting || !canSeeMeeting(auth, meeting)) return;
+    // Named by the file as it is now, so a guest's name is the one they gave.
+    base.meeting = meeting;
+  } else {
+    const room = base.dm ? readDm(root, base.dm.id) : readChannel(root, base.channel!.name);
+    if (!room) return;
+    if ('participants' in room ? !canSeeDm(auth, room) : !canSeeChannel(auth, room)) return;
+  }
   // Read in the meantime, on some other screen, or deleted, or muted since:
   // not news. Inside quiet hours nothing goes, and nothing is kept for later.
   const prefs = readPrefs(root, username);
@@ -614,6 +623,33 @@ async function deliver(root: string, username: string, entry: Pending): Promise<
   const note = composeNotification(root, entry.room, messages, username, prefs);
   const urgent = entry.room.dm !== undefined || messages.some((x) => mentionsUser(x.body, username));
   await pushToUser(root, username, note, { urgency: urgent ? 'high' : 'normal', topic: entry.room.url });
+}
+
+/**
+ * Tell a meeting's members that someone is waiting to be let in, on the
+ * devices of those who would hear of a message addressed to them: not when
+ * they want nothing, have muted the meeting, or are in their quiet hours. It
+ * is not held back to see whether it is read first, as a message is, since
+ * the guest is waiting now.
+ */
+export function notifyKnock(root: string, meeting: MeetingInfo, guestName: string): void {
+  const url = `/m/${meeting.id}`;
+  for (const username of meeting.members) {
+    if (readDevices(root, username).length === 0) continue;
+    const prefs = readPrefs(root, username);
+    if (prefs.level === 'none' || prefs.muted.includes(readKey(url)) || isQuiet(prefs)) continue;
+    if (!pushesTo.hit(username).ok) continue;
+    const auth = authFor(root, username);
+    const note: Notification = {
+      title: meeting.title,
+      body: prefs.preview ? `${guestName} is waiting to join.` : 'Someone is waiting to join.',
+      tag: `${url}#lobby`,
+      url,
+      unread: auth ? unreadRooms(root, auth).reduce((n, r) => n + r.count, 0) : 0,
+      time: Date.now(),
+    };
+    pushToUser(root, username, note, { urgency: 'high', topic: 'lobby' }).catch((e) => console.error(e));
+  }
 }
 
 /** For tests: whether anything is waiting, and a way to stop it. */

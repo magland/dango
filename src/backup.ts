@@ -5,12 +5,12 @@ import { BackupProfile } from '../../mochiforge/src/cli/backup-cmd';
 import { CONFIG_FILE, TURN_SECRETS_FILE } from './config';
 import { PUSH_FILE } from './notify';
 import { VAPID_FILE } from './push';
-import { channelsDir, dmsDir, usersDir } from './workspace';
+import { channelsDir, dmsDir, meetingsDir, usersDir } from './workspace';
 
 // Backing up a workspace, with mochi's protocol and mochi's client. A
 // workspace is a directory, and every part of it is ordinary files, so it
 // needs no transport of its own: the manifest names the state files at the
-// root and every file under channels/ and dms/, and the client fetches what
+// root and every file under channels/, dms/, and meetings/, and the client fetches what
 // changed. There are no repositories, so no mirrors, and the backup
 // directory's current/ is a servable workspace, exactly as a vault backup's
 // is a servable vault.
@@ -56,6 +56,7 @@ export function workspaceLayout(root: string): BackupLayout {
       const skip = exclude.has('files') ? isUploadsDir : undefined;
       if (!(await w.tree(channelsDir(root), skip))) return false;
       if (!(await w.tree(dmsDir(root), skip))) return false;
+      if (!(await w.tree(meetingsDir(root), skip))) return false;
       if (!exclude.has('secrets')) return w.tree(usersDir(root));
       // Each browser's push.json holds its subscription's auth secret, which
       // is what /push/renew takes as proof in place of a session, so a copy

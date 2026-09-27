@@ -831,6 +831,53 @@ const ended = (await api(alice, 'GET', '/channels/general/messages?limit=1')).me
 if (!ended.call?.ended || ended.call.people.join() !== 'alice,bob') fail(`the entry does not record the end: ${JSON.stringify(ended.call)}`);
 ok('when the last person leaves the call ends, and its entry says who was in it and for how long');
 
+// ---- a meeting, with a guest from outside the workspace ----
+
+const meeting = await api(alice, 'POST', '/meetings', { title: 'Design review', users: ['bob'] });
+const m1 = await openPage(aliceCookie);
+await m1.go('/c/general');
+await m1.eval('window.stillHere = true; true');
+const g1 = await openPage(null);
+await g1.go(meeting.link.slice(base.length));
+if ((await g1.eval('location.hash')) !== '') fail('the guest link’s key was left in the address bar');
+if (!(await g1.eval("document.querySelector('[data-meeting-key]').value"))) fail('the guest link’s key was not moved into the form');
+ok('a guest link moves its key into the form and out of the address bar');
+await g1.eval("document.getElementById('guest-name').value = 'Dana'; document.querySelector('[data-meeting-join] button[type=submit]').click(); true");
+await waitFor('the guest to wait in the lobby', async () => (await g1.eval('location.pathname')) === `/m/${meeting.id}/lobby`);
+await waitFor('alice, in another room, to be told Dana is waiting', async () => (await m1.eval("document.querySelector('.lobby-notice')?.textContent ?? ''")).includes('Dana is waiting to join Design review'), 10000);
+ok('a guest who asks to join is shown to the meeting’s members, whatever page they are on');
+await m1.eval("[...document.querySelectorAll('.lobby-notice button')].find((b) => b.textContent === 'Let in').click(); true");
+await waitFor('the guest to go on to the meeting', async () => (await g1.eval("location.pathname + '|' + !!document.querySelector('.app.guest-app')")) === `/m/${meeting.id}|true`, 10000);
+await waitFor('the notice to go once the guest is in', async () => m1.eval("!document.querySelector('.lobby-notice')"));
+if (await g1.eval("!!document.querySelector('.app-side')")) fail('a guest was shown the workspace’s sidebar');
+if (!(await g1.eval("document.querySelector('[data-call-start]').disabled"))) fail('a guest could start the meeting’s call');
+ok('let in, the guest goes on to the meeting by themselves, sees no sidebar, and cannot start its call');
+
+await m1.eval(`document.querySelector('.side-rooms a[href="/m/${meeting.id}"]').click(); true`);
+await waitFor('alice to be in the meeting', async () => (await m1.eval("location.pathname + '|' + (document.querySelector('.room-head h1')?.textContent ?? '')")) === `/m/${meeting.id}|Design review`);
+await g1.eval("document.querySelector('.composer textarea').focus(); true");
+await g1.type('hello from outside');
+await g1.key('Enter');
+await waitFor('alice to see the guest’s message, named as a guest', async () => {
+  const text = await m1.eval("document.getElementById('msg-list').textContent");
+  return text.includes('hello from outside') && text.includes('Dana (guest)');
+});
+ok('a guest writes in the meeting, and its members see it live, under the name the guest gave');
+
+await m1.eval("document.querySelector('[data-call-start]').click(); true");
+await waitFor('alice to be in the meeting’s call', async () => (await inCallCount(m1)) === '1 in the call', 10000);
+await waitFor('the guest’s call button to offer the call', async () => g1.eval("!document.querySelector('[data-call-start]').disabled"));
+await g1.eval("document.querySelector('[data-call-start]').click(); true");
+await waitFor('both to count two in the call', async () => (await inCallCount(m1)) === '2 in the call' && (await inCallCount(g1)) === '2 in the call', 10000);
+await waitFor('alice and the guest to connect, with video', async () => (await connectedTo(m1)) > 0 && (await connectedTo(g1)) > 0, 20000);
+const guestTile = await m1.eval("document.querySelector('.call-dock .call-tile:not([data-peer=\"self\"]) .call-label').textContent");
+if (!guestTile.includes('Dana (guest)')) fail(`the guest's tile does not name them as a guest: ${guestTile}`);
+ok('a guest joins the call a member started, peer to peer, with their tile naming them as a guest');
+await g1.eval("document.querySelector('.call-dock [data-call-act=\"leave\"]').click(); true");
+await waitFor('alice to be alone in the meeting’s call', async () => (await inCallCount(m1)) === '1 in the call');
+await m1.eval("document.querySelector('.call-dock [data-call-act=\"leave\"]').click(); true");
+await waitFor('the meeting’s call to end', async () => (await m1.eval("document.querySelector('#msg-list .call-entry')?.textContent ?? ''")).includes('lasted'));
+
 // ---- the admin's test of how calls connect ----
 
 const adm = await openPage(await sessionCookie(owner));

@@ -801,7 +801,7 @@ class Call {
     text.push(...rows);
     const now = Date.now();
     for (const [id, c] of this.conns) {
-      const who = this.known.get(id) ? this.known.get(id).user : 'someone';
+      const who = this.known.get(id) ? this.known.get(id).name || this.known.get(id).user : 'someone';
       const pc = c.peer.pc;
       if (!c.connected) {
         const line = who + ': connecting for ' + Math.round((now - c.createdAt) / 1000) + ' s' + (c.attempt > 1 ? ', attempt ' + c.attempt + ' (earlier ones failed)' : '') + '.';
@@ -1371,7 +1371,8 @@ class Call {
       const r = this.known.get(id);
       const c = this.conns.get(id);
       stream = c ? c.stream : null;
-      name = r ? r.user : '';
+      // The workspace names each page: a member by username, a guest by the name they gave.
+      name = r ? r.name || r.user : '';
       audioMuted = c ? c.audioMuted : true;
       screen = c ? c.screen : false;
       videoOff = !c || (c.videoMuted && !c.screen);
