@@ -512,7 +512,8 @@ const JUMP_NEWEST = html`<div class="jump-newest-wrap"><button class="jump-newes
  * The composer. data-max-bytes is the attachments' cap, so the page script
  * can refuse an oversized send before uploading any of it; the nonce is
  * filled by the page script, once per message, and sent again on a retry so
- * the server can tell a retry from a second message.
+ * the server can tell a retry from a second message. Under it, who else is
+ * typing, filled by the page script from the room's stream.
  */
 function composer(room: Room, viewer: Viewer, placeholder: string): Html {
   // A guest writes but does not attach: anyone with a link that lets guests
@@ -527,7 +528,7 @@ function composer(room: Room, viewer: Viewer, placeholder: string): Html {
 <ul class="file-list" data-file-list hidden></ul>
 <div class="send-status" data-send-status role="status" aria-live="polite" hidden></div>
 <div class="composer-row">${attach}<span class="hint">Enter sends, Shift+Enter is a new line, markdown works</span><button class="btn btn-primary" type="submit">Send</button></div>
-</div></form></div>`;
+</div></form><div class="typing" data-typing></div></div>`;
 }
 
 // ---- room pages ----

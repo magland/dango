@@ -236,6 +236,7 @@ dialog.ask p { margin: 0 0 var(--s4); }
 .app.guest-app { grid-template-columns: minmax(0, 1fr); }
 @media (min-width: 761px) {
   .guest-app .msgs, .guest-app .composer { padding-left: max(var(--s4), calc((100% - 920px) / 2)); padding-right: max(var(--s4), calc((100% - 920px) / 2)); }
+  .guest-app .typing { left: max(var(--s4), calc((100% - 920px) / 2)); }
   .guest-app .meeting-intro { margin-left: max(var(--s4), calc((100% - 920px) / 2)); }
 }
 
@@ -340,6 +341,22 @@ dialog.ask p { margin: 0 0 var(--s4); }
 .send-status { padding: 2px 12px 4px; font-size: var(--t-sm); color: var(--fg-muted); }
 .send-status.error { color: var(--danger); }
 form[data-busy] textarea { color: var(--fg-muted); }
+/* Who else is typing, in the composer's foot padding, so that it coming and
+   going moves nothing; on a phone, where that padding is thin, it takes a
+   line of its own while it has something to say. */
+.composer { position: relative; }
+.typing {
+  position: absolute; left: var(--s4); right: var(--s4); bottom: 0; max-width: 920px;
+  height: var(--s4); line-height: var(--s4); font-size: var(--t-xs); color: var(--fg-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.typing b { font-weight: 600; color: var(--fg); }
+.typing-dots { display: inline-flex; gap: 2px; margin-right: 6px; vertical-align: middle; }
+.typing-dots i { width: 4px; height: 4px; border-radius: 50%; background: currentColor; animation: typing-dot 1.2s infinite ease-in-out; }
+.typing-dots i:nth-child(2) { animation-delay: 0.15s; }
+.typing-dots i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes typing-dot { 0%, 60%, 100% { opacity: 0.25; } 30% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .typing-dots i { animation: none; opacity: 0.6; } }
 form[data-busy] button[type="submit"] { opacity: 0.6; cursor: progress; }
 
 /* Pinned messages: a quiet line above the message saying who pinned it, and
@@ -637,6 +654,8 @@ table.call-log td .muted { font-size: var(--t-xs); }
   .msg-img { max-height: 260px; }
 
   .composer { padding: var(--s1) var(--s2) var(--s2); }
+  .typing { position: static; padding: 2px var(--s2) 0; height: auto; }
+  .typing:empty { display: none; }
   .composer-box { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: end; }
   .composer-box > * { grid-column: 1 / -1; }
   .composer-row { display: contents; }

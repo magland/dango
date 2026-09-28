@@ -117,6 +117,7 @@ import { vapidKeys } from './push';
 import { readKey, readMarkers } from './reads';
 import { Room, channelRoom, dmRoom, meetingRoom, removeWorkspaceUser, threadRoom } from './rooms';
 import { searchMessages } from './search';
+import { noteTyping, stopTyping, typingIn } from './typing';
 import * as views from './views';
 import { channelNameFrom, isValidChannelName, isValidWorkspaceUserName } from './workspace';
 
@@ -1067,6 +1068,9 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         catchUp = [
           ...changed.map((m) => ({ type: 'update' as const, message: m })),
           ...readMessages(room.dir, { after, limit: CATCH_UP }).map((m) => ({ type: 'message' as const, message: m })),
+          // Always sent, empty or not, so a page coming back after a drop
+          // stops showing whoever was typing when it lost the stream.
+          { type: 'typing' as const, people: typingIn(room.url) },
         ];
       }
       // Whether this viewer may still read the room, asked afresh: the same
@@ -1075,8 +1079,27 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         const now = viewerOf(req);
         return now !== null && now.auth.username === viewer.auth.username && resolveRoom(req, now)?.dir === room.dir;
       };
-      serveEvents(res, viewer.auth.username, room.url, catchUp, (ev) => views.messageHtml(root, room, ev.message, viewer).text, allowed);
+      // A guest typing is named as their messages are. The meeting is read
+      // afresh, since a guest let in after this stream opened may type.
+      const label = (person: string) => (room.meeting ? personLabel(readMeeting(root, room.meeting.id) ?? room.meeting, person) : person);
+      serveEvents(res, viewer.auth.username, room.url, catchUp, (ev) => views.messageHtml(root, room, ev.message, viewer).text, label, allowed);
     })
+  );
+
+  // Typing, said by the composer every few seconds while it has text being
+  // written in it, and once with stop=1 when it is emptied (see src/typing.ts).
+  // Sending clears it too, so the composer does not say so after a send.
+  app.post(ROOM_PATHS('/typing'), signedIn, formBody, (req, res) =>
+    withRoom(
+      req,
+      res,
+      (viewer, room) => {
+        if ((req.body as Record<string, unknown>).stop === '1') stopTyping(room.url, viewer.auth.username);
+        else noteTyping(room.url, viewer.auth.username);
+        res.status(204).end();
+      },
+      { form: true }
+    )
   );
 
   // Sending. After a thread reply, the parent message's reply count changed,

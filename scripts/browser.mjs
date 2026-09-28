@@ -589,6 +589,25 @@ const link = await watcher.eval(`(() => { const a = document.querySelector('#msg
 if (!/^_blank .*noopener/.test(link)) fail(`a link out of the workspace does not open in a new tab: ${link}`);
 ok('a link out of the workspace opens in a new tab');
 
+// ---- who is typing ----
+// alice typing in the room shows under bob's composer and not under her own;
+// emptying her composer takes it away, and so does sending.
+
+const typingLine = "document.querySelector('[data-typing]').textContent";
+await watcher.eval("document.querySelector('.composer textarea').focus(); true");
+await watcher.type('half a tho');
+await waitFor('bob to see alice typing', async () => (await s1.eval(typingLine)) === 'alice is typing…');
+if ((await watcher.eval(typingLine)) !== '') fail('alice was shown herself typing');
+ok('someone typing is shown under the composer of everyone else in the room, and not their own');
+await watcher.eval("(() => { const t = document.querySelector('.composer textarea'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); return true; })()");
+await waitFor('the line to clear when alice empties her composer', async () => (await s1.eval(typingLine)) === '');
+await watcher.type('a whole thought');
+await waitFor('bob to see alice typing again', async () => (await s1.eval(typingLine)) === 'alice is typing…');
+await watcher.key('Enter');
+await waitFor('the line to clear when alice sends', async () => (await s1.eval(typingLine)) === '');
+await waitFor('the message to arrive', async () => (await s1.eval("document.getElementById('msg-list').textContent")).includes('a whole thought'));
+ok('the line clears when the composer is emptied, and when the message is sent');
+
 // ---- notifications ----
 // No push service is reachable from here, so the push itself is handed to
 // the service worker over the DevTools protocol, which is the same event a

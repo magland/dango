@@ -400,6 +400,10 @@ function openStream(list) {
       streamRetry.room = 0;
       return;
     }
+    if (msg.type === 'typing') {
+      showTyping(msg.people || []);
+      return;
+    }
     // Further behind than a stream catches up with, after a long sleep say.
     if (msg.type === 'reload') {
       es.close();
@@ -444,10 +448,31 @@ function openStream(list) {
   // so an edit, a reaction, or a deletion made meanwhile is repainted too.
   es.onerror = function () {
     es.close();
+    // Nobody is shown typing on the word of a stream that is gone; the next
+    // one says who is typing as it catches up.
+    showTyping([]);
     var items = list.querySelectorAll('[data-mid]');
     if (items.length) list.setAttribute('data-last', items[items.length - 1].getAttribute('data-mid'));
     if (roomStream === es) retryStream('room', function () { if (roomStream === es) openStream(list); });
   };
+}
+
+// Who else is typing, under the composer, as the room's stream says: one
+// name, two, three, or several people. A page that had the reader at the
+// foot of the list keeps them there if the line takes room (on a phone).
+function showTyping(people) {
+  var el = document.querySelector('[data-typing]');
+  if (!el) return;
+  var names = people.map(function (p) { return '<b>' + escapeHtml(p) + '</b>'; });
+  var text = '';
+  if (names.length === 1) text = names[0] + ' is typing…';
+  else if (names.length === 2) text = names[0] + ' and ' + names[1] + ' are typing…';
+  else if (names.length === 3) text = names[0] + ', ' + names[1] + ', and ' + names[2] + ' are typing…';
+  else if (names.length > 3) text = 'Several people are typing…';
+  var pane = scrollPane();
+  var follow = pane ? nearBottom(pane) : false;
+  el.innerHTML = text ? '<span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>' + text : '';
+  if (follow) scrollToBottom();
 }
 
 // How long each stream waits before trying again: two seconds, doubling to
@@ -634,6 +659,7 @@ function openUserStream() {
 // them leave none for the page on screen. Coming back opens them again, the
 // room's asking from its newest message, as after a drop.
 window.addEventListener('pagehide', function () {
+  typingLeft();
   if (userStream) { userStream.close(); userStream = null; }
   if (roomStream) { roomStream.close(); roomStream = null; }
 });
@@ -990,8 +1016,39 @@ document.addEventListener('input', function (e) {
   if (e.target.matches && e.target.matches('.composer textarea')) {
     autosize(e.target);
     mentionInput(e.target);
+    typingInput(e.target);
   }
 });
+// Saying that the viewer is typing: once as they start, again every
+// TYPING_PING_MS while they go on (the server forgets a person after seven
+// seconds without word; see src/typing.ts), and once more, to stop, when the
+// composer is emptied or its page is left. Sending clears it on the server.
+var TYPING_PING_MS = 4000;
+function typingPost(form, stop) {
+  var action = form.getAttribute('action') || '';
+  var csrf = form.querySelector('input[name="csrf"]');
+  if (!window.fetch || !csrf || action.slice(-9) !== '/messages') return;
+  var body = new FormData();
+  body.append('csrf', csrf.value);
+  if (stop) body.append('stop', '1');
+  fetch(action.slice(0, -9) + '/typing', { method: 'POST', body: body, credentials: 'same-origin', keepalive: stop }).catch(function () {});
+}
+function typingInput(ta) {
+  var form = ta.closest('form[data-composer]');
+  if (!form) return;
+  if (ta.value.trim() === '') {
+    if (form.dangoTypedAt) { form.dangoTypedAt = 0; typingPost(form, true); }
+    return;
+  }
+  var now = Date.now();
+  if (now - (form.dangoTypedAt || 0) < TYPING_PING_MS) return;
+  form.dangoTypedAt = now;
+  typingPost(form, false);
+}
+function typingLeft() {
+  var form = document.querySelector('form[data-composer]');
+  if (form && form.dangoTypedAt) { form.dangoTypedAt = 0; typingPost(form, true); }
+}
 document.addEventListener('keydown', function (e) {
   if (!e.target.matches || !e.target.matches('.composer textarea')) return;
   if (mentionKey(e, e.target)) return;
@@ -1208,6 +1265,8 @@ function sendComposer(form) {
   var sentText = ta ? ta.value : '';
   lockComposer(form, true);
   if (ta) { ta.value = ''; autosize(ta); closeMentions(ta); }
+  // The send clears the viewer's typing on the server; the next keystroke says it afresh.
+  form.dangoTypedAt = 0;
   form.dangoQueued = false;
   sendStatus(form, 'pending', hasFiles ? 'Uploading ' + humanSize(bytes) + '…' : 'Sending…');
   sendProgress(form, hasFiles ? 0 : null);
@@ -1814,6 +1873,7 @@ function startMain(hash) {
   if (test && dangoRoot.classList.contains('can-call')) withCallScript(function (call) { call.test(test); });
 }
 function stopMain() {
+  typingLeft();
   if (roomStream) { roomStream.close(); roomStream = null; }
   if (roomWatch) { roomWatch.disconnect(); roomWatch = null; }
   mentionState.open = false;

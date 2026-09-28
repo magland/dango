@@ -240,7 +240,7 @@ test('a stream whose reader has stopped reading is let go', () => {
     const url = '/c/stalled-test';
     const message = { id: 1, author: 'a', created: '', body: '', reactions: {}, files: [], replyCount: 0 };
     const slow = stream();
-    serveEvents(slow as unknown as Response, 'reader', url, [], () => 'x', () => true);
+    serveEvents(slow as unknown as Response, 'reader', url, [], () => 'x', (p) => p, () => true);
     slow.writableLength = STALLED_BYTES + 10;
     mock.timers.tick(25000);
     assert.strictEqual(slow.destroyed, false, 'the first heartbeat sees the backlog');
@@ -248,7 +248,7 @@ test('a stream whose reader has stopped reading is let go', () => {
     assert.strictEqual(slow.destroyed, true, 'a backlog that did not go down is a reader that stopped');
 
     const draining = stream();
-    serveEvents(draining as unknown as Response, 'reader', url, [], () => 'x', () => true);
+    serveEvents(draining as unknown as Response, 'reader', url, [], () => 'x', (p) => p, () => true);
     draining.writableLength = STALLED_BYTES * 3;
     mock.timers.tick(25000);
     draining.writableLength = STALLED_BYTES * 2;
@@ -256,7 +256,7 @@ test('a stream whose reader has stopped reading is let go', () => {
     assert.strictEqual(draining.destroyed, false, 'a slow reader that is taking its backlog is kept');
 
     const flooded = stream();
-    serveEvents(flooded as unknown as Response, 'reader', url, [], () => 'x', () => true);
+    serveEvents(flooded as unknown as Response, 'reader', url, [], () => 'x', (p) => p, () => true);
     flooded.writableLength = MAX_UNSENT_BYTES + 1;
     publish(url, { type: 'message', message });
     assert.strictEqual(flooded.destroyed, true, 'past the ceiling it goes at once');

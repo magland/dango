@@ -4,6 +4,7 @@ import { Attachment, CallRecord, Message, addMessage, findByNonce, readMessage, 
 import { queueNotifications } from './notify';
 import { Room } from './rooms';
 import { audienceOf, isNewsFor, markRead, unreadIn } from './reads';
+import { stopTyping } from './typing';
 
 // Sending a message, whichever door it came through. The web and the JSON
 // API both did the same things after writing the file, and one of them was
@@ -44,6 +45,7 @@ export function postMessage(
   }
   markRead(root, input.author, room.url, m.id);
   publish(room.url, { type: 'message', message: m });
+  stopTyping(room.url, input.author);
   queueNotifications(root, room, m);
   if (room.kind === 'thread') {
     // The parent message's reply count changed, so the parent room repaints it.

@@ -16,7 +16,7 @@ import { Message } from './messages';
 // result down its own stream. The client's whole job is then
 // insertAdjacentHTML and replaceWith, keyed by the ids the renderer stamps.
 
-export interface RoomEvent {
+export interface MessageEvent {
   /** 'message' is a new one; 'update' re-renders one in place (edits,
    * reactions, deletions-as-tombstones, and reply counts are all this). */
   type: 'message' | 'update';
@@ -24,6 +24,14 @@ export interface RoomEvent {
   /** The room's pinned count, when this update pinned or unpinned the message. */
   pins?: number;
 }
+
+/** Who is typing in the room now, by username, oldest first (see src/typing.ts). */
+export interface TypingEvent {
+  type: 'typing';
+  people: string[];
+}
+
+export type RoomEvent = MessageEvent | TypingEvent;
 
 type Listener = (event: RoomEvent) => void;
 
@@ -253,7 +261,8 @@ function openStream(res: Response): {
  * A stream outlives the check that opened it: its viewer may be taken out of
  * a private channel, or out of the workspace, or the channel deleted and a
  * private one made under the same name, all while the page stays open. So
- * the caller also hands in `allowed`, which asks again, and every event is
+ * the caller also hands in `label`, which names a person typing as the room
+ * names them, and `allowed`, which asks again, and every event is
  * sent only after it says yes; the first no ends the stream. The page's
  * reconnect then meets the same check as any new request.
  */
@@ -262,7 +271,8 @@ export function serveEvents(
   username: string,
   roomUrl: string,
   catchUp: RoomEvent[] | 'reload',
-  render: (event: RoomEvent) => string,
+  render: (event: MessageEvent) => string,
+  label: (person: string) => string,
   allowed: () => boolean
 ): void {
   if (!admit(res, username)) return;
@@ -277,6 +287,11 @@ export function serveEvents(
   const send = (event: RoomEvent) => {
     if (!allowed()) {
       stream.end();
+      return;
+    }
+    // Nobody is shown themselves typing, whichever of their pages it is in.
+    if (event.type === 'typing') {
+      stream.write('0', { type: 'typing', people: event.people.filter((p) => p !== username).map(label) });
       return;
     }
     stream.write(String(event.message.id), {
