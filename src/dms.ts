@@ -8,7 +8,9 @@ import { dmDir, dmsDir } from './workspace';
 // Direct conversations: numbered directories under dms/, each holding a
 // conversation.json naming its participants and the same messages/ threads/
 // files/ layout a channel has. A conversation is visible to its participants
-// and to nobody else, the site admin included.
+// and to nobody else, the site admin included. A conversation of one is a
+// person's notes to themselves, as Slack has them: the same room, between
+// nobody else.
 //
 // Numbered directories rather than participant-named ones, because usernames
 // may contain any separator we might pick; finding the conversation for a set
@@ -69,7 +71,7 @@ function parseDm(text: string): DmInfo | null {
     const names = (v: unknown) => (Array.isArray(v) ? v.filter((p): p is string => typeof p === 'string') : []);
     const participants = names(parsed.participants);
     const former = names(parsed.former).filter((p) => !participants.includes(p));
-    if (participants.length < 1 || participants.length + former.length < 2) return null;
+    if (participants.length < 1) return null;
     return {
       id: 0,
       participants: [...participants].sort(),
@@ -118,7 +120,7 @@ function sameSet(a: string[], b: string[]): boolean {
  */
 export function openDm(root: string, participants: string[], opts: { charge?: () => void } = {}): DmInfo {
   const set = [...new Set(participants)].sort();
-  if (set.length < 2) throw new OpError('A conversation needs someone besides you in it.');
+  if (set.length < 1) throw new OpError('A conversation needs someone in it.');
   if (set.length > MAX_PARTICIPANTS) {
     throw new OpError(`A conversation holds at most ${MAX_PARTICIPANTS} people; a channel holds everyone.`);
   }
@@ -151,10 +153,15 @@ export function openDm(root: string, participants: string[], opts: { charge?: ()
   throw new OpError('Could not allocate a conversation; try again.', 'conflict');
 }
 
-/** How a conversation is titled for one of its participants: the other people. */
+/** Whether a conversation is one person's notes to themselves. */
+export function isSelfDm(dm: DmInfo): boolean {
+  return dmPeople(dm).length === 1;
+}
+
+/** How a conversation is titled for one of its participants: the other people, or themselves marked as such. */
 export function dmTitle(dm: DmInfo, viewer: string): string {
   const others = dmPeople(dm).filter((p) => p !== viewer);
-  return others.length ? others.join(', ') : viewer;
+  return others.length ? others.join(', ') : `${viewer} (you)`;
 }
 
 /**

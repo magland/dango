@@ -600,6 +600,9 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       .filter((u): u is string => typeof u === 'string' && u !== '')
       .filter((u) => userExists(root, u));
     try {
+      // The viewer is in every conversation they start, so choosing only
+      // themselves is their notes to self, and choosing nobody is a mistake.
+      if (!users.length) throw new OpError('Choose who the conversation is with, or yourself for notes to self.');
       const dm = openDm(root, [viewer.auth.username, ...users], { charge: () => limits.newRoom(viewer.auth.username) });
       res.redirect(303, `/d/${dm.id}`);
     } catch (e) {

@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import { AuthResult } from '../../mochiforge/src/vault';
 import { addMember, createChannel, deleteChannel, listChannels, removeMember } from '../src/channels';
-import { dmTitle, listDmsFor, openDm } from '../src/dms';
+import { dmTitle, isSelfDm, listDmsFor, openDm } from '../src/dms';
 import { EDIT_WINDOW_MS, canDeleteMessage, canEditMessage, canSeeChannel, canSeeDm } from '../src/perms';
 import { channelRoom, dmRoom, threadRoom } from '../src/rooms';
 import { addMessage } from '../src/messages';
@@ -62,6 +62,20 @@ test('conversations belong to their participants and reuse one per set', () => {
   assert.strictEqual(dmRoom(root, dm.id, auth('carol')), null);
   assert.deepStrictEqual(listDmsFor(root, 'alice').map((d) => d.id), [dm.id]);
   assert.strictEqual(dmTitle(dm, 'alice'), 'bob');
+});
+
+test('a conversation of one is its person’s notes to self, one per person, seen by nobody else', () => {
+  const root = tmpRoot();
+  const notes = openDm(root, ['alice', 'alice']);
+  assert.deepStrictEqual(notes.participants, ['alice']);
+  assert.strictEqual(isSelfDm(notes), true);
+  assert.strictEqual(openDm(root, ['alice']).id, notes.id);
+  assert.notStrictEqual(openDm(root, ['alice', 'bob']).id, notes.id);
+  assert.strictEqual(dmTitle(notes, 'alice'), 'alice (you)');
+  assert.ok(dmRoom(root, notes.id, auth('alice')));
+  assert.strictEqual(dmRoom(root, notes.id, auth('bob')), null);
+  assert.strictEqual(dmRoom(root, notes.id, auth('root', true)), null);
+  assert.throws(() => openDm(root, []), /someone in it/);
 });
 
 test('editing is the author’s, for two hours; deleting is the author’s or a site admin’s', () => {

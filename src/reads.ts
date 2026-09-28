@@ -152,7 +152,7 @@ export interface RoomUnread extends Unread {
   url: string;
   title: string;
   kind: 'channel' | 'dm' | 'meeting';
-  /** For a conversation, the people in it other than the viewer. */
+  /** For a conversation, the people in it other than the viewer, or the viewer alone in their notes to themselves. */
   with?: string[];
 }
 
@@ -168,7 +168,7 @@ export function unreadRooms(root: string, auth: AuthResult): RoomUnread[] {
   for (const d of listDmsFor(root, auth.username)) {
     const url = `/d/${d.id}`;
     const others = dmPeople(d).filter((p) => p !== auth.username);
-    out.push({ url, title: dmTitle(d, auth.username), kind: 'dm', with: others, ...unreadIn(root, auth.username, url, dmDir(root, d.id)) });
+    out.push({ url, title: dmTitle(d, auth.username), kind: 'dm', with: others.length ? others : [auth.username], ...unreadIn(root, auth.username, url, dmDir(root, d.id)) });
   }
   for (const m of listMeetingsFor(root, auth.username)) {
     const url = `/m/${m.id}`;

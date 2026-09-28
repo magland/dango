@@ -233,7 +233,8 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
   app.post('/api/dms', json, (req, res) =>
     withAuth(req, res, (auth) => {
       const users = body(req).users;
-      if (!Array.isArray(users) || !users.every((u): u is string => typeof u === 'string')) {
+      // Naming only yourself opens your notes to self.
+      if (!Array.isArray(users) || users.length === 0 || !users.every((u): u is string => typeof u === 'string')) {
         apiError(res, 400, 'send {"users": ["name", ...]}');
         return;
       }

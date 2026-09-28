@@ -13,7 +13,7 @@ import { liveCall, liveCallsByRoom } from './calls';
 import { callScript } from './callscript';
 import { ChannelInfo, listChannels } from './channels';
 import { CallsConfig, DEFAULT_STUN, loadConfig } from './config';
-import { DmInfo, dmTitle } from './dms';
+import { DmInfo, dmTitle, isSelfDm } from './dms';
 import { lobbiesFor } from './guests';
 import { MARK } from './logo';
 import { MAX_GUEST_NAME, MAX_TITLE, MeetingInfo, currentGuests, guestLink, listMeetingsFor, mayDeleteMeeting, personLabel, readMeeting } from './meetings';
@@ -564,9 +564,11 @@ function roomHead(root: string, room: Room, viewer: Viewer, tools: Html | '' = '
   if (isGuest(viewer.auth)) {
     return html`<header class="room-head">${title}<div class="room-tools">${room.kind !== 'thread' ? callButton(room, viewer) : ''}${tools}</div></header>`;
   }
+  // Notes to self have nobody to call and nothing to be notified of.
+  const solo = room.dm !== undefined && isSelfDm(room.dm);
   const pins = readPins(room.dir).length;
   const pinsLink = html`<a class="topbar-icon pins-link" href="${room.url}/pins" title="Pinned messages" aria-label="Pinned messages, ${pins}">${PIN_ICON}<span data-pin-count>${pins || ''}</span></a>`;
-  return html`<header class="room-head"><a class="back-link topbar-icon" href="/" aria-label="All rooms">${BACK_ICON}</a>${title}<div class="room-tools">${room.kind !== 'thread' ? callButton(room, viewer) : ''}${pinsLink}${muteButton(root, room, viewer)}${tools}</div></header>`;
+  return html`<header class="room-head"><a class="back-link topbar-icon" href="/" aria-label="All rooms">${BACK_ICON}</a>${title}<div class="room-tools">${room.kind !== 'thread' && !solo ? callButton(room, viewer) : ''}${pinsLink}${solo ? '' : muteButton(root, room, viewer)}${tools}</div></header>`;
 }
 
 /** A room's pinned messages, most recently pinned first, each whole. */
@@ -585,7 +587,8 @@ export function channelPage(root: string, room: Room, messages: Message[], viewe
 }
 
 export function dmPage(root: string, room: Room, messages: Message[], viewer: Viewer, readUpTo?: number): string {
-  const main = html`${roomHead(root, room, viewer)}${messageList(root, room, messages, viewer, readUpTo)}${composer(room, viewer, `Message ${room.title}`)}`;
+  const topic = isSelfDm(room.dm!) ? 'Notes to self. Only you can see this conversation.' : undefined;
+  const main = html`${roomHead(root, room, viewer, '', topic)}${messageList(root, room, messages, viewer, readUpTo)}${composer(room, viewer, `Message ${room.title}`)}`;
   return layout(room.title, main, { viewer, root, active: room.url });
 }
 
@@ -763,10 +766,13 @@ ${danger}`;
 
 export function newDmPage(root: string, viewer: Viewer, error?: string): string {
   const state = loadVault(root);
-  const users = state.status === 'ok' ? Object.keys(state.vault.users).filter((u) => u !== viewer.auth.username).sort() : [];
+  const me = viewer.auth.username;
+  // The viewer first, chosen alone for notes to self; with others, they are
+  // in the conversation either way.
+  const users = state.status === 'ok' ? [me, ...Object.keys(state.vault.users).filter((u) => u !== me).sort()] : [];
   const boxes = users.map(
-    (u) => html`<label class="checkbox person-pick" data-person="${[u, state.status === 'ok' ? state.vault.users[u]?.profile?.name ?? '' : ''].join(' ').toLowerCase()}"><input type="checkbox" name="user" value="${u}">${avatar(u, 20)} ${u}${
-      state.status === 'ok' && state.vault.users[u]?.profile?.name ? html` <span class="muted">${state.vault.users[u].profile!.name}</span>` : ''
+    (u) => html`<label class="checkbox person-pick" data-person="${[u, state.status === 'ok' ? state.vault.users[u]?.profile?.name ?? '' : '', u === me ? 'you notes self' : ''].join(' ').toLowerCase()}"><input type="checkbox" name="user" value="${u}">${avatar(u, 20)} ${u}${
+      u === me ? html` <span class="muted">(you, for notes to self)</span>` : state.status === 'ok' && state.vault.users[u]?.profile?.name ? html` <span class="muted">${state.vault.users[u].profile!.name}</span>` : ''
     }</label>`
   );
   const content = html`<div class="form-box">
@@ -973,7 +979,7 @@ ${profile?.name ? html`<p class="muted" style="margin:0">${username}</p>` : ''}
 ${profile?.bio ? html`<p>${profile.bio}</p>` : ''}
 ${
     username === viewer.auth.username
-      ? html`<p><a class="btn" href="/account">Edit profile</a></p>`
+      ? html`<form method="post" action="/d/new" style="display:flex;gap:8px">${csrfField(viewer)}<input type="hidden" name="user" value="${username}"><a class="btn" href="/account">Edit profile</a><button class="btn" type="submit">Notes to self</button></form>`
       : html`<form method="post" action="/d/new">${csrfField(viewer)}<input type="hidden" name="user" value="${username}"><button class="btn btn-primary" type="submit">Message ${username}</button></form>`
   }`;
   return doc(username, content, { viewer, root });
