@@ -1475,14 +1475,19 @@ document.addEventListener('paste', function (e) {
   if (text && !onlyNames(text, cd.files)) return;
   e.preventDefault();
   if (form.getAttribute('data-busy') || !canEditFiles) return;
+  attachFiles(form, cd.files);
+});
+// Adding files to what the composer already holds, from a paste or a drop.
+function attachFiles(form, incoming) {
+  var input = form.querySelector('input[type="file"]');
   var files = listFiles(input);
   var taken = {};
   for (var i = 0; i < files.length; i++) taken[files[i].name] = true;
   var when = new Date();
-  for (i = 0; i < cd.files.length; i++) {
+  for (i = 0; i < incoming.length; i++) {
     // A file copied from a file manager keeps its own name; the server tells
     // two of the same name apart.
-    var f = cd.files[i];
+    var f = incoming[i];
     if (!genericName(f)) { files.push(f); continue; }
     var n = 0, name = pastedName(f, when, 0);
     while (taken[name]) name = pastedName(f, when, ++n);
@@ -1491,6 +1496,63 @@ document.addEventListener('paste', function (e) {
   }
   setFiles(form, files);
   sendStatus(form, '', '');
+}
+// Dragging files onto a room attaches them, dropped anywhere over the room
+// rather than only on the text, which is a small target. While files are
+// held over the room it says so. A browser's own answer to a file dropped on
+// a page is to leave the page for the file, which would drop what was being
+// written and any call, so a file dropped anywhere else on a dango page is
+// refused rather than opened. Text dragged into the composer is left alone.
+//
+// Nothing says reliably when a drag has left the window (dragleave fires for
+// every element crossed), but dragover fires again and again while it is
+// over the page; so the room's mark is taken down once it stops.
+var dropTimer = null;
+function draggingFiles(e) {
+  var types = e.dataTransfer && e.dataTransfer.types;
+  if (!types) return false;
+  for (var i = 0; i < types.length; i++) if (types[i] === 'Files') return true;
+  return false;
+}
+function dropForm(e) {
+  var main = closestOf(e.target, '.app-main');
+  var form = main && main.querySelector('form[data-composer]');
+  var input = form && form.querySelector('input[type="file"]');
+  if (!input || input.disabled || !canEditFiles || form.getAttribute('data-busy')) return null;
+  return form;
+}
+function showDropReady(on) {
+  var main = document.querySelector('.app-main');
+  if (main) main.classList.toggle('drop-ready', on);
+}
+document.addEventListener('dragover', function (e) {
+  if (!draggingFiles(e)) return;
+  e.preventDefault();
+  var form = dropForm(e);
+  e.dataTransfer.dropEffect = form ? 'copy' : 'none';
+  showDropReady(!!form);
+  clearTimeout(dropTimer);
+  dropTimer = setTimeout(function () { showDropReady(false); }, 200);
+});
+document.addEventListener('drop', function (e) {
+  if (!draggingFiles(e)) return;
+  e.preventDefault();
+  clearTimeout(dropTimer);
+  showDropReady(false);
+  var form = dropForm(e);
+  if (!form) return;
+  // A folder arrives as a file that cannot be read, and would fail the send.
+  var files = [], folders = 0;
+  var items = e.dataTransfer.items;
+  for (var i = 0; i < e.dataTransfer.files.length; i++) {
+    var entry = items && items[i] && items[i].webkitGetAsEntry ? items[i].webkitGetAsEntry() : null;
+    if (entry && entry.isDirectory) folders++;
+    else files.push(e.dataTransfer.files[i]);
+  }
+  if (files.length) attachFiles(form, files);
+  if (folders) sendStatus(form, 'error', 'A folder cannot be attached. Drop the files inside it instead.');
+  var ta = form.querySelector('textarea');
+  if (ta) ta.focus();
 });
 // Leaving the page mid-send would drop the upload; the browser asks first.
 // So would leaving a call's page end the call, and it asks about that too.

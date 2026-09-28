@@ -341,6 +341,15 @@ dialog.ask p { margin: 0 0 var(--s4); }
 .send-status { padding: 2px 12px 4px; font-size: var(--t-sm); color: var(--fg-muted); }
 .send-status.error { color: var(--danger); }
 form[data-busy] textarea { color: var(--fg-muted); }
+/* Files held over a room, ready to be dropped into its composer. */
+.app-main.drop-ready { position: relative; }
+.app-main.drop-ready::after {
+  content: "Drop to attach"; position: absolute; inset: var(--s2); z-index: 30; pointer-events: none;
+  display: flex; align-items: center; justify-content: center;
+  border: 2px dashed var(--accent); border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg) 88%, transparent); color: var(--accent);
+  font-size: var(--t-lg); font-weight: 600;
+}
 /* Who else is typing, in the composer's foot padding, so that it coming and
    going moves nothing; on a phone, where that padding is thin, it takes a
    line of its own while it has something to say. */

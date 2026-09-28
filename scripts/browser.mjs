@@ -608,6 +608,26 @@ await waitFor('the line to clear when alice sends', async () => (await s1.eval(t
 await waitFor('the message to arrive', async () => (await s1.eval("document.getElementById('msg-list').textContent")).includes('a whole thought'));
 ok('the line clears when the composer is emptied, and when the message is sent');
 
+// ---- dropping files onto the room ----
+
+const dragFiles = (type, names) => `(() => {
+  const dt = new DataTransfer();
+  for (const n of ${JSON.stringify(names)}) dt.items.add(new File(['some text'], n, { type: 'text/plain' }));
+  const e = new DragEvent('${type}', { dataTransfer: dt, bubbles: true, cancelable: true });
+  document.querySelector('.msgs').dispatchEvent(e);
+  return e.defaultPrevented;
+})()`;
+if (!(await watcher.eval(dragFiles('dragover', ['notes.txt'])))) fail('a file held over the room was not taken for a drop');
+if (!(await watcher.eval("document.querySelector('.app-main').classList.contains('drop-ready')"))) fail('the room did not say it was ready for a drop');
+await waitFor('the drop mark to go when the drag stops', async () => !(await watcher.eval("document.querySelector('.app-main').classList.contains('drop-ready')")));
+ok('files held over the room mark it ready for a drop, and the mark goes when they leave');
+if (!(await watcher.eval(dragFiles('drop', ['notes.txt', 'more.txt'])))) fail('a dropped file was left to the browser, which would leave the page');
+const dropped = await watcher.eval("Array.from(document.querySelector('.composer input[type=file]').files).map((f) => f.name).join(',')");
+if (dropped !== 'notes.txt,more.txt') fail(`the dropped files were not attached: ${dropped}`);
+if ((await watcher.eval("document.querySelectorAll('[data-file-list] li').length")) !== 2) fail('the dropped files are not listed under the composer');
+await watcher.eval("setFiles(document.querySelector('form[data-composer]'), []); true");
+ok('files dropped onto the room are attached to its composer');
+
 // ---- notifications ----
 // No push service is reachable from here, so the push itself is handed to
 // the service worker over the DevTools protocol, which is the same event a
