@@ -176,8 +176,10 @@ dialog.ask p { margin: 0 0 var(--s4); }
 /* A continuation: the same person again within a few minutes, drawn as more
    of what they were saying. The avatar keeps its column but is not drawn,
    the name stays for a screen reader only, and the time sits in the gutter,
-   shown when the message is pointed at or tapped. */
-.msg-cont { padding-top: 1px; padding-bottom: 1px; }
+   shown when the message is pointed at or tapped. It keeps a message's
+   padding below, so every message in a run is as far from the next as the
+   first is from the second. */
+.msg-cont { padding-top: 1px; padding-bottom: 6px; }
 .msg-cont > .avatar { visibility: hidden; max-height: 0; margin-top: 0; }
 .msg-cont .msg-head .author {
   position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
@@ -658,7 +660,7 @@ table.call-log td .muted { font-size: var(--t-xs); }
 
   .msgs { padding: var(--s3) var(--s2) var(--s2); }
   .msg { gap: var(--s2); padding: 6px; }
-  .msg-cont { padding-top: 1px; padding-bottom: 1px; }
+  .msg-cont { padding-top: 1px; padding-bottom: 6px; }
   .msg-cont .msg-head time { width: 46px; }
   .msg-img { max-height: 260px; }
 
