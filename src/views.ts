@@ -242,6 +242,9 @@ function bodyHtml(root: string, body: string, viewer: Viewer): Html {
         rawBase: '',
         blobBase: '',
         showRefusedHtml: true,
+        // Lines typed one under another stay on their own lines, as Slack
+        // shows a message and GitHub a comment.
+        breaks: true,
         // A guest cannot open a member's profile, so a mention is not a link for them.
         mentions: (name) => !isGuest(viewer.auth) && userExists(root, name),
         channels: (name) => {

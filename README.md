@@ -38,7 +38,7 @@ The same command deploys updates, and `dango backup ~/backups/chat --snapshot` k
 
 ## What it does
 
-- **Channels,** public to every member or private to a member list. Messages are markdown with KaTeX and emoji; links out of the workspace open in a new tab.
+- **Channels,** public to every member or private to a member list. Messages are markdown with KaTeX and emoji, with lines typed one under another shown on their own lines, as Slack and GitHub comments show them; links out of the workspace open in a new tab.
 - **@mentions,** completed as you type; a message naming you is marked in the room and counted in the sidebar.
 - **Unread counts** in the sidebar, the tab title, and a dot on the tab's icon, kept on the server per person, so reading a room on one device clears it on the others.
 - **Threads** hung off any message, **reactions** toggled per person (a dozen at hand, or any emoji, typed or named as `:tada:`), **pinned messages** per room, **editing** your own messages in place for two hours after sending them (Up in an empty composer edits the last one), and **deleting** them after a confirmation (a deletion leaves a tombstone, so a thread keeps its anchor).

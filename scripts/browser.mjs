@@ -628,6 +628,17 @@ if ((await watcher.eval("document.querySelectorAll('[data-file-list] li').length
 await watcher.eval("setFiles(document.querySelector('form[data-composer]'), []); true");
 ok('files dropped onto the room are attached to its composer');
 
+// ---- lines typed one under another ----
+
+const beforeLines = await lastId();
+await s1.eval("(() => { const t = document.querySelector('.composer textarea'); t.value = 'line one\\nline two'; document.querySelector('.composer button[type=submit]').click(); return true; })()");
+await waitFor('the message to be sent', async () => (await lastId()) === beforeLines + 1);
+if ((await bodyOf(beforeLines + 1)) !== 'line one\nline two') fail('the message was not stored as typed');
+await waitFor('the message to show its lines apart', async () =>
+  s1.eval(`!!document.querySelector('#msg-${beforeLines + 1} .msg-body br')`)
+);
+ok('lines typed one under another are stored as typed and shown on their own lines');
+
 // ---- notifications ----
 // No push service is reachable from here, so the push itself is handed to
 // the service worker over the DevTools protocol, which is the same event a
