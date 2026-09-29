@@ -184,12 +184,12 @@ export function layout(title: string, main: Html, opts: PageOpts): string {
     ? html`<div class="app ${opts.roomsPage ? 'rooms-page' : ''}" data-viewer="${opts.viewer!.auth.username}" data-current-room="${opts.active ?? ''}" data-csrf="${opts.viewer!.csrf}" data-call-script="/assets/call.js?v=${callScript().tag}" data-lobby="${lobby}">${sidebar(opts, rooms)}<div class="app-main">${main}</div></div>`
     : guest
       ? html`<div class="app guest-app" data-viewer="${opts.viewer!.auth.username}" data-guest="1" data-current-room="${opts.active ?? ''}" data-csrf="${opts.viewer!.csrf}" data-call-script="/assets/call.js?v=${callScript().tag}" data-lobby="[]"><div class="app-main">${main}</div></div>`
-      : html`<main class="container" style="padding-top: 48px">${main}</main>`;
+      : html`<main class="container" style="padding-top: calc(48px + env(safe-area-inset-top))">${main}</main>`;
   return html`<!doctype html>
 <html lang="en" data-theme-vault="${theme}" data-theme-dark="${darkFor(activeTheme())}">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title data-title="${baseTitle}">${fullTitle}</title>
 <link rel="stylesheet" href="/assets/style.css?t=${encodeURIComponent(theme)}&amp;v=${sheet}">
 <link rel="stylesheet" href="/assets/katex/katex.css">

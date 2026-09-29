@@ -640,8 +640,7 @@ table.call-log td .muted { font-size: var(--t-xs); }
    The sidebar gives way rather than squeezing: below 760px the room list is
    its own page (/), which every room page links back to from its header,
    and every other page from a bar of its own. What stays is spaced for a
-   narrow screen: less gutter, the topic under the room's name, and the
-   composer one row, paperclip, text, and Send. */
+   narrow screen: less gutter, and the topic under the room's name. */
 .back-link { display: none; }
 @media (max-width: 760px) {
   .app { grid-template-columns: minmax(0, 1fr); }
@@ -664,6 +663,34 @@ table.call-log td .muted { font-size: var(--t-xs); }
   .msg-cont .msg-head time { width: 46px; }
   .msg-img { max-height: 260px; }
 
+
+  /* A call keeps to a thumb's reach: a floating dock narrower and clear of
+     the composer. */
+  .call-dock.mini { width: 190px; right: 8px; bottom: 84px; }
+  .call-dock.mini .call-ctl, .call-dock.mini .call-leave { width: 32px; height: 32px; }
+  .call-dock.mini .call-controls { gap: 4px; }
+  .call-dock.full { padding: var(--s2); }
+  .call-entry { max-width: 100%; }
+
+  .doc { padding: var(--s4) var(--s4) var(--s6); }
+  /* The people list becomes a name and its count on one line, and what can
+     be done with them on the next. */
+  table.people tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; border-top: 1px solid var(--border-soft); }
+  table.people tr:first-child { border-top: none; }
+  table.people td { border-top: none; padding: 6px 4px; }
+  table.people td.person, table.people td.actions { grid-column: 1 / -1; }
+  table.people td.seen, table.people td.tokens, table.people td.actions { padding-top: 0; }
+  table.people td.actions { text-align: left; white-space: normal; }
+}
+
+/* --- small screens ---
+
+   A room on a small screen, narrow as a phone held upright or short as one
+   on its side, gives the messages what height it can: the composer is one
+   row, paperclip, text, and Send, and a call's strip is shorter. A phone on
+   its side is wide enough for the sidebar but not tall enough for the
+   desktop's composer and strip under the header together. */
+@media (max-width: 760px), (max-height: 500px) {
   .composer { padding: var(--s1) var(--s2) var(--s2); }
   .typing { position: static; padding: 2px var(--s2) 0; height: auto; }
   .typing:empty { display: none; }
@@ -682,26 +709,63 @@ table.call-log td .muted { font-size: var(--t-xs); }
   .composer-row [data-file-total]:empty { display: none; }
   .composer-row .hint { display: none; }
   .mention-list { left: 0; right: 0; width: auto; }
-
-  /* A call keeps to a thumb's reach: a shorter strip, and a floating dock
-     narrower and clear of the composer. */
   .call-dock.strip { padding: var(--s2); }
   .call-dock.strip .call-tiles { height: 96px; }
-  .call-dock.mini { width: 190px; right: 8px; bottom: 84px; }
-  .call-dock.mini .call-ctl, .call-dock.mini .call-leave { width: 32px; height: 32px; }
-  .call-dock.mini .call-controls { gap: 4px; }
-  .call-dock.full { padding: var(--s2); }
-  .call-entry { max-width: 100%; }
+}
 
-  .doc { padding: var(--s4) var(--s4) var(--s6); }
-  /* The people list becomes a name and its count on one line, and what can
-     be done with them on the next. */
-  table.people tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; border-top: 1px solid var(--border-soft); }
-  table.people tr:first-child { border-top: none; }
-  table.people td { border-top: none; padding: 6px 4px; }
-  table.people td.person, table.people td.actions { grid-column: 1 / -1; }
-  table.people td.seen, table.people td.tokens, table.people td.actions { padding-top: 0; }
-  table.people td.actions { text-align: left; white-space: normal; }
+/* --- the phone's own edges ---
+
+   A phone's screen is not a rectangle. Its corners are rounded, a camera cuts
+   into the top, and the status bar and the home indicator sit over the top
+   and bottom edges; a Home Screen app, and Safari with its toolbar floating
+   over the page, draw the page under all of them. The viewport tag asks for
+   that (viewport-fit=cover), which is what makes iOS say how much of each
+   edge is covered, in env(safe-area-inset-*), and each part of the frame
+   moves itself clear by that much: each column from the top, the composer
+   and the sidebar's foot from the bottom, the columns from the sides in
+   landscape. The padding is the column's own background, so what shows
+   under the status bar and around the home indicator is the page, not a band
+   of another colour. Where nothing is covered (a desktop, most phones' browsers
+   with their bars shown) the insets are 0 and nothing moves.
+
+   With the keyboard up the home indicator is under the keyboard, but iOS
+   goes on reporting its inset; the composer then has focus, and sits on the
+   keyboard. scripts/phones.mjs checks all of this on emulated phones. */
+.app-side { padding-top: env(safe-area-inset-top); padding-left: env(safe-area-inset-left); }
+.app-main { padding-top: env(safe-area-inset-top); padding-right: env(safe-area-inset-right); }
+.guest-app .app-main { padding-left: env(safe-area-inset-left); }
+.side-foot { padding-bottom: max(var(--s2), env(safe-area-inset-bottom)); }
+.composer { padding-bottom: max(var(--s4), env(safe-area-inset-bottom)); }
+.doc { padding-bottom: calc(var(--s6) + env(safe-area-inset-bottom)); }
+body > main.container {
+  padding-left: max(var(--s4), env(safe-area-inset-left)); padding-right: max(var(--s4), env(safe-area-inset-right));
+  padding-bottom: calc(var(--s6) + env(safe-area-inset-bottom));
+}
+.signed-out { top: calc(var(--s2) + env(safe-area-inset-top)); }
+.lobby-notice { top: calc(var(--s2) + env(safe-area-inset-top)); right: calc(var(--s2) + env(safe-area-inset-right)); }
+.call-dock.mini { right: calc(16px + env(safe-area-inset-right)); bottom: calc(16px + env(safe-area-inset-bottom)); }
+.call-dock.full {
+  padding: max(var(--s3), env(safe-area-inset-top)) max(var(--s3), env(safe-area-inset-right))
+    max(var(--s3), env(safe-area-inset-bottom)) max(var(--s3), env(safe-area-inset-left));
+}
+@media (max-width: 760px), (max-height: 500px) {
+  .composer { padding-bottom: max(var(--s2), env(safe-area-inset-bottom)); }
+}
+@media (max-width: 760px) {
+  .app-side, .app-main { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+  body > main.container { padding-left: max(var(--s3), env(safe-area-inset-left)); padding-right: max(var(--s3), env(safe-area-inset-right)); }
+  .call-dock.mini { right: calc(8px + env(safe-area-inset-right)); bottom: calc(84px + env(safe-area-inset-bottom)); }
+  .call-dock.full {
+    padding: max(var(--s2), env(safe-area-inset-top)) max(var(--s2), env(safe-area-inset-right))
+      max(var(--s2), env(safe-area-inset-bottom)) max(var(--s2), env(safe-area-inset-left));
+  }
+}
+@media (hover: none) and (pointer: coarse) {
+  .composer:focus-within { padding-bottom: var(--s2); }
+  /* The hint is the desktop's keys; on a touch keyboard Enter is a new line.
+     Send keeps to the right without it. */
+  .composer-row .hint { display: none; }
+  .composer-row button[type="submit"] { margin-left: auto; }
 }
 `;
 

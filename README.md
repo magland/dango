@@ -105,7 +105,10 @@ npm run dev        # serves example-root/ at http://127.0.0.1:3000
 npm run test:unit  # the pure modules, in milliseconds
 npm run smoke      # end to end, against the compiled output
 npm run test:browser  # the page script in headless Chrome (Node 22+, Chrome installed)
+npm run test:phones   # the layout on emulated phones: corners, camera, status bar, home indicator
 ```
+
+`npm run test:phones -- --shots /tmp/phones` also writes a screenshot of each phone and page, with the phone's corners, camera, status bar, and home indicator drawn over it, and an `index.html` to look through them; `--device "iPhone 16"` limits it to one phone. The check emulates the phones in Chrome, with their sizes and safe-area insets, so it catches a layout that runs under the edges of the screen on every build, but it is not Safari. Before a change to the mobile layout ships, it is worth a look in the iOS Simulator (Xcode, on a Mac) in a Safari tab and as a Home Screen app: run `npm run dev -- --host 0.0.0.0` or serve on the Mac itself, then `xcrun simctl openurl booted http://<address>:3000`.
 
 A release is a version bump pushed to main: `npm run bump` (patch, or `minor`, `major`, or a version) commits the new version, and `.github/workflows/publish.yml` tests it, publishes it to npm through trusted publishing, tags it, and builds its image, which is what `dango deploy fly` deploys.
 
