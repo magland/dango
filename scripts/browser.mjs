@@ -594,6 +594,31 @@ ok('a form posts and shows its answer in place');
 await nav.eval("document.querySelector('.mute-form button').click(); true");
 await waitFor('the bell to show the room unmuted', async () => nav.eval("!document.querySelector('.mute-form button').classList.contains('is-muted')"));
 
+// ---- a page left open across a deploy ----
+// The page is made to believe it was loaded from an older build; the
+// workspace then says otherwise, as it would after a deploy.
+
+const built = await nav.eval("document.documentElement.getAttribute('data-build')");
+if (!/^[0-9a-f]{12}$/.test(built || '')) fail(`a page is not stamped with its build: ${built}`);
+await nav.eval("loadedBuild = 'behind'; window.stillHere = true; true");
+await nav.eval("document.querySelector('.side-rooms a[href=\"/c/random\"]').click(); true");
+await waitFor('#random to be loaded whole', async () => (await nav.eval("location.pathname + '|' + (window.stillHere === true) + '|' + loadedBuild")) === `/c/random|false|${built}`);
+ok('a move to another page from an older build loads it whole, with the new script');
+// The stream opened again, as after a restart: not someone arriving, so the
+// page is left alone.
+await nav.eval("loadedBuild = 'behind'; window.stillHere = true; arrivedAt = 0; userStream.close(); openUserStream(); true");
+await sleep(1500);
+if (!(await nav.eval('window.stillHere === true'))) fail('a page nobody arrived at was reloaded for a new build');
+if ((await nav.eval('staleBuild')) !== built) fail('the stream did not tell the page it is behind');
+// Someone arriving with something typed and not sent: still left alone.
+await nav.eval("document.querySelector('form[data-composer] textarea').value = 'half a thought'; arrived(); true");
+await sleep(1000);
+if (!(await nav.eval('window.stillHere === true'))) fail('a page with an unsent message was reloaded for a new build');
+ok('a page behind is not reloaded while nobody is arriving at it, or with a message typed and unsent');
+await nav.eval("document.querySelector('form[data-composer] textarea').value = ''; arrived(); true");
+await waitFor('the page to load itself again', async () => (await nav.eval("(window.stillHere === true) + '|' + loadedBuild")) === `false|${built}`);
+ok('a page behind reloads itself when someone arrives at it with nothing unsent');
+
 // ---- calls ----
 
 const inCallCount = (page) => page.eval("(() => { const s = document.querySelector('.call-dock .call-status'); return s ? s.textContent : ''; })()");

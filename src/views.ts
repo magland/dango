@@ -10,6 +10,7 @@ import { THEMES, activeTheme, darkFor } from '../../mochiforge/src/themes';
 import { UserProfile, Vault, loadVault, tokenId, userExists } from '../../mochiforge/src/vault';
 import { ConnectionReport, describeReport, readReports } from './calllog';
 import { liveCall, liveCallsByRoom } from './calls';
+import { buildTag } from './build';
 import { callScript } from './callscript';
 import { ChannelInfo, listChannels } from './channels';
 import { CallsConfig, DEFAULT_STUN, loadConfig } from './config';
@@ -186,7 +187,7 @@ export function layout(title: string, main: Html, opts: PageOpts): string {
       ? html`<div class="app guest-app" data-viewer="${opts.viewer!.auth.username}" data-guest="1" data-current-room="${opts.active ?? ''}" data-csrf="${opts.viewer!.csrf}" data-call-script="/assets/call.js?v=${callScript().tag}" data-lobby="[]"><div class="app-main">${main}</div></div>`
       : html`<main class="container" style="padding-top: calc(48px + env(safe-area-inset-top))">${main}</main>`;
   return html`<!doctype html>
-<html lang="en" data-theme-vault="${theme}" data-theme-dark="${darkFor(activeTheme())}">
+<html lang="en" data-theme-vault="${theme}" data-theme-dark="${darkFor(activeTheme())}" data-build="${buildTag()}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">

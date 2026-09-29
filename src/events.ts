@@ -73,7 +73,9 @@ export type UserEvent =
   /** Who is in a room's call now, as they are named there; an empty list when it has ended. */
   | { type: 'call'; url: string; people: string[] }
   /** Who is waiting to be let in to one of the person's meetings; an empty list when nobody is. */
-  | { type: 'lobby'; url: string; title: string; waiting: { id: string; name: string }[] };
+  | { type: 'lobby'; url: string; title: string; waiting: { id: string; name: string }[] }
+  /** What the workspace serves now (see src/build.ts), said first on every stream. */
+  | { type: 'build'; tag: string };
 
 /**
  * What only one page is told: a call's roster and the signals another page
@@ -316,11 +318,14 @@ export function serveEvents(
  * Serve one person's stream of count changes, for the sidebar on every page,
  * and, when the page names itself, what is addressed to that page alone. An
  * id already held by someone else's page is not taken over; a page opening
- * its stream again (after a drop) replaces its own earlier one.
+ * its stream again (after a drop) replaces its own earlier one. A stream
+ * opened again after a deploy is how a page left open learns of it, so the
+ * build, when given, is said first.
  */
-export function serveUserEvents(res: Response, username: string, allowed: () => boolean, clientId?: string): void {
+export function serveUserEvents(res: Response, username: string, allowed: () => boolean, clientId?: string, build?: string): void {
   if (!admit(res, username)) return;
   const stream = openStream(res);
+  if (build) stream.write('0', { type: 'build', tag: build });
   // Asked again before every event, as a room's stream is (see serveEvents):
   // a person removed, or whose tokens were revoked, stops hearing at once.
   const write = (event: UserEvent | ClientEvent) => {

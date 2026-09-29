@@ -640,6 +640,7 @@ function openUserStream() {
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
     if (msg.type === 'call') { callChanged(msg.url, msg.people); return; }
     if (msg.type === 'lobby') { lobbyChanged(msg.url, msg.title, msg.waiting); return; }
+    if (msg.type === 'build') { buildSaid(msg.tag); return; }
     if (msg.type === 'call-roster' || msg.type === 'call-signal' || msg.type === 'call-gone') {
       if (window.dangoCall) window.dangoCall.event(msg);
       return;
@@ -665,6 +666,7 @@ window.addEventListener('pagehide', function () {
 });
 window.addEventListener('pageshow', function (e) {
   if (!e.persisted || !frame()) return;
+  arrivedAt = Date.now();
   if (!userStream) openUserStream();
   var list = msgList();
   if (list && !roomStream) {
@@ -710,7 +712,12 @@ function catchUp() {
 function noteActivity() {
   var away = !attended();
   lastActive = Date.now();
-  if (away && attended()) catchUp();
+  if (away && attended()) arrived();
+}
+function arrived() {
+  arrivedAt = Date.now();
+  catchUp();
+  reloadIfStale();
 }
 ['keydown', 'pointerdown', 'pointermove', 'touchstart', 'wheel', 'scroll'].forEach(function (type) {
   document.addEventListener(type, noteActivity, { capture: true, passive: true });
@@ -721,8 +728,70 @@ window.addEventListener('focus', noteActivity);
 document.addEventListener('visibilitychange', function () {
   if (document.visibilityState !== 'visible') return;
   lastActive = Date.now();
-  catchUp();
+  arrived();
 });
+
+// ---- keeping up with the workspace ----
+// A page runs the script it was loaded with, and moving between pages in
+// place never loads another, so a tab left open, and above all the app on a
+// phone's home screen, which has no reload button, would go on running the
+// script of a deploy long past. So a page compares the build it was stamped
+// with (see src/build.ts) against the one its event stream says when it
+// opens, which it does again after the workspace restarts for a deploy, and
+// against the one on each page it fetches to show in place.
+//
+// A page found behind loads itself again, but only as someone arrives at it
+// (the app brought back to the front, the tab returned to, the reader back
+// from being idle), when what is on screen is about to be looked at afresh
+// anyway, and loading a room marks it read no more than arriving already
+// does. Reloading a page nobody is at would mark its room read and cost its
+// owner the notifications, and reloading under someone reading would lose
+// their place. Nor is anything reloaded away: not a call, not a message
+// being sent or edited, not text typed or files attached and not yet sent,
+// not a dialog awaiting an answer. Until the moment comes, a move to
+// another page is made as a full load, which picks up the new build.
+var loadedBuild = dangoRoot.getAttribute('data-build') || '';
+var staleBuild = '';
+var arrivedAt = Date.now();
+try { if (sessionStorage.getItem('dango.reloadedFor') === loadedBuild) sessionStorage.removeItem('dango.reloadedFor'); } catch (e) {}
+// How long after arriving a stream that reopens still counts: on a phone the
+// stream is found dropped only on waking, and takes a few seconds to return.
+var ARRIVAL_MS = 15000;
+function buildSaid(tag) {
+  if (!tag || !loadedBuild || tag === loadedBuild) return;
+  staleBuild = tag;
+  if (Date.now() - arrivedAt < ARRIVAL_MS) reloadIfStale();
+}
+function reloadIfStale() {
+  if (!staleBuild || unsentWork()) return;
+  // Loaded once for this build already and still behind: the workspace is
+  // not serving what it says, and loading again would not end.
+  var tried = null;
+  try { tried = sessionStorage.getItem('dango.reloadedFor'); } catch (e) {}
+  if (tried === staleBuild) return;
+  try { sessionStorage.setItem('dango.reloadedFor', staleBuild); } catch (e) {}
+  location.reload();
+}
+function unsentWork() {
+  if (window.dangoCall && window.dangoCall.active()) return true;
+  if (document.querySelector('form[data-busy], form.msg-edit, dialog[open]')) return true;
+  var fields = document.querySelectorAll('textarea, input, select');
+  for (var i = 0; i < fields.length; i++) {
+    var el = fields[i];
+    if (el.type === 'file') { if (el.files && el.files.length) return true; }
+    else if (el.type === 'checkbox' || el.type === 'radio') { if (el.checked !== el.defaultChecked) return true; }
+    else if (el.tagName === 'SELECT') {
+      for (var j = 0; j < el.options.length; j++) if (el.options[j].selected !== el.options[j].defaultSelected) return true;
+    }
+    else if (el.type !== 'hidden' && el.value !== el.defaultValue) return true;
+  }
+  return false;
+}
+// The build a fetched page was stamped with, or '' if it says none.
+function buildOf(text) {
+  var m = /<html[^>]* data-build="([0-9a-f]+)"/.exec(text);
+  return m ? m[1] : '';
+}
 
 // ---- notifications ----
 // The service worker is registered on every signed-in page: it is what shows
@@ -1986,6 +2055,19 @@ function showPage(request, hash, opts) {
   }).then(function (page) {
     if (seq !== navSeq) return;
     document.documentElement.classList.remove('loading-page');
+    // A page from a newer build is loaded whole rather than swapped in, so
+    // that it runs with its own script and sheet; except during a call, which
+    // a load would end, and a form's answer, which may be one only a POST
+    // gives. Those are swapped in, and the page reloads when it can.
+    var build = buildOf(page.text);
+    if (build && loadedBuild && build !== loadedBuild) {
+      if (!opts.form && !(window.dangoCall && window.dangoCall.active())) {
+        var to = new URL(page.url);
+        location.assign(to.pathname + to.search + (hash || ''));
+        return;
+      }
+      staleBuild = build;
+    }
     if (!swapIn(page.text, hash)) {
       // A form answered with something that is not a page of the frame (an
       // error from before the frame, say) is shown as the browser would have

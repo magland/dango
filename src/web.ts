@@ -34,6 +34,7 @@ import { allowReport, parseReport, recordReport } from './calllog';
 import { MAX_IN_CALL, joinCall, leaveCall, participantUser, pruneCalls, relaySignals } from './calls';
 import { CallsConfig, TurnMode, loadConfig, updateConfig } from './config';
 import { openDm } from './dms';
+import { buildTag } from './build';
 import { RoomEvent, clientOwner, isClientId, publish, serveEvents, serveUserEvents } from './events';
 import {
   Guest,
@@ -1024,13 +1025,13 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     const guest = getViewer(req, root) ? null : admittedGuest(req, root);
     if (guest) {
       const id = guest.guest.id;
-      serveUserEvents(res, id, () => !getViewer(req, root) && admittedGuest(req, root)?.guest.id === id, isClientId(client) ? client : undefined);
+      serveUserEvents(res, id, () => !getViewer(req, root) && admittedGuest(req, root)?.guest.id === id, isClientId(client) ? client : undefined, buildTag());
       return;
     }
     const viewer = requireViewer(req, res);
     if (!viewer) return;
     const username = viewer.auth.username;
-    serveUserEvents(res, username, () => getViewer(req, root)?.auth.username === username, isClientId(client) ? client : undefined);
+    serveUserEvents(res, username, () => getViewer(req, root)?.auth.username === username, isClientId(client) ? client : undefined, buildTag());
   });
 
   // Every member, as names, for the composer to complete an @ against
