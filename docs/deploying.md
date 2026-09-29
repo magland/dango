@@ -43,6 +43,16 @@ The token is minted on your machine, not on the server. The deploy sets it as th
 
 Fly always terminates TLS in front of the app, so the deploy also sets `DANGO_TRUST_PROXY`, and the server records `network.trustProxy: true` in the workspace's `config.json` on the next start. That is what makes `Secure` cookies and the per-address limits read the real scheme and address. It is only seeded, so changing it by hand afterwards sticks.
 
+### A lost owner token
+
+Because the owner token cannot be recovered, losing it is fixed by giving the owner a new one. A browser that is still signed in, or another site admin, can mint one from the Admin page. When neither is left, the Fly login that owns the app is enough:
+
+```bash
+dango deploy fly reset-token my-workspace-name
+```
+
+This wakes the machine if it has stopped, mints a token on your machine, and runs `dango reset-token` on the machine over `fly ssh`, handing it only the token's hash. The token is printed once and checked against the workspace, and the server keeps running throughout. The owner's other tokens keep working; `--revoke-others` revokes them as well and ends the sessions started with them. `--user <name>` resets someone other than `owner`. This grants nothing new, since anyone who can `fly ssh` into the app can already read everything on its volume. On a machine of your own, `dango reset-token /path/to/workspace` does the same against the directory, run as the user the server runs as (in Docker, `docker exec -u node`).
+
 ### The published image, and deploying your own build
 
 By default the image deployed is `ghcr.io/magland/dango:<version>`, matching the version of the CLI you ran. Each release's image is built by `.github/workflows/image.yml` after the release is published to npm, so for some minutes after a release the newest CLI names an image that is not there yet; the deploy says so and stops before creating anything, and trying again shortly is the fix.

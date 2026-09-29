@@ -22,7 +22,8 @@ import {
   setHelper,
 } from '../../mochiforge/src/credentials';
 import { makeBackupCommands } from '../../mochiforge/src/cli/backup-cmd';
-import { deployDestroyCmd, deployFlyCmd, deployShowCmd } from '../../mochiforge/src/deploy-cli';
+import { deployDestroyCmd, deployFlyCmd, deployResetTokenCmd, deployShowCmd } from '../../mochiforge/src/deploy-cli';
+import { resetTokenCmd, resetTokenHelp } from '../../mochiforge/src/reset-token-cli';
 import { bootstrapVault } from '../../mochiforge/src/vault';
 import { DANGO_BACKUP } from './backup';
 import { moveTurnSecrets, seedTrustProxy } from './config';
@@ -606,6 +607,12 @@ function raw(
 
 commands.push(
   raw(
+    ['reset-token'],
+    'Give a user a new token by editing the workspace on disk, when the old one is lost',
+    resetTokenHelp(),
+    resetTokenCmd
+  ),
+  raw(
     ['deploy', 'fly'],
     'Put a workspace on Fly.io, or deploy an update to one',
     `Usage: dango deploy fly <app> [--region <r>] [--volume <gb>] [--vm-size <s>]
@@ -637,6 +644,25 @@ See also: dango deploy fly show <app>, dango deploy fly destroy <app>.
     'What Fly has for this app, and whether the workspace answers',
     '',
     (args, usage) => deployShowCmd(args, usage, DANGO_DEPLOY)
+  ),
+  raw(
+    ['deploy', 'fly', 'reset-token'],
+    "Give a user of the app's workspace a new token, when the owner's is lost",
+    `Usage: dango deploy fly reset-token <app> [--user <name>] [--revoke-others]
+
+For when every other way in is gone: the owner's token lost, with no signed-in
+browser or other site admin left to mint one from. Needs flyctl and the Fly
+login that owns the app, and nothing from the workspace itself.
+
+Mints a token here, and runs dango reset-token on the machine over fly ssh,
+handing it only the token's hash. The token is printed once, here, and checked
+against the workspace. The server keeps running throughout. --user resets
+someone other than owner; --revoke-others also revokes the tokens they already
+hold, and ends the sessions started with them.
+
+The deployed image must be recent enough to have dango reset-token; if it is
+not, dango deploy fly <app> updates it without needing a token.`,
+    (args, usage) => deployResetTokenCmd(args, usage, DANGO_DEPLOY)
   ),
   raw(
     ['deploy', 'fly', 'destroy'],

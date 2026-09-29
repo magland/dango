@@ -110,6 +110,7 @@ export const DANGO_DEPLOY: DeployProfile = {
   buildContext: stageBuildContext,
   volumeName: 'workspace',
   mountPath: '/workspace',
+  remoteCli: 'node /app/dist/dango/src/index.js',
   lfsBucket: false,
   // Counted in connections rather than requests, and set well above a forge's:
   // every open room holds one event stream for as long as it is open, so a
