@@ -2,7 +2,7 @@
 
 A self-hosted team chat, Slack-shaped: channels, threads, direct messages, reactions, file attachments, and search. One Node process, no database, nothing installed beside it but Node.
 
-dango is built from the same parts as [Mochi Forge](../mochiforge), its sibling in the next directory, and makes the same kinds of decisions: state is plain files in one directory, pages are server-rendered HTML with no client framework and no build step, every write is authorized by a token, and users are created by an administrator rather than registering themselves. Where mochi has a vault of repositories, dango has a *workspace* of channels.
+dango is built from the same parts as [Mochi Forge](https://github.com/magland/mochiforge), its sibling project (checked out in the next directory for development), and makes the same kinds of decisions: state is plain files in one directory, pages are server-rendered HTML with no client framework and no build step, every write is authorized by a token, and users are created by an administrator rather than registering themselves. Where mochi has a vault of repositories, dango has a *workspace* of channels.
 
 Unlike a mochi vault, a workspace has no anonymous surface beyond the one a member opens on purpose, a meeting's guest link (see below): reading otherwise requires signing in, a private channel is visible only to its members (the site admin included in the exclusion), and a direct conversation only to its participants. The exclusion is what the interface enforces, not a guarantee against a site admin who sets out to read: an admin can issue a sign-in token for any person, and a backup, which needs an admin's token, copies every room. The operator can of course read the files on disk. Both are true of everything here and worth knowing rather than pretending away; a site admin should be someone trusted as the operator would be.
 
@@ -95,6 +95,10 @@ Every message is a markdown file a person can read, grep, and edit with ordinary
 dango imports mochiforge's modules directly from the sibling checkout (`../mochiforge`): the identity store, sessions and CSRF, the escaping-by-type HTML templates, markdown rendering, themes, rate limiting, the CLI framework, the Fly deploy procedure, and the backup protocol and client are the forge's own code, not copies. A small `naming` module in mochiforge lets the shared code spell dango's names, so a workspace mints `dango_` tokens, sets a `dango_session` cookie, and keeps identity in `workspace.json`; the deploy and backup modules take a profile for what differs beyond names (the image, the volume, the backup's exclusions). With the defaults, mochiforge behaves exactly as before.
 
 The trade-off is stated rather than hidden: dango does not build without the sibling checkout present, and its CI and image workflows check out both. What it ships does not share that coupling: the compiler emits the mochiforge modules dango uses into its own `dist`, so the npm package and the container image are self-contained. Pinning to a published mochi package would remove the build-time coupling, at the cost of the two drifting; for two projects developed side by side, the checkout wins.
+
+## Posts
+
+- [Embracing the non-scalability](https://jeremy.magland.org/posts/2026-09-30-embracing-the-non-scalability/) - why a workspace (and a Mochi vault) is one directory and one process
 
 ## Development
 
