@@ -27,7 +27,7 @@ import { resetTokenCmd, resetTokenHelp } from '../../mochiforge/src/reset-token-
 import { bootstrapVault } from '../../mochiforge/src/vault';
 import { DANGO_BACKUP } from './backup';
 import { moveTurnSecrets, seedTrustProxy } from './config';
-import { DANGO_DEPLOY } from './deploy';
+import { DANGO_DEPLOY, packageVersion } from './deploy';
 
 // The dango command: serve a workspace, or talk to a served one the way `gh`
 // talks to GitHub. Built on mochiforge's CLI framework, so the option
@@ -675,6 +675,7 @@ not, dango deploy fly <app> updates it without needing a token.`,
 
 const cli: Cli = {
   name: 'dango',
+  version: () => packageVersion() ?? 'unknown',
   groups: [
     { name: 'channel', summary: 'Create, list, and delete channels' },
     { name: 'meeting', summary: 'Create meetings and get their guest links' },

@@ -33,7 +33,8 @@ export function packageRoot(): string | null {
   }
 }
 
-export function ownVersion(): string {
+/** This package's version, or null when its package.json cannot be found. */
+export function packageVersion(): string | null {
   const root = packageRoot();
   if (root) {
     try {
@@ -43,6 +44,12 @@ export function ownVersion(): string {
       /* fall through */
     }
   }
+  return null;
+}
+
+export function ownVersion(): string {
+  const version = packageVersion();
+  if (version) return version;
   die("Could not read this package's version, so there is no image tag to deploy. Pass --image <ref>.");
 }
 

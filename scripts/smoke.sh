@@ -133,6 +133,12 @@ ok "dango user add mints a token per user"
 "${DANGO[@]}" user add admin >/dev/null 2>&1 && fail "a routed name was accepted as a username"
 ok "a username that a route answers to is refused"
 
+# The argument parser is mochi's, so its messages must name this program.
+UNKNOWN="$("${DANGO[@]}" zzzzzz 2>&1 || true)"
+grep -q "Run 'dango --help'" <<< "$UNKNOWN" || fail "an unknown command does not point at dango's help"
+"${DANGO[@]}" --version | grep_all -q '^dango [0-9]' || fail "--version does not print dango's version"
+ok "unknown commands and --version name dango"
+
 "${DANGO[@]}" channel create general --topic "Everything" >/dev/null
 "${DANGO[@]}" channel create secret --private >/dev/null
 "${DANGO[@]}" channel list | grep_all -q '#general' || fail "channel list does not show #general"
