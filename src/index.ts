@@ -7,7 +7,7 @@ import { api, request } from '../../mochiforge/src/cli-api';
 import { normalizeApiPath } from '../../mochiforge/src/cli/api-cmd';
 import { CliError, EXIT_FAIL, EXIT_USAGE, exitCodeForStatus } from '../../mochiforge/src/cli/exit';
 import { readFileArg, readStdin } from '../../mochiforge/src/cli/input';
-import { JSON_OPTION, jsonMode, pickFields, pickObject, printJson, shortDate } from '../../mochiforge/src/cli/output';
+import { JSON_OPTION, jsonMode, pickFields, pickObject, printJson, printTable, shortDate } from '../../mochiforge/src/cli/output';
 import { Cli, Command, Invocation, dispatch } from '../../mochiforge/src/cli/parse';
 import { TARGET_OPTIONS, targetFrom } from '../../mochiforge/src/cli/target';
 import {
@@ -530,6 +530,8 @@ workspace join it. Guests wait to be let in unless --open is given.
   {
     path: ['user', 'token'],
     summary: 'Mint a new token for a user (site admin)',
+    description: `'user token list' and 'user token revoke' are the commands beside this one, so a
+user named list or revoke is given a token with 'dango user token -- list'.`,
     args: [{ name: 'username', required: true }],
     options: [...TARGET_OPTIONS, JSON_OPTION],
     async run(inv) {
@@ -544,6 +546,64 @@ workspace join it. Guests wait to be let in unless --open is given.
         console.log('As an invite link, which signs them in with one click (send it privately):');
         console.log(`  ${data.invite}`);
       }
+    },
+  },
+  {
+    path: ['user', 'token', 'list'],
+    summary: "List a user's tokens, by the id revocation takes (your own, or anyone's as site admin)",
+    description: `Never a token, and never its hash: only the hash is stored, and the id is what
+'dango user token revoke' takes. The token this command signed in with is marked.`,
+    args: [{ name: 'username', required: true }],
+    options: [...TARGET_OPTIONS, JSON_OPTION],
+    async run(inv) {
+      const target = await targetFrom(inv);
+      const data = await api(target, 'GET', `/api/users/${encodeURIComponent(inv.args[0])}/tokens`);
+      const tokens = (data.tokens ?? []) as Record<string, unknown>[];
+      const json = jsonMode(inv);
+      if (json.enabled) {
+        printJson({ tokens: pickFields(tokens, json.fields) });
+        return;
+      }
+      if (tokens.length === 0) {
+        console.log('No tokens');
+        return;
+      }
+      printTable(
+        tokens.map((t) => [
+          String(t.id),
+          shortDate(t.created as string) || '(unknown date)',
+          t.by ? `minted by ${t.by}` : '',
+          t.current ? '(this token)' : '',
+        ])
+      );
+    },
+  },
+  {
+    path: ['user', 'token', 'revoke'],
+    summary: 'Revoke one token, leaving the user and their other tokens (your own, or anyone\'s as site admin)',
+    description: `Whoever holds the token is signed out of every browser that signed in with it, and
+the CLI and scripts using it stop working. Revoking the token this command uses is
+allowed and reported rather than refused.`,
+    args: [
+      { name: 'username', required: true },
+      { name: 'token-id', required: true },
+    ],
+    options: [{ name: 'yes', type: 'boolean', summary: 'Required: confirm that this cannot be undone' }, ...TARGET_OPTIONS, JSON_OPTION],
+    async run(inv) {
+      if (!inv.bool('yes')) throw new CliError('Revoking a token cannot be undone. Pass --yes.', EXIT_USAGE);
+      const target = await targetFrom(inv);
+      const data = await api(
+        target,
+        'DELETE',
+        `/api/users/${encodeURIComponent(inv.args[0])}/tokens/${encodeURIComponent(inv.args[1])}`
+      );
+      const json = jsonMode(inv);
+      if (json.enabled) {
+        printJson(pickObject(data, json.fields));
+        return;
+      }
+      console.log(`Revoked ${data.revoked}; ${data.remaining} token${data.remaining === 1 ? '' : 's'} left.`);
+      if (data.wasThisToken) console.log('That was the token this command signed in with, so it will not work again.');
     },
   },
   {

@@ -6,6 +6,7 @@ import {
   AuthResult,
   addUserToken,
   loadVault,
+  revokeToken,
   setSiteAdmin,
   tokenId,
   userExists,
@@ -561,6 +562,57 @@ export function registerApi(app: Express, root: string, authLimiter: AuthLimiter
         invite: inviteLink(originOf(req), token),
         tokens: user.tokens.map((t) => tokenId(t)),
       });
+    })
+  );
+
+  // A person's own tokens are theirs to list and revoke; anyone else's take a
+  // site admin, as in mochi. Never the token or its hash: an id is what
+  // revocation takes. Revoking the token in use is allowed and reported, as
+  // mochi does, unlike the Account page, which does not offer the token that
+  // browser signed in with.
+  const mayManageTokens = (res: Response, auth: AuthResult, name: string): boolean => {
+    if (name !== auth.username && !isSiteAdmin(auth)) {
+      apiError(res, 403, "site admin only, for another person's tokens");
+      return false;
+    }
+    if (!userExists(root, name)) {
+      apiError(res, 404, `no user ${name}`);
+      return false;
+    }
+    return true;
+  };
+
+  app.get('/api/users/:name/tokens', (req, res) =>
+    withAuth(req, res, (auth) => {
+      if (!mayManageTokens(res, auth, req.params.name)) return;
+      const state = loadVault(root);
+      const user = state.status === 'ok' ? state.vault.users[req.params.name] : undefined;
+      if (!user) {
+        apiError(res, 500, 'the workspace could not be read');
+        return;
+      }
+      const current = req.params.name === auth.username ? tokenId(auth.token) : null;
+      res.json({
+        tokens: user.tokens.map((t) => ({
+          id: tokenId(t),
+          created: t.created ?? null,
+          by: t.by ?? null,
+          current: tokenId(t) === current,
+        })),
+      });
+    })
+  );
+
+  app.delete('/api/users/:name/tokens/:id', (req, res) =>
+    withAuth(req, res, (auth) => {
+      if (!mayManageTokens(res, auth, req.params.name)) return;
+      const own = req.params.name === auth.username && tokenId(auth.token) === req.params.id;
+      const { revoked, remaining } = revokeToken(root, req.params.name, req.params.id);
+      if (!revoked) {
+        apiError(res, 404, `no token ${req.params.id} for ${req.params.name}`);
+        return;
+      }
+      res.json({ revoked: req.params.id, remaining, wasThisToken: own });
     })
   );
 

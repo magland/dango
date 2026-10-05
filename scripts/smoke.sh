@@ -133,6 +133,24 @@ ok "dango user add mints a token per user"
 "${DANGO[@]}" user add admin >/dev/null 2>&1 && fail "a routed name was accepted as a username"
 ok "a username that a route answers to is refused"
 
+# Tokens: a person lists and revokes their own; another person's take a site admin.
+ALICE2="$("${DANGO[@]}" user token alice --json | jget token)"
+[ -n "$ALICE2" ] || fail "user token did not mint a second token"
+[ "$(DANGO_TOKEN="$ALICE" "${DANGO[@]}" user token list alice --json | jget tokens.length)" = "2" ] || fail "alice does not see her two tokens"
+ALICE2_ID="$(DANGO_TOKEN="$ALICE2" "${DANGO[@]}" user token list alice --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).tokens.find(t=>t.current).id))')"
+[ -n "$ALICE2_ID" ] || fail "the token in use is not marked current"
+ok "dango user token list shows a person their own tokens, the one in use marked"
+[ "$(status "$ALICE" GET /users/bob/tokens)" = "403" ] || fail "alice listed bob's tokens"
+[ "$(status "$ALICE" DELETE /users/bob/tokens/x)" = "403" ] || fail "alice was allowed to revoke bob's token"
+ok "another person's tokens take a site admin"
+set +e; DANGO_TOKEN="$ALICE" "${DANGO[@]}" user token revoke alice "$ALICE2_ID" >/dev/null 2>&1; code=$?; set -e
+[ "$code" = "2" ] || fail "revoke without --yes was not a usage error (exit $code)"
+DANGO_TOKEN="$ALICE" "${DANGO[@]}" user token revoke alice "$ALICE2_ID" --yes | grep_all -q "1 token left" || fail "revoke did not report what is left"
+[ "$(status "$ALICE2" GET /whoami)" = "401" ] || fail "a revoked token still signs in"
+[ "$(status "$ALICE" GET /whoami)" = "200" ] || fail "revoking one token touched the other"
+[ "$(status "$ALICE" DELETE "/users/alice/tokens/$ALICE2_ID")" = "404" ] || fail "revoking a gone token was not a 404"
+ok "dango user token revoke ends one token and leaves the rest"
+
 # The argument parser is mochi's, so its messages must name this program.
 UNKNOWN="$("${DANGO[@]}" zzzzzz 2>&1 || true)"
 grep -q "Run 'dango --help'" <<< "$UNKNOWN" || fail "an unknown command does not point at dango's help"
