@@ -524,6 +524,7 @@ html.loading-page { cursor: progress; }
 .call-status { color: var(--call-muted); white-space: nowrap; }
 .call-rec { color: #ff6b61; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .call-rec[hidden] { display: none; }
+.call-rec.paused { color: var(--call-muted); }
 .call-record { flex-basis: 100%; font-size: var(--t-xs); color: var(--call-muted); }
 .call-size { margin-left: auto; }
 .call-notice { grid-area: notice; display: flex; align-items: flex-start; gap: var(--s2); padding: 6px 10px; border-radius: var(--radius); background: #4a3712; color: #fbe7b5; }

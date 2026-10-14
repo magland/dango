@@ -679,6 +679,9 @@ ok('turning the microphone on is shown to the others');
 await c1.eval("document.querySelector('.call-dock [data-call-act=\"cam\"]').click(); true");
 await c1.eval("window.showDirectoryPicker = () => navigator.storage.getDirectory(); document.querySelector('.call-dock [data-call-act=\"settings\"]').click(); document.querySelector('.call-dock [data-call-act=\"record\"]').click(); true", true);
 await waitFor('alice’s dock to say it is recording', async () => c1.eval("!document.querySelector('.call-dock .call-rec').hidden"));
+const recMark = (page) => page.eval("(() => { const r = document.querySelector('.call-dock .call-rec'); return r.hidden ? '' : r.textContent; })()");
+await waitFor('bob to be told alice is recording', async () => (await recMark(b1)) === '● Rec' && (await b1.eval("document.querySelector('.call-notice span').textContent")) === 'alice is recording this call.');
+ok('recording a call tells the others, with a notice and a mark in the bar');
 await c1.eval("document.querySelector('.call-dock [data-call-act=\"screen\"]').click(); true", true);
 const screenTile = (page, sel) => page.eval(`(() => { const t = document.querySelector('.call-dock .call-tile[data-peer${sel}]'); return t ? { w: t.querySelector('video').videoWidth, label: t.querySelector('.call-label').textContent } : null; })()`);
 await waitFor('alice to see her own screen in a tile of its own', async () => (await screenTile(c1, '="self:screen"'))?.w > 0, 10000);
@@ -691,8 +694,15 @@ ok('sharing a screen shows it in its own tile, beside the camera');
 await c1.eval("document.querySelector('.call-dock [data-call-act=\"screen\"]').click(); true");
 await waitFor('bob to see the screen’s tile go', async () => (await screenTile(b1, '$=":screen"')) === null);
 ok('stopping the share takes its tile away');
+await sleep(2000);
+await c1.eval("document.querySelector('.call-dock [data-call-act=\"rec-pause\"]').click(); true");
+await waitFor('bob to see the recording paused', async () => (await recMark(b1)) === '❚❚ Rec');
 await sleep(1500);
+await c1.eval("document.querySelector('.call-dock [data-call-act=\"rec-pause\"]').click(); true");
+await waitFor('bob to see the recording resumed', async () => (await recMark(b1)) === '● Rec');
+await sleep(2000);
 await c1.eval("document.querySelector('.call-dock [data-call-act=\"record\"]').click(); true");
+await waitFor('bob to be told the recording stopped', async () => (await recMark(b1)) === '' && (await b1.eval("document.querySelector('.call-notice span').textContent")) === 'alice stopped recording this call.');
 await waitFor('the recording to be saved', async () => (await c1.eval("document.querySelector('.call-notice span').textContent")).includes('The recording is saved'));
 const recording = await c1.eval(`(async () => {
   const root = await navigator.storage.getDirectory();
@@ -707,7 +717,10 @@ const recording = await c1.eval(`(async () => {
   const { manifest, sizes } = recording;
   const whose = (seg) => manifest.participants[seg.participant];
   const kinds = manifest.segments.map((seg) => `${whose(seg).name}/${seg.kind}`).sort().join(' ');
-  if (kinds !== 'alice/audio alice/camera alice/screen bob/audio bob/camera') fail(`the recording has the wrong segments: ${kinds}`);
+  if (kinds !== 'alice/audio alice/audio alice/camera alice/camera alice/screen bob/audio bob/audio bob/camera bob/camera') fail(`the recording has the wrong segments: ${kinds}`);
+  if (manifest.events.map((e) => e.type).join() !== 'start,pause,resume,stop') fail(`the recording's events are wrong: ${JSON.stringify(manifest.events)}`);
+  const [pause, resume] = manifest.events.slice(1, 3);
+  if (manifest.segments.some((seg) => seg.end > pause.t + 500 && seg.start < resume.t)) fail(`a segment goes on through the pause: ${JSON.stringify(manifest)}`);
   if (!manifest.endedAt || manifest.segments.some((seg) => seg.end === null || seg.end <= seg.start)) fail(`the recording's manifest is not finished: ${JSON.stringify(manifest)}`);
   const screen = manifest.segments.find((seg) => seg.kind === 'screen');
   const camera = manifest.segments.find((seg) => seg.kind === 'camera' && whose(seg).self);
@@ -715,7 +728,8 @@ const recording = await c1.eval(`(async () => {
   if (Object.values(sizes).some((n) => n < 1000)) fail(`a recorded file is empty: ${JSON.stringify(sizes)}`);
 }
 await c1.eval("document.querySelector('.call-dock [data-call-act=\"settings\"]').click(); document.querySelector('.call-dock [data-call-act=\"dismiss\"]').click(); document.querySelector('.call-dock [data-call-act=\"cam\"]').click(); true");
-ok('recording a call saves each person’s audio, camera, and screen to files of their own, with a manifest of when');
+ok('recording a call saves each person’s audio, camera, and screen to files of their own, with a manifest of when, and a pause is a gap between segments');
+await b1.eval("document.querySelector('.call-dock [data-call-act=\"dismiss\"]').click(); true");
 
 await c1.eval("document.querySelector('.side-rooms a[href=\"/c/random\"]').click(); true");
 await waitFor('alice to be in #random with the call floating', async () => (await c1.eval("location.pathname + '|' + !!document.querySelector('body > .call-dock.mini')")) === '/c/random|true');

@@ -503,6 +503,11 @@ function controlButton(act, label) {
 // when it is closed, so a page closed mid-recording loses the segments still
 // open. A segment is therefore also closed after SEGMENT_MAX_MS, its
 // successor started a moment before, which bounds what can be lost.
+//
+// Pausing ends every segment and resuming starts new ones, so a pause is a
+// gap in the timeline rather than something hidden inside a file; the
+// manifest's events say when each began and ended. The others in the call
+// are told whenever a recording starts, pauses, resumes, or stops.
 const canRecord = typeof window.showDirectoryPicker === 'function' && typeof MediaRecorder !== 'undefined';
 const SEGMENT_MAX_MS = 5 * 60 * 1000;
 
@@ -533,6 +538,8 @@ class Recorder {
     this.segments = [];
     this.participants = {};
     this.seq = 0;
+    this.paused = false;
+    this.events = [{ t: 0, type: 'start' }];
     this.error = null;
     this.manifestChain = Promise.resolve();
     this.timer = setInterval(() => this.tick(), 1000);
@@ -543,7 +550,7 @@ class Recorder {
   // The tracks there are now, each { who, kind, track }: a segment starts for
   // each one not yet recorded, and ends for each recorded one gone.
   sync(sources) {
-    if (this.endedAt) return;
+    if (this.endedAt || this.paused) return;
     const want = new Map();
     for (const src of sources) want.set(src.who.id + '/' + src.kind + '/' + src.track.id, src);
     for (const [key, entry] of Array.from(this.active)) {
@@ -561,6 +568,21 @@ class Recorder {
         this.finish(entry);
       }
     }
+  }
+  pause() {
+    if (this.paused || this.endedAt) return;
+    this.paused = true;
+    for (const entry of this.active.values()) this.finish(entry);
+    this.active.clear();
+    this.events.push({ t: this.now(), type: 'pause' });
+    this.saveManifest();
+  }
+  // The next sync starts the segments again.
+  resume() {
+    if (!this.paused || this.endedAt) return;
+    this.paused = false;
+    this.events.push({ t: this.now(), type: 'resume' });
+    this.saveManifest();
   }
   begin(src) {
     const name = String(++this.seq).padStart(3, '0') + '-' + fileSafe(src.who.name) + '-' + src.kind + '.webm';
@@ -603,7 +625,8 @@ class Recorder {
       // Times are milliseconds from startedAt; a segment still being
       // recorded has no end yet.
       participants: this.participants,
-      segments: this.segments.filter((s) => s.start !== null)
+      segments: this.segments.filter((s) => s.start !== null),
+      events: this.events
     };
   }
   saveManifest() {
@@ -627,6 +650,7 @@ class Recorder {
     }));
     await Promise.all(stopped);
     await Promise.all(entries.map((e) => e.writing));
+    this.events.push({ t: this.now(), type: 'stop' });
     this.endedAt = new Date().toISOString();
     this.saveManifest();
     await this.manifestChain;
@@ -1035,7 +1059,7 @@ class Call {
     for (const key of Object.keys(this.settingsMeta)) {
       settings.push({ key: key, value: this.settings[key], rev: this.settingsMeta[key].rev, by: this.settingsMeta[key].by });
     }
-    conn.peer.send(JSON.stringify({ t: 'hello', audioMuted: this.audioMuted, videoMuted: this.videoMuted, screen: !!this.screenStream, settings: settings }));
+    conn.peer.send(JSON.stringify({ t: 'hello', audioMuted: this.audioMuted, videoMuted: this.videoMuted, screen: !!this.screenStream, rec: this.recState(), settings: settings }));
   }
 
   handleControl(id, conn, raw) {
@@ -1048,6 +1072,7 @@ class Call {
       conn.videoMuted = msg.videoMuted !== false;
       conn.screen = msg.screen === true;
       if (Array.isArray(msg.settings)) for (const e of msg.settings) this.applyRemoteSetting(e);
+      this.remoteRecording(id, conn, msg.rec);
       this.render();
     } else if (msg.t === 'set') {
       this.applyRemoteSetting(msg);
@@ -1056,6 +1081,9 @@ class Call {
       conn.audioMuted = msg.audio;
       conn.videoMuted = msg.video;
       conn.screen = msg.screen === true;
+      this.render();
+    } else if (msg.t === 'rec') {
+      this.remoteRecording(id, conn, msg.state);
       this.render();
     } else if (msg.t === 'bye') {
       conn.quiet = true;
@@ -1256,6 +1284,7 @@ class Call {
       this.recorder = null;
       this.render();
       r.stop().then(() => { if (!r.error) this.setNotice('The recording is saved, in the folder ' + r.dir.name + '.'); });
+      this.broadcastRec();
       return;
     }
     if (this.phase !== 'in' || this.recordingStarting) return;
@@ -1264,11 +1293,42 @@ class Call {
       this.recordingStarting = false;
       if (this.phase !== 'in') { r.stop(); return; }
       this.recorder = r;
+      this.broadcastRec();
       this.render();
     }, (e) => {
       this.recordingStarting = false;
       if (!e || e.name !== 'AbortError') this.setNotice('The recording could not start: ' + (e && e.message ? e.message : e));
     });
+  }
+
+  togglePause() {
+    const r = this.recorder;
+    if (!r) return;
+    if (r.paused) r.resume(); else r.pause();
+    this.broadcastRec();
+    this.render();
+  }
+
+  // What this page tells the others: 'recording', 'paused', or null.
+  recState() {
+    return this.recorder ? (this.recorder.paused ? 'paused' : 'recording') : null;
+  }
+
+  broadcastRec() {
+    this.broadcast({ t: 'rec', state: this.recState() });
+  }
+
+  // Another page's recording, from its hello or a change: a notice when it
+  // starts or stops, and the mark in the bar (renderRecording).
+  remoteRecording(id, conn, state) {
+    if (state !== 'recording' && state !== 'paused') state = null;
+    const was = conn.rec || null;
+    conn.rec = state;
+    if (!was === !state) return;
+    const r = this.known.get(id);
+    const who = r ? r.name || r.user : 'Someone';
+    if (state) this.setNotice(who + (state === 'paused' ? ' has a recording of this call, paused.' : ' is recording this call.'));
+    else this.setNotice(who + ' stopped recording this call.');
   }
 
   // Every track there is to record: this page's own (a device it does not
@@ -1296,21 +1356,41 @@ class Call {
     return out;
   }
 
+  // The mark in the bar: this page's own recording with its time, else
+  // whoever else is recording (a paused recording is marked too, greyed).
   renderRecording() {
     const el = this.el;
     if (!el) return;
     const rec = el.querySelector('.call-rec');
-    rec.hidden = !this.recorder;
+    let text = '', title = '', paused = false;
     if (this.recorder) {
       const t = Math.floor(this.recorder.now() / 1000);
-      const text = '● ' + Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0');
-      if (rec.textContent !== text) rec.textContent = text;
-      rec.title = 'Recording to the folder ' + this.recorder.dir.name + ' on this computer';
+      paused = this.recorder.paused;
+      text = (paused ? '❚❚ ' : '● ') + Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0');
+      title = (paused ? 'Recording paused; it goes to the folder ' : 'Recording to the folder ') + this.recorder.dir.name + ' on this computer';
+    } else {
+      const on = [], held = [];
+      for (const [id, c] of this.conns) {
+        if (!c.connected || !c.rec) continue;
+        const r = this.known.get(id);
+        (c.rec === 'recording' ? on : held).push(r ? r.name || r.user : 'someone');
+      }
+      if (on.length) { text = '● Rec'; title = 'Recorded by ' + on.join(', '); }
+      else if (held.length) { text = '❚❚ Rec'; paused = true; title = 'Recording paused by ' + held.join(', '); }
     }
+    rec.hidden = !text;
+    if (rec.textContent !== text) rec.textContent = text;
+    rec.title = title;
+    rec.classList.toggle('paused', paused);
     const b = el.querySelector('[data-call-act="record"]');
     if (b) {
       b.textContent = this.recorder ? 'Stop recording' : 'Record to a folder…';
       b.disabled = this.phase !== 'in' || !!this.recordingStarting;
+    }
+    const p = el.querySelector('[data-call-act="rec-pause"]');
+    if (p) {
+      p.hidden = !this.recorder;
+      p.textContent = this.recorder && this.recorder.paused ? 'Resume' : 'Pause';
     }
   }
 
@@ -1330,7 +1410,7 @@ class Call {
       (canPickSpeaker ? '<label>Speaker <select data-call-device="speaker"></select></label>' : '') +
       '<label>Video quality <select data-call-quality>' + QUALITIES.map((q) => '<option value="' + q + '">' + QUALITY_LABELS[q] + '</option>').join('') + '</select></label>' +
       '<p class="muted">The quality is the whole call\\'s: changing it changes what everyone sends. Lower suits slower connections, since each person sends their video to each other one.</p>' +
-      (canRecord ? '<div class="call-record"><button type="button" class="call-copy" data-call-act="record"></button> <span class="muted">Saves each person’s audio, camera, and screen as separate files in a folder on this computer, with a manifest of whose each file is and when.</span></div>' : '') +
+      (canRecord ? '<div class="call-record"><button type="button" class="call-copy" data-call-act="record"></button> <button type="button" class="call-copy" data-call-act="rec-pause" hidden></button> <span class="muted">Saves each person’s audio, camera, and screen as separate files in a folder on this computer, with a manifest of whose each file is and when. Everyone in the call is told.</span></div>' : '') +
       '<div class="call-diag"><strong>Connections</strong><ul data-call-diag></ul>' +
       '<button type="button" class="call-copy" data-call-act="copy">Copy the details</button> <span class="muted">to send to whoever looks after the workspace, if a call will not connect.</span></div>' +
       '</div>' +
@@ -1369,6 +1449,7 @@ class Call {
       else if (act === 'dismiss') this.setNotice('');
       else if (act === 'copy') { if (this.diagText) copyText(b, this.diagText); }
       else if (act === 'record') this.toggleRecording();
+      else if (act === 'rec-pause') this.togglePause();
       else if (act === 'leave') this.leave();
       return;
     }
