@@ -29,6 +29,7 @@ import { DANGO_BACKUP } from './backup';
 import { moveTurnSecrets, seedTrustProxy } from './config';
 import { DANGO_DEPLOY, packageVersion } from './deploy';
 import { renderRecording } from './recording';
+import { transcribeRecording } from './transcribe';
 
 // The dango command: serve a workspace, or talk to a served one the way `gh`
 // talks to GitHub. Built on mochiforge's CLI framework, so the option
@@ -759,6 +760,42 @@ Needs ffmpeg. --no-video makes only the audio, which is much faster.`,
       const mins = Math.floor(plan.duration / 60000);
       const secs = Math.round((plan.duration % 60000) / 1000);
       console.log(`Done in ${Math.round((Date.now() - started) / 1000)} s: ${plan.people.length} people, ${mins}:${String(secs).padStart(2, '0')} recorded, in ${out}`);
+    },
+  },
+  {
+    path: ['recording', 'transcribe'],
+    summary: 'Transcribe a recorded call with Deepgram, each person apart',
+    description: `Sends each person's recorded audio to Deepgram (the key in DEEPGRAM_API_KEY)
+and writes, under <dir>/rebuilt (or --out), beside what render writes:
+
+  transcript.md    to read: each turn with the speaker's name and the time
+  transcript.vtt   WebVTT captions for call.mp4, the speaker in a voice tag
+  transcript.json  every word and utterance, with who and when
+
+Each person was recorded apart, so the speakers are known rather than
+guessed. Times are in the rebuilt timeline, with the pauses taken out, the
+same as call.mp4 and the aligned audio. What Deepgram returns is kept under
+.deepgram/, so running this again costs nothing. Does not need ffmpeg, and
+does not need render to have been run.`,
+    args: [{ name: 'dir', required: true }],
+    options: [
+      { name: 'out', type: 'string', value: '<dir>', summary: 'Where to write (default: <dir>/rebuilt)' },
+      { name: 'model', type: 'string', value: '<m>', summary: "Deepgram's model (default: nova-3)" },
+      { name: 'language', type: 'string', value: '<code>', summary: 'Language spoken, e.g. en, de, or multi (default: en)' },
+    ],
+    async run(inv) {
+      const key = process.env.DEEPGRAM_API_KEY?.trim();
+      if (!key) throw new CliError('Set DEEPGRAM_API_KEY to a Deepgram API key (from console.deepgram.com) and try again.', EXIT_USAGE);
+      const dir = inv.args[0];
+      const t = await transcribeRecording(dir, {
+        key,
+        out: inv.str('out') ?? undefined,
+        model: inv.str('model') ?? undefined,
+        language: inv.str('language') ?? undefined,
+        log: (l) => console.log(l),
+      });
+      const out = path.resolve(inv.str('out') ?? path.join(dir, 'rebuilt'));
+      console.log(`Done: ${t.utterances.length} utterances, ${t.words.length} words, in ${path.join(out, 'transcript.md')}`);
     },
   }
 );
