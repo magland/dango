@@ -215,8 +215,9 @@ export async function launchChrome(base) {
         await waitFor(`${p} to load`, () => page.eval("document.readyState === 'complete'"));
         await sleep(300); // the streams open on DOMContentLoaded
       },
-      async eval(expr) {
-        const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true }, sessionId);
+      /** gesture: run as if the person had just clicked, for what the browser allows only then (sharing a screen). */
+      async eval(expr, gesture = false) {
+        const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true, userGesture: gesture }, sessionId);
         if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description ?? 'evaluation failed');
         return r.result.value;
       },

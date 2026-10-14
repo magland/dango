@@ -10,11 +10,12 @@ import { createHash } from 'crypto';
 // Nostr relays to the workspace itself:
 //
 //  - Every page in a call connects to every other: a full mesh, carrying one
-//    audio and one video track each way and a small data channel for mute
-//    notices and the call's shared quality setting. The page with the smaller
-//    id makes the single offer, so the two sides never both offer at once,
-//    and nothing is renegotiated afterwards: a changed microphone or a screen
-//    share replaces a track in place.
+//    audio and two video tracks each way (the camera, and a screen when one
+//    is shared) and a small data channel for mute notices and the call's
+//    shared quality setting. The page with the smaller id makes the single
+//    offer, so the two sides never both offer at once, and nothing is
+//    renegotiated afterwards: a changed microphone replaces a track in place,
+//    and a screen share fills the screen's slot, empty until then.
 //  - Who is in the call is the workspace's to say. Its roster arrives on the
 //    page's own event stream, and replaces commonroom's presence
 //    announcements; offers, answers, and ICE candidates go up as requests
@@ -94,8 +95,19 @@ const DEVICE_KEYS = { audio: 'dango.call.mic', video: 'dango.call.camera', speak
 // ---- one connection ----
 // Ported from commonroom's peer.ts: an RTCPeerConnection to one other page,
 // with the local tracks and one data channel, "control".
+//
+// Its tracks fill three slots, always in this order: audio, video (the
+// camera), and screen. The answering page adds its own in the same order
+// before it reads the offer, and the browser pairs each with the offer's
+// next unclaimed track of its kind, so on both sides the second video track
+// is the screen. The screen's slot sends nothing (a null track) until a
+// screen is shared. All three go in one stream, so a page from before the
+// screen had its own slot, which shows a connection's stream as it comes,
+// shows the first video track in it, the camera.
+const SLOTS = ['audio', 'video', 'screen'];
+
 class Peer {
-  constructor(initiator, localStream, iceServers) {
+  constructor(initiator, tracks, iceServers) {
     this.initiator = initiator;
     this.pc = new RTCPeerConnection({ iceServers: iceServers });
     this.channel = null;
@@ -109,8 +121,19 @@ class Peer {
     this.iceErrors = [];
     // Both sides add their tracks up front: the initiator's one offer then
     // covers all media, and the answerer's tracks ride back in the answer.
-    for (const track of localStream.getTracks()) this.pc.addTrack(track, localStream);
-    this.pc.ontrack = (e) => { if (e.streams[0] && this.handlers.track) this.handlers.track(e.streams[0]); };
+    // addTrack needs a track, so an empty screen slot starts with a stand-in
+    // that is taken out at once.
+    const stream = new MediaStream();
+    this.senders = {};
+    for (const slot of SLOTS) {
+      const track = tracks[slot] || blackVideoTrack();
+      this.senders[slot] = this.pc.addTrack(track, stream);
+      if (!tracks[slot]) { this.senders[slot].replaceTrack(null).catch(() => {}); track.stop(); }
+    }
+    this.pc.ontrack = (e) => {
+      const slot = e.track.kind === 'audio' ? 'audio' : this.videoTransceivers().indexOf(e.transceiver) === 1 ? 'screen' : 'video';
+      if (this.handlers.track) this.handlers.track(slot, e.track);
+    };
     this.pc.onicecandidate = (e) => {
       if (e.candidate && e.candidate.type) this.gathered.add(e.candidate.type + '/' + (e.candidate.protocol || 'udp'));
       if (e.candidate && this.handlers.signal) this.handlers.signal({ type: 'candidate', candidate: e.candidate.toJSON() });
@@ -188,19 +211,20 @@ class Peer {
     if (this.channel && this.channel.readyState === 'open') this.channel.send(data);
     else if (!this.closed) this.outbox.push(data);
   }
-  // Swap an outgoing track in place (camera and screen, a new device). A
-  // same-kind replaceTrack does not renegotiate, so no signaling is needed.
-  async replaceTrack(kind, track) {
-    if (this.closed) return false;
-    const sender = this.pc.getSenders().find((s) => s.track && s.track.kind === kind);
-    if (!sender) return false;
-    try { await sender.replaceTrack(track); return true; } catch (e) { return false; }
+  videoTransceivers() {
+    return this.pc.getTransceivers().filter((t) => t.receiver.track.kind === 'video');
   }
-  // Cap (or uncap) the outgoing video; an undefined field clears that cap.
-  async setVideoParameters(opts) {
+  // Swap an outgoing track in place (a new device, a screen shared or
+  // stopped). A same-kind replaceTrack does not renegotiate, so no signaling
+  // is needed.
+  async replaceTrack(slot, track) {
     if (this.closed) return false;
-    const sender = this.pc.getSenders().find((s) => s.track && s.track.kind === 'video');
-    if (!sender) return false;
+    try { await this.senders[slot].replaceTrack(track); return true; } catch (e) { return false; }
+  }
+  // Cap (or uncap) one outgoing video; an undefined field clears that cap.
+  async setVideoParameters(slot, opts) {
+    if (this.closed) return false;
+    const sender = this.senders[slot];
     const params = sender.getParameters();
     const enc = params.encodings && params.encodings[0];
     if (!enc) return false;
@@ -295,9 +319,19 @@ async function readStats(pc) {
       if (l.candidateType === 'relay' && l.url) out.url = l.url;
     }
   }
+  // With a screen shared there are two videos each way: the counts are
+  // summed, and the size and rate are the busier one's.
   report.forEach((s) => {
-    if (s.type === 'inbound-rtp' && s.kind === 'video') out.inVideo = { w: s.frameWidth || 0, h: s.frameHeight || 0, fps: s.framesPerSecond || 0, lost: s.packetsLost || 0, got: s.packetsReceived || 0, bytes: s.bytesReceived || 0 };
-    if (s.type === 'outbound-rtp' && s.kind === 'video') out.outVideo = { w: s.frameWidth || 0, h: s.frameHeight || 0, fps: s.framesPerSecond || 0, limit: s.qualityLimitationReason || 'none', bytes: s.bytesSent || 0 };
+    if (s.type === 'inbound-rtp' && s.kind === 'video') {
+      const v = { w: s.frameWidth || 0, h: s.frameHeight || 0, fps: s.framesPerSecond || 0, lost: s.packetsLost || 0, got: s.packetsReceived || 0, bytes: s.bytesReceived || 0 };
+      const p = out.inVideo;
+      out.inVideo = p ? Object.assign(v.bytes > p.bytes ? v : p, { lost: p.lost + v.lost, got: p.got + v.got, bytes: p.bytes + v.bytes }) : v;
+    }
+    if (s.type === 'outbound-rtp' && s.kind === 'video') {
+      const v = { w: s.frameWidth || 0, h: s.frameHeight || 0, fps: s.framesPerSecond || 0, limit: s.qualityLimitationReason || 'none', bytes: s.bytesSent || 0 };
+      const p = out.outVideo;
+      out.outVideo = p ? Object.assign(v.bytes > p.bytes ? v : p, { bytes: p.bytes + v.bytes }) : v;
+    }
   });
   return out;
 }
@@ -411,7 +445,7 @@ function mediaErrorMessage(what, err) {
 }
 
 // A black frame, sent in place of a camera the page does not have, so that
-// every connection carries one audio and one video track.
+// every connection carries the same tracks.
 function blackVideoTrack() {
   const canvas = document.createElement('canvas');
   canvas.width = 320;
@@ -445,6 +479,10 @@ const ICONS = {
 // would flicker.
 function setHtml(el, html) {
   if (el.dangoHtml !== html) { el.innerHTML = html; el.dangoHtml = html; }
+}
+
+function isScreenTile(id) {
+  return /:screen$/.test(id);
 }
 
 function controlButton(act, label) {
@@ -657,7 +695,8 @@ class Call {
         this.levels.unwatch(id);
       }
     }
-    if (this.spotlight && this.spotlight !== 'self' && !this.roster.has(this.spotlight) && !this.conns.has(this.spotlight)) this.spotlight = null;
+    const spot = this.spotlight ? this.spotlight.split(':')[0] : null;
+    if (spot && spot !== 'self' && !this.roster.has(spot) && !this.conns.has(spot)) this.spotlight = null;
   }
 
   retryStalled() {
@@ -681,21 +720,20 @@ class Call {
     this.createPeer(id, clientId < id);
   }
 
-  outgoingStream() {
-    const s = new MediaStream();
-    const audio = this.localStream.getAudioTracks()[0];
-    if (audio) s.addTrack(audio);
-    const video = (this.screenStream && this.screenStream.getVideoTracks()[0]) || this.localStream.getVideoTracks()[0];
-    if (video) s.addTrack(video);
-    return s;
+  outgoingTracks() {
+    return {
+      audio: this.localStream.getAudioTracks()[0] || null,
+      video: this.localStream.getVideoTracks()[0] || null,
+      screen: this.screenStream ? this.screenStream.getVideoTracks()[0] : null
+    };
   }
 
   createPeer(id, initiator) {
-    const peer = new Peer(initiator, this.outgoingStream(), this.iceServers());
+    const peer = new Peer(initiator, this.outgoingTracks(), this.iceServers());
     const attempt = (this.attempts.get(id) || 0) + 1;
     this.attempts.set(id, attempt);
     const conn = {
-      peer: peer, createdAt: Date.now(), connected: false, stream: null,
+      peer: peer, createdAt: Date.now(), connected: false, stream: null, screenStream: null, tracks: {},
       attempt: attempt, connectedAt: 0, quiet: false, reported: {}, path: null, url: '',
       audioMuted: true, videoMuted: true, screen: false,
       chain: Promise.resolve(), outbox: new Outbox(this, id)
@@ -703,9 +741,14 @@ class Call {
     this.conns.set(id, conn);
     peer.setHandlers({
       signal: (sig) => conn.outbox.push(sig),
-      track: (stream) => {
-        conn.stream = stream;
-        this.levels.watch(id, stream);
+      // The camera's tile plays the audio with it; the screen's is silent.
+      track: (slot, track) => {
+        conn.tracks[slot] = track;
+        if (slot === 'screen') conn.screenStream = new MediaStream([track]);
+        else {
+          conn.stream = new MediaStream([conn.tracks.audio, conn.tracks.video].filter(Boolean));
+          this.levels.watch(id, conn.stream);
+        }
         this.render();
       },
       connect: () => {
@@ -846,7 +889,7 @@ class Call {
     for (const key of Object.keys(this.settingsMeta)) {
       settings.push({ key: key, value: this.settings[key], rev: this.settingsMeta[key].rev, by: this.settingsMeta[key].by });
     }
-    conn.peer.send(JSON.stringify({ t: 'hello', audioMuted: this.audioMuted, videoMuted: this.effectiveVideoMuted(), screen: !!this.screenStream, settings: settings }));
+    conn.peer.send(JSON.stringify({ t: 'hello', audioMuted: this.audioMuted, videoMuted: this.videoMuted, screen: !!this.screenStream, settings: settings }));
   }
 
   handleControl(id, conn, raw) {
@@ -904,16 +947,16 @@ class Call {
     this.render();
   }
 
-  videoParams() {
+  videoParams(slot) {
     const p = QUALITY_PARAMS[this.settings.videoQuality];
-    const sharing = this.screenStream !== null;
-    // Scaled-down text on a shared screen cannot be read: while sharing, the
-    // full resolution goes, and the bitrate and frame rate do the limiting.
+    const screen = slot === 'screen';
+    // Scaled-down text on a shared screen cannot be read: the screen goes at
+    // full resolution, and the bitrate and frame rate do the limiting.
     return {
       maxBitrate: p.maxBitrate,
-      scaleResolutionDownBy: sharing ? undefined : p.scaleResolutionDownBy,
+      scaleResolutionDownBy: screen ? undefined : p.scaleResolutionDownBy,
       maxFramerate: p.maxFramerate,
-      degradationPreference: sharing ? 'maintain-resolution' : undefined
+      degradationPreference: screen ? 'maintain-resolution' : undefined
     };
   }
 
@@ -922,14 +965,16 @@ class Call {
   }
 
   applyVideoParamsTo(conn) {
-    conn.peer.setVideoParameters(this.videoParams()).then((ok) => {
-      // Right at 'connected' the encoding may not be negotiated yet.
-      if (!ok) setTimeout(() => conn.peer.setVideoParameters(this.videoParams()), 1500);
-    });
+    for (const slot of ['video', 'screen']) {
+      conn.peer.setVideoParameters(slot, this.videoParams(slot)).then((ok) => {
+        // Right at 'connected' the encoding may not be negotiated yet.
+        if (!ok) setTimeout(() => conn.peer.setVideoParameters(slot, this.videoParams(slot)), 1500);
+      });
+    }
   }
 
   // ---- local media ----
-  // Every page carries exactly one audio and one video track, so the offer
+  // Every page carries one audio and one camera track, so the offer
   // and answer have the same shape for everyone. A missing or refused device
   // is stood in for by silence or a black frame, and turning it on tries the
   // device again and swaps the real track in on every connection.
@@ -955,12 +1000,8 @@ class Call {
     return this.placeholderCtx.createMediaStreamDestination().stream.getAudioTracks()[0];
   }
 
-  effectiveVideoMuted() {
-    return this.videoMuted && !this.screenStream;
-  }
-
   broadcastMute() {
-    this.broadcast({ t: 'mute', audio: this.audioMuted, video: this.effectiveVideoMuted(), screen: !!this.screenStream });
+    this.broadcast({ t: 'mute', audio: this.audioMuted, video: this.videoMuted, screen: !!this.screenStream });
   }
 
   setAudioMuted(muted) {
@@ -998,9 +1039,7 @@ class Call {
     const track = kind === 'audio' ? stream.getAudioTracks()[0] : stream.getVideoTracks()[0];
     if (!track || this.phase === 'left' || !this.localStream) { for (const t of stream.getTracks()) t.stop(); return; }
     const old = kind === 'audio' ? this.localStream.getAudioTracks()[0] : this.localStream.getVideoTracks()[0];
-    // While sharing a screen, the connections carry the screen; the camera
-    // goes to them when the share stops.
-    if (kind === 'audio' || !this.screenStream) for (const conn of this.conns.values()) conn.peer.replaceTrack(kind, track);
+    for (const conn of this.conns.values()) conn.peer.replaceTrack(kind, track);
     if (old) { this.localStream.removeTrack(old); old.stop(); }
     this.localStream.addTrack(track);
     if (kind === 'audio') {
@@ -1029,8 +1068,9 @@ class Call {
   }
 
   // ---- screen share ----
-  // The screen replaces the camera on every connection, so everyone sees the
-  // screen in this page's tile; the browser's own "Stop sharing" ends it too.
+  // The screen fills its own slot on every connection, beside the camera, so
+  // everyone sees it in a tile of its own; the browser's own "Stop sharing"
+  // ends it too.
   async startScreenShare() {
     if (this.phase !== 'in' || this.screenStream) return;
     let stream;
@@ -1038,8 +1078,9 @@ class Call {
     const track = stream.getVideoTracks()[0];
     if (!track || this.phase !== 'in') { for (const t of stream.getTracks()) t.stop(); return; }
     this.screenStream = stream;
-    for (const conn of this.conns.values()) conn.peer.replaceTrack('video', track);
-    this.applyVideoParamsAll();
+    for (const conn of this.conns.values()) {
+      conn.peer.replaceTrack('screen', track).then(() => conn.peer.setVideoParameters('screen', this.videoParams('screen')));
+    }
     this.broadcastMute();
     track.onended = () => this.stopScreenShare();
     this.render(true);
@@ -1049,11 +1090,9 @@ class Call {
     if (!this.screenStream) return;
     const screen = this.screenStream;
     this.screenStream = null;
-    const cam = this.localStream && this.localStream.getVideoTracks()[0];
-    if (cam) for (const conn of this.conns.values()) conn.peer.replaceTrack('video', cam);
+    for (const conn of this.conns.values()) conn.peer.replaceTrack('screen', null);
     for (const t of screen.getTracks()) t.stop();
     if (this.phase === 'in') {
-      this.applyVideoParamsAll();
       this.broadcastMute();
       this.render(true);
     }
@@ -1259,23 +1298,33 @@ class Call {
     e.preventDefault();
   }
 
-  // Who shows in the floating dock, which has room for one: someone sharing
-  // a screen, else whoever spoke last, else the first other person.
+  // Who shows in the floating dock, which has room for one: a screen someone
+  // else is sharing, else whoever spoke last, else the first other person.
   featured(ids) {
-    const others = ids.filter((id) => id !== 'self');
-    for (const id of others) { const c = this.conns.get(id); if (c && c.screen) return id; }
+    const others = ids.filter((id) => id.split(':')[0] !== 'self');
+    for (const id of others) if (isScreenTile(id)) return id;
     if (this.lastSpeaker && others.indexOf(this.lastSpeaker) >= 0) return this.lastSpeaker;
     return others[0] || 'self';
   }
 
+  // A tile for each person, and after it one for the screen they share, if
+  // they share one (its id is theirs and ':screen'). A page from before the
+  // screen had its own slot has no screen track, and sends its screen in
+  // place of its camera, in its one tile.
   render(restream) {
     const el = this.el;
     if (!el) return;
-    const ids = ['self'];
-    for (const id of this.roster.keys()) if (id !== clientId) ids.push(id);
-    for (const id of this.conns.keys()) if (ids.indexOf(id) < 0) ids.push(id);
-    const people = this.phase === 'in' ? Math.max(1, this.roster.size) : 0;
-    el.querySelector('.call-status').textContent = this.phase === 'joining' ? 'Joining…' : people + ' in the call';
+    const people = ['self'];
+    for (const id of this.roster.keys()) if (id !== clientId) people.push(id);
+    for (const id of this.conns.keys()) if (people.indexOf(id) < 0) people.push(id);
+    const ids = [];
+    for (const id of people) {
+      ids.push(id);
+      const c = this.conns.get(id);
+      if (id === 'self' ? this.screenStream : c && c.screen && c.connected && c.screenStream) ids.push(id + ':screen');
+    }
+    const count = this.phase === 'in' ? Math.max(1, this.roster.size) : 0;
+    el.querySelector('.call-status').textContent = this.phase === 'joining' ? 'Joining…' : count + ' in the call';
     const size = el.querySelector('.call-size');
     setHtml(size, this.full ? ICONS.collapse : ICONS.expand);
     size.title = this.full ? 'Back to the room' : 'Full page';
@@ -1338,7 +1387,7 @@ class Call {
     v.autoplay = true;
     v.playsInline = true;
     v.setAttribute('playsinline', '');
-    if (id === 'self') v.muted = true;
+    if (id === 'self' || isScreenTile(id)) v.muted = true;
     tile.appendChild(v);
     const face = document.createElement('div');
     face.className = 'call-face';
@@ -1355,27 +1404,28 @@ class Call {
 
   renderTile(tile, id, restream) {
     const me = frame() ? frame().viewer : '';
-    let stream, name, audioMuted, videoOff, connecting, mirror, screen;
-    if (id === 'self') {
+    let stream, name, audioMuted, videoOff, connecting, mirror;
+    const screen = isScreenTile(id);
+    const pid = id.split(':')[0];
+    if (pid === 'self') {
       const r = this.roster.get(clientId);
-      stream = this.screenStream || this.localStream;
-      name = 'You';
+      stream = screen ? this.screenStream : this.localStream;
+      name = screen ? 'Your screen' : 'You';
       audioMuted = this.audioMuted;
-      screen = !!this.screenStream;
       videoOff = !screen && (this.videoMuted || !this.camAvailable);
       connecting = false;
       mirror = !screen;
       tile.dataset.user = r ? r.user : me;
       if (r && !tile.dataset.face) { tile.querySelector('.call-face').innerHTML = r.face; tile.dataset.face = '1'; }
     } else {
-      const r = this.known.get(id);
-      const c = this.conns.get(id);
-      stream = c ? c.stream : null;
+      const r = this.known.get(pid);
+      const c = this.conns.get(pid);
+      stream = c ? (screen ? c.screenStream : c.stream) : null;
       // The workspace names each page: a member by username, a guest by the name they gave.
       name = r ? r.name || r.user : '';
+      if (screen) name += '’s screen';
       audioMuted = c ? c.audioMuted : true;
-      screen = c ? c.screen : false;
-      videoOff = !c || (c.videoMuted && !c.screen);
+      videoOff = !c || (!screen && c.videoMuted);
       connecting = !c || !c.connected;
       mirror = false;
       if (r && !tile.dataset.face) { tile.querySelector('.call-face').innerHTML = r.face; tile.dataset.face = '1'; }
@@ -1385,8 +1435,8 @@ class Call {
       v.srcObject = stream || null;
       if (stream) v.play().catch(() => {});
     }
-    if (id !== 'self' && canPickSpeaker && this.speaker && v.sinkId !== this.speaker) v.setSinkId(this.speaker).catch(() => {});
-    const c = id === 'self' ? null : this.conns.get(id);
+    if (id !== 'self' && !screen && canPickSpeaker && this.speaker && v.sinkId !== this.speaker) v.setSinkId(this.speaker).catch(() => {});
+    const c = pid === 'self' ? null : this.conns.get(pid);
     const wait = tile.querySelector('.call-wait');
     const waitText = c && c.attempt > 1 ? 'Still trying to connect…' : 'Connecting…';
     if (wait.textContent !== waitText) wait.textContent = waitText;
@@ -1394,9 +1444,9 @@ class Call {
     tile.classList.toggle('connecting', connecting);
     tile.classList.toggle('mirror', mirror);
     tile.classList.toggle('screen', screen);
-    tile.classList.toggle('speaking', this.speaking.has(id) && !audioMuted);
+    tile.classList.toggle('speaking', !screen && this.speaking.has(id) && !audioMuted);
     const label = tile.querySelector('.call-label');
-    const text = escapeHtml(name) + (audioMuted ? ' <span class="call-muted" title="Microphone off">' + ICONS.micOff + '</span>' : '');
+    const text = escapeHtml(name) + (audioMuted && !screen ? ' <span class="call-muted" title="Microphone off">' + ICONS.micOff + '</span>' : '');
     setHtml(label, text);
     tile.title = id === 'self' ? 'You' : name;
   }

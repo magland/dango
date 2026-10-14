@@ -673,6 +673,22 @@ await c1.eval("document.querySelector('.call-dock [data-call-act=\"mic\"]').clic
 await waitFor('bob to see alice’s microphone on', async () => b1.eval("!document.querySelector('.call-dock .call-tile:not([data-peer=\"self\"]) .call-muted')"));
 ok('turning the microphone on is shown to the others');
 
+// Sharing a screen adds a tile for it beside the sharer's camera, for both.
+await c1.eval("document.querySelector('.call-dock [data-call-act=\"cam\"]').click(); true");
+await c1.eval("document.querySelector('.call-dock [data-call-act=\"screen\"]').click(); true", true);
+const screenTile = (page, sel) => page.eval(`(() => { const t = document.querySelector('.call-dock .call-tile[data-peer${sel}]'); return t ? { w: t.querySelector('video').videoWidth, label: t.querySelector('.call-label').textContent } : null; })()`);
+await waitFor('alice to see her own screen in a tile of its own', async () => (await screenTile(c1, '="self:screen"'))?.w > 0, 10000);
+await waitFor('bob to see alice’s screen and her camera, in two tiles', async () => {
+  const s = await screenTile(b1, '$=":screen"');
+  return s?.w > 0 && s.label.includes('alice’s screen') && (await connectedTo(b1)) > 0;
+}, 15000);
+if (await b1.eval("document.querySelector('.call-dock .call-tile:not([data-peer=\"self\"]):not([data-peer$=\":screen\"])').classList.contains('video-off')")) fail('alice’s camera went dark when she shared her screen');
+ok('sharing a screen shows it in its own tile, beside the camera');
+await c1.eval("document.querySelector('.call-dock [data-call-act=\"screen\"]').click(); true");
+await waitFor('bob to see the screen’s tile go', async () => (await screenTile(b1, '$=":screen"')) === null);
+await c1.eval("document.querySelector('.call-dock [data-call-act=\"cam\"]').click(); true");
+ok('stopping the share takes its tile away');
+
 await c1.eval("document.querySelector('.side-rooms a[href=\"/c/random\"]').click(); true");
 await waitFor('alice to be in #random with the call floating', async () => (await c1.eval("location.pathname + '|' + !!document.querySelector('body > .call-dock.mini')")) === '/c/random|true');
 if (!(await c1.eval('window.stillHere === true'))) fail('moving to another room reloaded the page and ended the call');
