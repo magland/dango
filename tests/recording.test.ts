@@ -70,6 +70,7 @@ test('the picture is cut where videos begin and end, with the screen large while
     [3500, 4000, ['003', '005']],
     [4000, 5000, []],
   ]);
+  assert.deepStrictEqual(plan.intervals[2].tiles.map((t) => t.label), ['alice’s screen', 'alice', 'bob'], 'each tile is named for its person, a screen as theirs');
   const later = plan.intervals[3].tiles.find((t) => t.file === '005-bob-camera.webm')!;
   assert.strictEqual(later.offset, 1000, 'a tile starts as far into its file as the interval is into the segment');
   // Each cut falls on a frame at 30 frames a second.

@@ -12,8 +12,8 @@ import * as path from 'path';
 //    these open aligned in any audio or video editor, and each is one
 //    speaker for a transcript.
 //  - call.mp4, everyone in one picture: a shared screen large with the
-//    cameras in a column beside it, or else the cameras in a grid, and the
-//    voices mixed.
+//    cameras in a column beside it, or else the cameras in a grid, each tile
+//    named at its lower left, and the voices mixed.
 //  - timeline.json, the plan both were made from, in the rebuilt timeline.
 //
 // The rebuilt timeline is the recording's with its pauses taken out, so
@@ -57,6 +57,8 @@ export interface Tile {
   kind: 'camera' | 'screen';
   /** How far into the segment's own file this interval begins, in ms. */
   offset: number;
+  /** The name shown on the tile: the person's, or "<name>’s screen". */
+  label: string;
   x: number;
   y: number;
   w: number;
@@ -210,6 +212,7 @@ export function planRecording(m: Manifest, present: (file: string) => boolean = 
   }
   const times = [...cuts].filter((t) => t >= 0 && t <= snap(duration)).sort((a, b) => a - b);
   const order = people.map((p) => p.id);
+  const nameOf = new Map(people.map((p) => [p.id, p.name]));
   const intervals: Interval[] = [];
   for (let i = 0; i + 1 < times.length; i++) {
     const from = times[i];
@@ -226,7 +229,8 @@ export function planRecording(m: Manifest, present: (file: string) => boolean = 
     const tiles: Tile[] = [];
     for (const v of [...screens, ...cameras]) {
       const p = places.get(v.file);
-      if (p) tiles.push({ file: v.file, participant: v.participant, kind: v.kind as 'camera' | 'screen', offset: from - v.from, ...p });
+      const name = nameOf.get(v.participant) ?? 'someone';
+      if (p) tiles.push({ file: v.file, participant: v.participant, kind: v.kind as 'camera' | 'screen', offset: from - v.from, label: v.kind === 'screen' ? name + '’s screen' : name, ...p });
     }
     intervals.push({ from, to, tiles });
   }
@@ -235,9 +239,9 @@ export function planRecording(m: Manifest, present: (file: string) => boolean = 
 
 // ---- rendering ----
 
-function run(cmd: string, args: string[]): Promise<void> {
+function run(cmd: string, args: string[], cwd?: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const p = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'], cwd });
     let err = '';
     p.stderr.on('data', (d) => {
       err = (err + d.toString()).slice(-4000);
@@ -247,7 +251,24 @@ function run(cmd: string, args: string[]): Promise<void> {
   });
 }
 
-const ffmpeg = (args: string[]) => run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args]);
+const ffmpeg = (args: string[], cwd?: string) => run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], cwd);
+
+// The names on the tiles are drawn by ffmpeg's drawtext, which a build of
+// ffmpeg may lack (it needs libfreetype), or may have with no font to find;
+// without it the tiles go unnamed rather than the rendering failing.
+async function canDrawText(): Promise<boolean> {
+  try {
+    await ffmpeg(['-f', 'lavfi', '-i', 'color=c=black:s=64x64:d=0.1', '-vf', 'drawtext=text=a', '-f', 'null', '-']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The size of a tile's name, for a tile this tall. */
+function labelSize(h: number): number {
+  return Math.round(Math.min(28, Math.max(14, h / 14)));
+}
 const sec = (ms: number) => (ms / 1000).toFixed(3);
 
 export interface RenderOptions {
@@ -295,6 +316,19 @@ export async function renderRecording(dir: string, opts: RenderOptions = {}): Pr
   }
 
   if (opts.video !== false) {
+    // Each name is written to a file of its own and drawn from there, run
+    // from the working directory, so that no name, and no path, has to be
+    // escaped for ffmpeg's filter syntax.
+    const labels = (await canDrawText()) ? new Map<string, string>() : null;
+    if (!labels) log('This ffmpeg cannot draw text (it has no drawtext filter, or no font), so the tiles are left unnamed.');
+    const labelFile = (label: string) => {
+      if (!labels!.has(label)) {
+        const f = `label-${labels!.size}.txt`;
+        fs.writeFileSync(path.join(work, f), label);
+        labels!.set(label, f);
+      }
+      return labels!.get(label)!;
+    };
     // The picture, one interval at a time, each the same layout throughout.
     const clips: string[] = [];
     for (const [k, iv] of plan.intervals.entries()) {
@@ -306,15 +340,25 @@ export async function renderRecording(dir: string, opts: RenderOptions = {}): Pr
       let last = '[0:v]';
       iv.tiles.forEach((t, i) => {
         args.push('-ss', sec(t.offset), '-i', src(t.file));
+        // The name goes on the picture after it is scaled and before it is
+        // padded to the tile, so that it sits at the picture's own lower
+        // left rather than out on a letterbox bar; on a box, to stay
+        // readable over a light picture.
+        let name = '';
+        if (labels) {
+          const size = labelSize(t.h);
+          const pad = Math.round(size / 3);
+          name = `,drawtext=textfile=${labelFile(t.label)}:expansion=none:fontsize=${size}:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=${pad}:x=${2 * pad}:y=h-th-${2 * pad}`;
+        }
         chains.push(
-          `[${i + 1}:v]setpts=PTS-STARTPTS,scale=${t.w}:${t.h}:force_original_aspect_ratio=decrease,pad=${t.w}:${t.h}:(ow-iw)/2:(oh-ih)/2,setsar=1[t${i}]`,
+          `[${i + 1}:v]setpts=PTS-STARTPTS,scale=${t.w}:${t.h}:force_original_aspect_ratio=decrease${name},pad=${t.w}:${t.h}:(ow-iw)/2:(oh-ih)/2,setsar=1[t${i}]`,
           `${last}[t${i}]overlay=${t.x}:${t.y}:eof_action=repeat[o${i}]`
         );
         last = `[o${i}]`;
       });
       chains.push(`${last}fps=${plan.fps},format=yuv420p[v]`);
       args.push('-filter_complex', chains.join(';'), '-map', '[v]', '-t', dur, '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', clip);
-      await ffmpeg(args);
+      await ffmpeg(args, work);
       clips.push(clip);
     }
     const list = path.join(work, 'clips.txt');
