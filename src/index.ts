@@ -28,6 +28,7 @@ import { bootstrapVault } from '../../mochiforge/src/vault';
 import { DANGO_BACKUP } from './backup';
 import { moveTurnSecrets, seedTrustProxy } from './config';
 import { DANGO_DEPLOY, packageVersion } from './deploy';
+import { renderRecording } from './recording';
 
 // The dango command: serve a workspace, or talk to a served one the way `gh`
 // talks to GitHub. Built on mochiforge's CLI framework, so the option
@@ -730,7 +731,36 @@ not, dango deploy fly <app> updates it without needing a token.`,
     'No undo. Pass --yes to skip the confirmation.',
     (args, usage) => deployDestroyCmd(args, usage, DANGO_DEPLOY)
   ),
-  ...makeBackupCommands(DANGO_BACKUP)
+  ...makeBackupCommands(DANGO_BACKUP),
+  {
+    path: ['recording', 'render'],
+    summary: 'Piece a recorded call back together, with ffmpeg',
+    description: `Reads the folder a call was recorded to (its manifest.json and the files
+beside it) and writes, under <dir>/rebuilt (or --out):
+
+  audio/<nn>-<name>.wav   one per person, all the same length and aligned,
+                          silent where that person was not there
+  call.mp4                everyone in one picture, a shared screen large and
+                          the cameras beside it, with the voices mixed
+  timeline.json           the plan both were made from
+
+Pauses are taken out, so a time in one file is the same moment in the others.
+Needs ffmpeg. --no-video makes only the audio, which is much faster.`,
+    args: [{ name: 'dir', required: true }],
+    options: [
+      { name: 'out', type: 'string', value: '<dir>', summary: 'Where to write (default: <dir>/rebuilt)' },
+      { name: 'no-video', type: 'boolean', summary: 'Make only the aligned audio' },
+    ],
+    async run(inv) {
+      const dir = inv.args[0];
+      const started = Date.now();
+      const plan = await renderRecording(dir, { out: inv.str('out') ?? undefined, video: !inv.bool('no-video'), log: (l) => console.log(l) });
+      const out = path.resolve(inv.str('out') ?? path.join(dir, 'rebuilt'));
+      const mins = Math.floor(plan.duration / 60000);
+      const secs = Math.round((plan.duration % 60000) / 1000);
+      console.log(`Done in ${Math.round((Date.now() - started) / 1000)} s: ${plan.people.length} people, ${mins}:${String(secs).padStart(2, '0')} recorded, in ${out}`);
+    },
+  }
 );
 
 const cli: Cli = {
@@ -742,6 +772,7 @@ const cli: Cli = {
     { name: 'user', summary: 'Manage the workspace’s users (site admin)' },
     { name: 'deploy', summary: 'Put a workspace on Fly.io' },
     { name: 'backup', summary: 'Copy a workspace to a directory on this machine' },
+    { name: 'recording', summary: 'Work with a call recorded to a folder' },
   ],
   commands,
   footer: FOOTER,

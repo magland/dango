@@ -86,6 +86,14 @@ Unlike a composite recording, which mixes everyone into one picture and one soun
 
 Note that what is recorded of the others is what the recording page receives, so their video is at the call's quality setting and suffers what the network does to it; the recorder's own tracks are recorded as captured. A device the recorder does not have is left out rather than recorded as silence or black, and a muted microphone or a camera turned off is recorded as silence or black frames. The recording stops when its page leaves the call.
 
+**Piecing it back together.** `dango recording render <folder>` does this with ffmpeg, which must be installed. It writes, under `<folder>/rebuilt`:
+
+- `audio/<nn>-<name>.wav`, one per person, mono at 48 kHz, all the same length and starting at the same moment, silent where that person was not there. Files like these open aligned in any audio or video editor without further information, and each is one speaker, which is what a transcript wants.
+- `call.mp4`, everyone in one 1280×720 picture at 30 frames a second, with the voices mixed: while a screen is shared it is large, with the cameras in a column at its right; otherwise the cameras are in a grid. The picture is cut wherever a video begins or ends, and laid out afresh in between.
+- `timeline.json`, the plan both were made from: each person's audio placements, and each stretch of the picture with what is where.
+
+Pauses are taken out of all three, so a time in one is the same moment in the others; the manifest keeps the recording's own times. `--no-video` makes only the audio, which takes seconds rather than minutes. The rendering is deliberately plain. A camera turned off shows as black, since the recording does not say when a camera was off, and the tiles carry no names; an editor that wants more than this can start from the aligned audio and the segment files.
+
 **Everyone is told.** When a recording starts, pauses, resumes, or stops, the recording page tells every other page in the call over the connection between them, and tells anyone who joins later when they connect. The others see a notice ("alice is recording this call") and a mark in the call's bar, "● Rec", or "❚❚ Rec" while it is paused, with who is recording in its tooltip. We emphasize that this is a courtesy the workspace's own page extends, and not a guarantee: a person can record what reaches their computer by other means, as with any call, and the workspace cannot know.
 
 ## Diagnosing connection problems

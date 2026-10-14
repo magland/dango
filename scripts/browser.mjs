@@ -13,6 +13,7 @@
 // Run from the repository root after a build: node scripts/browser.mjs
 // Needs Node 22 or newer, and Chrome or Chromium (CHROME=<path> to choose).
 
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -709,9 +710,16 @@ const recording = await c1.eval(`(async () => {
   let dir = null;
   for await (const [name, h] of root.entries()) if (h.kind === 'directory' && name.startsWith('general-')) dir = h;
   const manifest = JSON.parse(await (await (await dir.getFileHandle('manifest.json')).getFile()).text());
-  const sizes = {};
-  for (const seg of manifest.segments) sizes[seg.file] = (await (await dir.getFileHandle(seg.file)).getFile()).size;
-  return { manifest, sizes };
+  const sizes = {}, files = {};
+  for (const seg of manifest.segments) {
+    const file = await (await dir.getFileHandle(seg.file)).getFile();
+    sizes[seg.file] = file.size;
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    files[seg.file] = btoa(bin);
+  }
+  return { manifest, sizes, files };
 })()`);
 {
   const { manifest, sizes } = recording;
@@ -729,6 +737,23 @@ const recording = await c1.eval(`(async () => {
 }
 await c1.eval("document.querySelector('.call-dock [data-call-act=\"settings\"]').click(); document.querySelector('.call-dock [data-call-act=\"dismiss\"]').click(); document.querySelector('.call-dock [data-call-act=\"cam\"]').click(); true");
 ok('recording a call saves each person’s audio, camera, and screen to files of their own, with a manifest of when, and a pause is a gap between segments');
+
+// What Chrome recorded, rebuilt by dango recording render, where ffmpeg is.
+if (spawnSync('ffmpeg', ['-version']).status === 0) {
+  const recDir = path.join(tmp, 'recording');
+  fs.mkdirSync(recDir, { recursive: true });
+  fs.writeFileSync(path.join(recDir, 'manifest.json'), JSON.stringify(recording.manifest));
+  for (const [name, b64] of Object.entries(recording.files)) fs.writeFileSync(path.join(recDir, name), Buffer.from(b64, 'base64'));
+  const r = spawnSync(process.execPath, ['dist/dango/src/index.js', 'recording', 'render', recDir], { encoding: 'utf8' });
+  if (r.status !== 0) fail(`dango recording render failed on what Chrome recorded: ${r.stdout}${r.stderr}`);
+  const seconds = (f) => Number(spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', f], { encoding: 'utf8' }).stdout);
+  const pauses = recording.manifest.events;
+  const expected = (pauses.at(-1).t - (pauses[2].t - pauses[1].t)) / 1000;
+  const lengths = ['01-alice.wav', '02-bob.wav'].map((f) => seconds(path.join(recDir, 'rebuilt', 'audio', f)));
+  const video = seconds(path.join(recDir, 'rebuilt', 'call.mp4'));
+  if (lengths.some((l) => Math.abs(l - expected) > 0.1) || Math.abs(video - expected) > 0.3) fail(`the rebuilt files are not the recording's length less its pause (${expected} s): ${lengths.join(', ')}, ${video}`);
+  ok('dango recording render pieces what Chrome recorded back together, aligned audio and one video, with the pause taken out');
+}
 await b1.eval("document.querySelector('.call-dock [data-call-act=\"dismiss\"]').click(); true");
 
 await c1.eval("document.querySelector('.side-rooms a[href=\"/c/random\"]').click(); true");
