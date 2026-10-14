@@ -546,6 +546,7 @@ class Recorder {
     this.participants = {};
     this.seq = 0;
     this.failures = new Map();
+    this.states = new Map();
     this.paused = false;
     this.events = [{ t: 0, type: 'start' }];
     this.error = null;
@@ -580,6 +581,26 @@ class Recorder {
     }
     // A track whose recorder the browser stopped is started again from here.
     if (this.failures.size) this.sync(this.call.recordingSources());
+  }
+  // Whose microphone and camera are on: an event in the manifest for each
+  // change, and for each person when first seen, so that what was recorded
+  // can be read as silence or black for a reason. Noted through a pause too,
+  // since the state at the resume is what matters after it.
+  noteStates(people) {
+    if (this.endedAt) return;
+    let changed = false;
+    for (const p of people) {
+      const id = p.who.id;
+      if (!this.participants[id]) this.participants[id] = { user: p.who.user, name: p.who.name, self: p.who.self };
+      const last = this.states.get(id) || {};
+      for (const type of ['microphone', 'camera']) {
+        if (last[type] === p[type]) continue;
+        this.events.push({ t: this.now(), type: type, participant: id, on: p[type] });
+        changed = true;
+      }
+      this.states.set(id, { microphone: p.microphone, camera: p.camera });
+    }
+    if (changed) this.saveManifest();
   }
   pause() {
     if (this.paused || this.endedAt) return;
@@ -1353,27 +1374,47 @@ class Call {
     else this.setNotice(who + ' stopped recording this call.');
   }
 
-  // Every track there is to record: this page's own (a device it does not
-  // have is left out, not recorded as silence or black), and each connected
-  // page's as received.
-  recordingSources() {
+  // Everyone there is to record, this page and each connected page, with
+  // their tracks and whether their microphone and camera are on. A device
+  // this page does not have is left out, not recorded as silence or black.
+  recordingPeople() {
     const out = [];
-    const add = (who, kind, track) => { if (track) out.push({ who: who, kind: kind, track: track }); };
     const me = this.roster.get(clientId);
     const f = frame();
     const self = { id: clientId, user: me ? me.user : f ? f.viewer : '', name: me ? me.name || me.user : f ? f.viewer : 'me', self: true };
     if (this.localStream) {
-      if (this.micAvailable) add(self, 'audio', this.localStream.getAudioTracks()[0]);
-      if (this.camAvailable) add(self, 'camera', this.localStream.getVideoTracks()[0]);
+      out.push({
+        who: self,
+        microphone: this.micAvailable && !this.audioMuted,
+        camera: this.camAvailable && !this.videoMuted,
+        tracks: {
+          audio: this.micAvailable ? this.localStream.getAudioTracks()[0] : null,
+          camera: this.camAvailable ? this.localStream.getVideoTracks()[0] : null,
+          screen: this.screenStream ? this.screenStream.getVideoTracks()[0] : null
+        }
+      });
     }
-    if (this.screenStream) add(self, 'screen', this.screenStream.getVideoTracks()[0]);
     for (const [id, c] of this.conns) {
       if (!c.connected) continue;
       const r = this.known.get(id);
       const who = { id: id, user: r ? r.user : '', name: r ? r.name || r.user : 'someone', self: false };
-      add(who, 'audio', c.tracks.audio);
-      add(who, 'camera', c.tracks.video);
-      if (c.screen && c.screenStream) add(who, 'screen', c.tracks.screen);
+      out.push({
+        who: who,
+        microphone: !c.audioMuted,
+        camera: !c.videoMuted,
+        tracks: { audio: c.tracks.audio, camera: c.tracks.video, screen: c.screen && c.screenStream ? c.tracks.screen : null }
+      });
+    }
+    return out;
+  }
+
+  // Every track there is to record, each { who, kind, track }.
+  recordingSources(people) {
+    const out = [];
+    for (const p of people || this.recordingPeople()) {
+      for (const kind of ['audio', 'camera', 'screen']) {
+        if (p.tracks[kind]) out.push({ who: p.who, kind: kind, track: p.tracks[kind] });
+      }
     }
     return out;
   }
@@ -1665,7 +1706,11 @@ class Call {
       tile.classList.toggle('spotlit', id === spot);
     });
     el.style.setProperty('--call-count', String(ids.length));
-    if (this.recorder) this.recorder.sync(this.recordingSources());
+    if (this.recorder) {
+      const people = this.recordingPeople();
+      this.recorder.noteStates(people);
+      this.recorder.sync(this.recordingSources(people));
+    }
     this.renderRecording();
   }
 

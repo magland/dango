@@ -716,7 +716,19 @@ await waitFor('bob to see the recording paused', async () => (await recMark(b1))
 await sleep(1500);
 await c1.eval("document.querySelector('.call-dock [data-call-act=\"rec-pause\"]').click(); true");
 await waitFor('bob to see the recording resumed', async () => (await recMark(b1)) === '● Rec');
-await sleep(2000);
+// Alice's microphone off and on again, and bob's camera on and off again,
+// for the manifest's events.
+const micOnly = (page) => page.eval("document.querySelector('.call-dock [data-call-act=\"mic\"]').click(); true");
+const camOnly = (page) => page.eval("document.querySelector('.call-dock [data-call-act=\"cam\"]').click(); true");
+await sleep(500);
+await micOnly(c1);
+await camOnly(b1);
+await waitFor('alice to see bob’s camera on', async () => c1.eval("!document.querySelector('.call-dock .call-tile:not([data-peer=\"self\"]):not([data-peer$=\":screen\"])').classList.contains('video-off')"));
+await sleep(500);
+await micOnly(c1);
+await camOnly(b1);
+await waitFor('alice to see bob’s camera off', async () => c1.eval("document.querySelector('.call-dock .call-tile:not([data-peer=\"self\"]):not([data-peer$=\":screen\"])').classList.contains('video-off')"));
+await sleep(1000);
 await c1.eval("document.querySelector('.call-dock [data-call-act=\"record\"]').click(); true");
 await waitFor('bob to be told the recording stopped', async () => (await recMark(b1)) === '' && (await b1.eval("document.querySelector('.call-notice span').textContent")) === 'alice stopped recording this call.');
 await waitFor('the recording to be saved', async () => (await c1.eval("document.querySelector('.call-notice span').textContent")).includes('The recording is saved'));
@@ -747,8 +759,12 @@ const recording = await c1.eval(`(async () => {
   const segments = manifest.segments.filter((seg) => !seg.error);
   const kinds = segments.map((seg) => `${whose(seg).name}/${seg.kind}`).sort().join(' ');
   if (kinds !== 'alice/audio alice/audio alice/camera alice/camera alice/screen bob/audio bob/audio bob/camera bob/camera') fail(`the recording has the wrong segments: ${kinds}`);
-  if (manifest.events.map((e) => e.type).join() !== 'start,pause,resume,stop') fail(`the recording's events are wrong: ${JSON.stringify(manifest.events)}`);
-  const [pause, resume] = manifest.events.slice(1, 3);
+  const course = manifest.events.filter((e) => !e.participant);
+  if (course.map((e) => e.type).join() !== 'start,pause,resume,stop') fail(`the recording's events are wrong: ${JSON.stringify(manifest.events)}`);
+  const [pause, resume] = course.slice(1, 3);
+  const states = (name, type) => manifest.events.filter((e) => e.type === type && manifest.participants[e.participant].name === name).map((e) => e.on).join();
+  const got = ['alice', 'bob'].flatMap((n) => ['microphone', 'camera'].map((t) => `${n} ${t}: ${states(n, t)}`)).join('; ');
+  if (got !== 'alice microphone: true,false,true; alice camera: true; bob microphone: false; bob camera: false,true,false') fail(`the recording's microphone and camera events are wrong: ${got}`);
   if (segments.some((seg) => seg.end > pause.t + 500 && seg.start < resume.t)) fail(`a segment goes on through the pause: ${JSON.stringify(manifest)}`);
   if (!manifest.endedAt || manifest.segments.some((seg) => seg.end === null) || segments.some((seg) => seg.end <= seg.start)) fail(`the recording's manifest is not finished: ${JSON.stringify(manifest)}`);
   const screen = segments.find((seg) => seg.kind === 'screen');
@@ -759,6 +775,7 @@ const recording = await c1.eval(`(async () => {
 await c1.eval("document.querySelector('.call-dock [data-call-act=\"settings\"]').click(); document.querySelector('.call-dock [data-call-act=\"dismiss\"]').click(); document.querySelector('.call-dock [data-call-act=\"cam\"]').click(); true");
 ok('recording a call saves each person’s audio, camera, and screen to files of their own, with a manifest of when, and a pause is a gap between segments');
 ok('a track whose recorder the browser stops by itself is recorded again, and the stop is noted in the manifest');
+ok('the manifest notes each person’s microphone and camera going on and off, the others’ included');
 
 // What Chrome recorded, rebuilt by dango recording render, where ffmpeg is.
 if (spawnSync('ffmpeg', ['-version']).status === 0) {
@@ -769,8 +786,8 @@ if (spawnSync('ffmpeg', ['-version']).status === 0) {
   const r = spawnSync(process.execPath, ['dist/dango/src/index.js', 'recording', 'render', recDir], { encoding: 'utf8' });
   if (r.status !== 0) fail(`dango recording render failed on what Chrome recorded: ${r.stdout}${r.stderr}`);
   const seconds = (f) => Number(spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', f], { encoding: 'utf8' }).stdout);
-  const pauses = recording.manifest.events;
-  const expected = (pauses.at(-1).t - (pauses[2].t - pauses[1].t)) / 1000;
+  const at = (type) => recording.manifest.events.find((e) => e.type === type).t;
+  const expected = (at('stop') - (at('resume') - at('pause'))) / 1000;
   const lengths = ['01-alice.wav', '02-bob.wav'].map((f) => seconds(path.join(recDir, 'rebuilt', 'audio', f)));
   const video = seconds(path.join(recDir, 'rebuilt', 'call.mp4'));
   if (lengths.some((l) => Math.abs(l - expected) > 0.1) || Math.abs(video - expected) > 0.3) fail(`the rebuilt files are not the recording's length less its pause (${expected} s): ${lengths.join(', ')}, ${video}`);

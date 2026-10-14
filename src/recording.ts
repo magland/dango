@@ -31,7 +31,8 @@ export interface Manifest {
   endedAt?: string | null;
   participants: Record<string, { user?: string; name?: string; self?: boolean }>;
   segments: { file: string; participant: string; kind: string; start: number | null; end: number | null; error?: string }[];
-  events?: { t: number; type: string }[];
+  /** start, pause, resume, stop; and microphone and camera, with participant and on. */
+  events?: { t: number; type: string; participant?: string; on?: boolean }[];
 }
 
 export interface Placement {
