@@ -674,7 +674,11 @@ await waitFor('bob to see alice’s microphone on', async () => b1.eval("!docume
 ok('turning the microphone on is shown to the others');
 
 // Sharing a screen adds a tile for it beside the sharer's camera, for both.
+// Alice records meanwhile, into the browser's private file system, which
+// has the same folder API as the folder picker gives.
 await c1.eval("document.querySelector('.call-dock [data-call-act=\"cam\"]').click(); true");
+await c1.eval("window.showDirectoryPicker = () => navigator.storage.getDirectory(); document.querySelector('.call-dock [data-call-act=\"settings\"]').click(); document.querySelector('.call-dock [data-call-act=\"record\"]').click(); true", true);
+await waitFor('alice’s dock to say it is recording', async () => c1.eval("!document.querySelector('.call-dock .call-rec').hidden"));
 await c1.eval("document.querySelector('.call-dock [data-call-act=\"screen\"]').click(); true", true);
 const screenTile = (page, sel) => page.eval(`(() => { const t = document.querySelector('.call-dock .call-tile[data-peer${sel}]'); return t ? { w: t.querySelector('video').videoWidth, label: t.querySelector('.call-label').textContent } : null; })()`);
 await waitFor('alice to see her own screen in a tile of its own', async () => (await screenTile(c1, '="self:screen"'))?.w > 0, 10000);
@@ -686,8 +690,32 @@ if (await b1.eval("document.querySelector('.call-dock .call-tile:not([data-peer=
 ok('sharing a screen shows it in its own tile, beside the camera');
 await c1.eval("document.querySelector('.call-dock [data-call-act=\"screen\"]').click(); true");
 await waitFor('bob to see the screen’s tile go', async () => (await screenTile(b1, '$=":screen"')) === null);
-await c1.eval("document.querySelector('.call-dock [data-call-act=\"cam\"]').click(); true");
 ok('stopping the share takes its tile away');
+await sleep(1500);
+await c1.eval("document.querySelector('.call-dock [data-call-act=\"record\"]').click(); true");
+await waitFor('the recording to be saved', async () => (await c1.eval("document.querySelector('.call-notice span').textContent")).includes('The recording is saved'));
+const recording = await c1.eval(`(async () => {
+  const root = await navigator.storage.getDirectory();
+  let dir = null;
+  for await (const [name, h] of root.entries()) if (h.kind === 'directory' && name.startsWith('general-')) dir = h;
+  const manifest = JSON.parse(await (await (await dir.getFileHandle('manifest.json')).getFile()).text());
+  const sizes = {};
+  for (const seg of manifest.segments) sizes[seg.file] = (await (await dir.getFileHandle(seg.file)).getFile()).size;
+  return { manifest, sizes };
+})()`);
+{
+  const { manifest, sizes } = recording;
+  const whose = (seg) => manifest.participants[seg.participant];
+  const kinds = manifest.segments.map((seg) => `${whose(seg).name}/${seg.kind}`).sort().join(' ');
+  if (kinds !== 'alice/audio alice/camera alice/screen bob/audio bob/camera') fail(`the recording has the wrong segments: ${kinds}`);
+  if (!manifest.endedAt || manifest.segments.some((seg) => seg.end === null || seg.end <= seg.start)) fail(`the recording's manifest is not finished: ${JSON.stringify(manifest)}`);
+  const screen = manifest.segments.find((seg) => seg.kind === 'screen');
+  const camera = manifest.segments.find((seg) => seg.kind === 'camera' && whose(seg).self);
+  if (!(screen.end < camera.end - 1000)) fail('the screen’s segment does not end when the share stopped');
+  if (Object.values(sizes).some((n) => n < 1000)) fail(`a recorded file is empty: ${JSON.stringify(sizes)}`);
+}
+await c1.eval("document.querySelector('.call-dock [data-call-act=\"settings\"]').click(); document.querySelector('.call-dock [data-call-act=\"dismiss\"]').click(); document.querySelector('.call-dock [data-call-act=\"cam\"]').click(); true");
+ok('recording a call saves each person’s audio, camera, and screen to files of their own, with a manifest of when');
 
 await c1.eval("document.querySelector('.side-rooms a[href=\"/c/random\"]').click(); true");
 await waitFor('alice to be in #random with the call floating', async () => (await c1.eval("location.pathname + '|' + !!document.querySelector('body > .call-dock.mini')")) === '/c/random|true');

@@ -489,6 +489,150 @@ function controlButton(act, label) {
   return '<button type="button" class="call-ctl" data-call-act="' + act + '" title="' + label + '" aria-label="' + label + '"></button>';
 }
 
+// ---- recording ----
+// A recording is a folder on this computer, chosen when it starts (the File
+// System Access API, which Chrome and Edge have): each track this page has,
+// its own and the ones it receives, goes to files of its own, and
+// manifest.json says whose each file is and when it starts and ends, in
+// milliseconds from the start of the recording, on this page's one clock.
+// A file is one segment of a track, ended when the track is (a person
+// leaves, a screen share stops, a device is changed). Piecing the segments
+// back together is for afterwards, from the manifest.
+//
+// The browser writes a file under a temporary name and gives it its own only
+// when it is closed, so a page closed mid-recording loses the segments still
+// open. A segment is therefore also closed after SEGMENT_MAX_MS, its
+// successor started a moment before, which bounds what can be lost.
+const canRecord = typeof window.showDirectoryPicker === 'function' && typeof MediaRecorder !== 'undefined';
+const SEGMENT_MAX_MS = 5 * 60 * 1000;
+
+function recordingMime(kind) {
+  const list = kind === 'audio' ? ['audio/webm;codecs=opus', 'audio/webm'] : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  return list.find((m) => MediaRecorder.isTypeSupported(m)) || '';
+}
+
+function fileSafe(s) {
+  return String(s).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'call';
+}
+
+class Recorder {
+  // Asks for the folder, so it must be called from a click.
+  static async start(call) {
+    const parent = await window.showDirectoryPicker({ id: 'dango-recordings', mode: 'readwrite' });
+    const stamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+    const dir = await parent.getDirectoryHandle(fileSafe(call.title) + '-' + stamp, { create: true });
+    return new Recorder(dir, call);
+  }
+  constructor(dir, call) {
+    this.dir = dir;
+    this.call = call;
+    this.t0 = performance.now();
+    this.startedAt = new Date().toISOString();
+    this.endedAt = null;
+    this.active = new Map();
+    this.segments = [];
+    this.participants = {};
+    this.seq = 0;
+    this.error = null;
+    this.manifestChain = Promise.resolve();
+    this.timer = setInterval(() => this.tick(), 1000);
+  }
+  now() {
+    return Math.round(performance.now() - this.t0);
+  }
+  // The tracks there are now, each { who, kind, track }: a segment starts for
+  // each one not yet recorded, and ends for each recorded one gone.
+  sync(sources) {
+    if (this.endedAt) return;
+    const want = new Map();
+    for (const src of sources) want.set(src.who.id + '/' + src.kind + '/' + src.track.id, src);
+    for (const [key, entry] of Array.from(this.active)) {
+      if (!want.has(key) || entry.src.track.readyState === 'ended') { this.active.delete(key); this.finish(entry); }
+    }
+    for (const [key, src] of want) {
+      if (!this.active.has(key) && src.track.readyState !== 'ended') this.active.set(key, this.begin(src));
+    }
+  }
+  tick() {
+    this.call.renderRecording();
+    for (const [key, entry] of Array.from(this.active)) {
+      if (entry.seg.start !== null && this.now() - entry.seg.start > SEGMENT_MAX_MS) {
+        this.active.set(key, this.begin(entry.src));
+        this.finish(entry);
+      }
+    }
+  }
+  begin(src) {
+    const name = String(++this.seq).padStart(3, '0') + '-' + fileSafe(src.who.name) + '-' + src.kind + '.webm';
+    const seg = { file: name, participant: src.who.id, kind: src.kind, start: null, end: null };
+    this.segments.push(seg);
+    this.participants[src.who.id] = { user: src.who.user, name: src.who.name, self: src.who.self };
+    const entry = { src: src, seg: seg, rec: null, writable: null, writing: null };
+    entry.writing = this.dir.getFileHandle(name, { create: true }).then((h) => h.createWritable()).then((w) => { entry.writable = w; });
+    const mime = recordingMime(src.kind === 'audio' ? 'audio' : 'video');
+    const rec = new MediaRecorder(new MediaStream([src.track]), mime ? { mimeType: mime } : {});
+    entry.rec = rec;
+    rec.ondataavailable = (e) => {
+      if (e.data.size) entry.writing = entry.writing.then(() => entry.writable.write(e.data)).catch((err) => this.failed(err));
+    };
+    rec.onstart = () => { seg.start = this.now(); this.saveManifest(); };
+    rec.onstop = () => {
+      seg.end = this.now();
+      entry.writing = entry.writing.then(() => entry.writable.close()).catch((err) => this.failed(err));
+      this.saveManifest();
+    };
+    rec.start(1000);
+    return entry;
+  }
+  finish(entry) {
+    if (entry.rec.state !== 'inactive') entry.rec.stop();
+  }
+  failed(err) {
+    if (this.error) return;
+    this.error = err;
+    this.call.setNotice('The recording could not write to its folder: ' + (err && err.message ? err.message : err));
+  }
+  manifest() {
+    return {
+      format: 'dango-recording',
+      version: 1,
+      room: location.origin + this.call.room,
+      title: this.call.title,
+      startedAt: this.startedAt,
+      endedAt: this.endedAt,
+      // Times are milliseconds from startedAt; a segment still being
+      // recorded has no end yet.
+      participants: this.participants,
+      segments: this.segments.filter((s) => s.start !== null)
+    };
+  }
+  saveManifest() {
+    const text = JSON.stringify(this.manifest(), null, 2) + '\\n';
+    this.manifestChain = this.manifestChain.then(async () => {
+      const h = await this.dir.getFileHandle('manifest.json', { create: true });
+      const w = await h.createWritable();
+      await w.write(text);
+      await w.close();
+    }).catch((err) => this.failed(err));
+  }
+  // Ends every segment, and resolves once every file is closed.
+  async stop() {
+    if (this.endedAt) return;
+    clearInterval(this.timer);
+    const entries = Array.from(this.active.values());
+    this.active.clear();
+    const stopped = entries.map((e) => new Promise((resolve) => {
+      if (e.rec.state === 'inactive') resolve();
+      else { e.rec.addEventListener('stop', () => resolve()); e.rec.stop(); }
+    }));
+    await Promise.all(stopped);
+    await Promise.all(entries.map((e) => e.writing));
+    this.endedAt = new Date().toISOString();
+    this.saveManifest();
+    await this.manifestChain;
+  }
+}
+
 // ---- the call ----
 class Call {
   constructor(room, title) {
@@ -523,6 +667,7 @@ class Call {
     this.lastSpeaker = null;
     this.speaking = new Set();
     this.speaker = stored(DEVICE_KEYS.speaker);
+    this.recorder = null;
     this.miniPos = null;
     this.tiles = new Map();
     // Everyone this page has seen in the call, for the name and face of a
@@ -577,6 +722,7 @@ class Call {
     if (this.phase === 'left') return;
     const joined = this.callId !== null;
     this.phase = 'left';
+    if (this.recorder) { this.recorder.stop(); this.recorder = null; }
     this.broadcast({ t: 'bye' });
     const conns = Array.from(this.conns.values());
     this.conns.clear();
@@ -1103,13 +1249,78 @@ class Call {
     this.render();
   }
 
+  // ---- recording ----
+  toggleRecording() {
+    if (this.recorder) {
+      const r = this.recorder;
+      this.recorder = null;
+      this.render();
+      r.stop().then(() => { if (!r.error) this.setNotice('The recording is saved, in the folder ' + r.dir.name + '.'); });
+      return;
+    }
+    if (this.phase !== 'in' || this.recordingStarting) return;
+    this.recordingStarting = true;
+    Recorder.start(this).then((r) => {
+      this.recordingStarting = false;
+      if (this.phase !== 'in') { r.stop(); return; }
+      this.recorder = r;
+      this.render();
+    }, (e) => {
+      this.recordingStarting = false;
+      if (!e || e.name !== 'AbortError') this.setNotice('The recording could not start: ' + (e && e.message ? e.message : e));
+    });
+  }
+
+  // Every track there is to record: this page's own (a device it does not
+  // have is left out, not recorded as silence or black), and each connected
+  // page's as received.
+  recordingSources() {
+    const out = [];
+    const add = (who, kind, track) => { if (track) out.push({ who: who, kind: kind, track: track }); };
+    const me = this.roster.get(clientId);
+    const f = frame();
+    const self = { id: clientId, user: me ? me.user : f ? f.viewer : '', name: me ? me.name || me.user : f ? f.viewer : 'me', self: true };
+    if (this.localStream) {
+      if (this.micAvailable) add(self, 'audio', this.localStream.getAudioTracks()[0]);
+      if (this.camAvailable) add(self, 'camera', this.localStream.getVideoTracks()[0]);
+    }
+    if (this.screenStream) add(self, 'screen', this.screenStream.getVideoTracks()[0]);
+    for (const [id, c] of this.conns) {
+      if (!c.connected) continue;
+      const r = this.known.get(id);
+      const who = { id: id, user: r ? r.user : '', name: r ? r.name || r.user : 'someone', self: false };
+      add(who, 'audio', c.tracks.audio);
+      add(who, 'camera', c.tracks.video);
+      if (c.screen && c.screenStream) add(who, 'screen', c.tracks.screen);
+    }
+    return out;
+  }
+
+  renderRecording() {
+    const el = this.el;
+    if (!el) return;
+    const rec = el.querySelector('.call-rec');
+    rec.hidden = !this.recorder;
+    if (this.recorder) {
+      const t = Math.floor(this.recorder.now() / 1000);
+      const text = '● ' + Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0');
+      if (rec.textContent !== text) rec.textContent = text;
+      rec.title = 'Recording to the folder ' + this.recorder.dir.name + ' on this computer';
+    }
+    const b = el.querySelector('[data-call-act="record"]');
+    if (b) {
+      b.textContent = this.recorder ? 'Stop recording' : 'Record to a folder…';
+      b.disabled = this.phase !== 'in' || !!this.recordingStarting;
+    }
+  }
+
   // ---- the dock ----
   buildDock() {
     const el = document.createElement('section');
     el.className = 'call-dock';
     el.setAttribute('aria-label', 'Call in ' + this.title);
     el.innerHTML =
-      '<div class="call-bar"><a class="call-where"></a><span class="call-status" role="status"></span>' +
+      '<div class="call-bar"><a class="call-where"></a><span class="call-status" role="status"></span><span class="call-rec" hidden></span>' +
       '<button type="button" class="call-ctl call-size" data-call-act="size"></button></div>' +
       '<div class="call-notice" hidden><span></span><button type="button" class="call-ctl" data-call-act="dismiss" aria-label="Dismiss" title="Dismiss">' + ICONS.x + '</button></div>' +
       '<div class="call-tiles"></div>' +
@@ -1119,6 +1330,7 @@ class Call {
       (canPickSpeaker ? '<label>Speaker <select data-call-device="speaker"></select></label>' : '') +
       '<label>Video quality <select data-call-quality>' + QUALITIES.map((q) => '<option value="' + q + '">' + QUALITY_LABELS[q] + '</option>').join('') + '</select></label>' +
       '<p class="muted">The quality is the whole call\\'s: changing it changes what everyone sends. Lower suits slower connections, since each person sends their video to each other one.</p>' +
+      (canRecord ? '<div class="call-record"><button type="button" class="call-copy" data-call-act="record"></button> <span class="muted">Saves each person’s audio, camera, and screen as separate files in a folder on this computer, with a manifest of whose each file is and when.</span></div>' : '') +
       '<div class="call-diag"><strong>Connections</strong><ul data-call-diag></ul>' +
       '<button type="button" class="call-copy" data-call-act="copy">Copy the details</button> <span class="muted">to send to whoever looks after the workspace, if a call will not connect.</span></div>' +
       '</div>' +
@@ -1156,6 +1368,7 @@ class Call {
       else if (act === 'size') this.setFull(!this.full);
       else if (act === 'dismiss') this.setNotice('');
       else if (act === 'copy') { if (this.diagText) copyText(b, this.diagText); }
+      else if (act === 'record') this.toggleRecording();
       else if (act === 'leave') this.leave();
       return;
     }
@@ -1349,6 +1562,8 @@ class Call {
       tile.classList.toggle('spotlit', id === spot);
     });
     el.style.setProperty('--call-count', String(ids.length));
+    if (this.recorder) this.recorder.sync(this.recordingSources());
+    this.renderRecording();
   }
 
   renderControls() {

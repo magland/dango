@@ -522,6 +522,9 @@ html.loading-page { cursor: progress; }
 .call-where { color: var(--call-fg); font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .call-where:hover { color: var(--call-fg); }
 .call-status { color: var(--call-muted); white-space: nowrap; }
+.call-rec { color: #ff6b61; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.call-rec[hidden] { display: none; }
+.call-record { flex-basis: 100%; font-size: var(--t-xs); color: var(--call-muted); }
 .call-size { margin-left: auto; }
 .call-notice { grid-area: notice; display: flex; align-items: flex-start; gap: var(--s2); padding: 6px 10px; border-radius: var(--radius); background: #4a3712; color: #fbe7b5; }
 .call-notice[hidden] { display: none; }
