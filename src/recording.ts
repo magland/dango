@@ -30,7 +30,7 @@ export interface Manifest {
   startedAt?: string;
   endedAt?: string | null;
   participants: Record<string, { user?: string; name?: string; self?: boolean }>;
-  segments: { file: string; participant: string; kind: string; start: number | null; end: number | null }[];
+  segments: { file: string; participant: string; kind: string; start: number | null; end: number | null; error?: string }[];
   events?: { t: number; type: string }[];
 }
 
@@ -163,7 +163,8 @@ export function planRecording(m: Manifest, present: (file: string) => boolean = 
   for (const s of m.segments) {
     if (s.start === null || s.end === null) skipped.push({ file: s.file, reason: 'it was never finished (the page closed while recording)' });
     else if (!present(s.file)) skipped.push({ file: s.file, reason: 'the file is not in the folder' });
-    else if (s.end > s.start) segs.push({ ...s, start: s.start, end: s.end });
+    else if (s.end <= s.start) skipped.push({ file: s.file, reason: `it is empty${s.error ? ' (' + s.error + ')' : ''}` });
+    else segs.push({ ...s, start: s.start, end: s.end });
   }
   // A track's next segment starts a moment before the last one ends (see
   // SEGMENT_MAX_MS in the call script); the earlier one is cut where the

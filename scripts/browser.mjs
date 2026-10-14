@@ -678,6 +678,20 @@ ok('turning the microphone on is shown to the others');
 // Alice records meanwhile, into the browser's private file system, which
 // has the same folder API as the folder picker gives.
 await c1.eval("document.querySelector('.call-dock [data-call-act=\"cam\"]').click(); true");
+// The first recorder of the screen stops itself as soon as it starts, as
+// Chrome's once did on a slow machine, to see the track recorded again.
+await c1.eval(`(() => {
+  const Real = MediaRecorder;
+  let stopped = false;
+  window.MediaRecorder = class extends Real {
+    start(t) {
+      super.start(t);
+      const v = this.stream.getVideoTracks()[0];
+      if (!stopped && v && v.getSettings().displaySurface) { stopped = true; setTimeout(() => this.stop(), 50); }
+    }
+  };
+  return true;
+})()`);
 await c1.eval("window.showDirectoryPicker = () => navigator.storage.getDirectory(); document.querySelector('.call-dock [data-call-act=\"settings\"]').click(); document.querySelector('.call-dock [data-call-act=\"record\"]').click(); true", true);
 await waitFor('alice’s dock to say it is recording', async () => c1.eval("!document.querySelector('.call-dock .call-rec').hidden"));
 const recMark = (page) => page.eval("(() => { const r = document.querySelector('.call-dock .call-rec'); return r.hidden ? '' : r.textContent; })()");
@@ -692,6 +706,7 @@ await waitFor('bob to see alice’s screen and her camera, in two tiles', async 
 }, 15000);
 if (await b1.eval("document.querySelector('.call-dock .call-tile:not([data-peer=\"self\"]):not([data-peer$=\":screen\"])').classList.contains('video-off')")) fail('alice’s camera went dark when she shared her screen');
 ok('sharing a screen shows it in its own tile, beside the camera');
+await sleep(2500); // past the recording's retry of the screen (see the MediaRecorder above)
 await c1.eval("document.querySelector('.call-dock [data-call-act=\"screen\"]').click(); true");
 await waitFor('bob to see the screen’s tile go', async () => (await screenTile(b1, '$=":screen"')) === null);
 ok('stopping the share takes its tile away');
@@ -724,19 +739,26 @@ const recording = await c1.eval(`(async () => {
 {
   const { manifest, sizes } = recording;
   const whose = (seg) => manifest.participants[seg.participant];
-  const kinds = manifest.segments.map((seg) => `${whose(seg).name}/${seg.kind}`).sort().join(' ');
+  // A recorder the browser stopped by itself leaves a segment with its error,
+  // and the track is recorded again; what was recorded must still be whole.
+  const failed = manifest.segments.filter((seg) => seg.error);
+  if (!failed.some((seg) => seg.kind === 'screen' && seg.error === 'stopped by the browser')) fail(`the screen's recorder, stopped by itself, is not marked so: ${JSON.stringify(manifest.segments)}`);
+  if (failed.length > 1) console.log(`note: the browser stopped more recorders by itself, and they were started again: ${failed.map((seg) => `${seg.file} (${seg.error})`).join(', ')}`);
+  const segments = manifest.segments.filter((seg) => !seg.error);
+  const kinds = segments.map((seg) => `${whose(seg).name}/${seg.kind}`).sort().join(' ');
   if (kinds !== 'alice/audio alice/audio alice/camera alice/camera alice/screen bob/audio bob/audio bob/camera bob/camera') fail(`the recording has the wrong segments: ${kinds}`);
   if (manifest.events.map((e) => e.type).join() !== 'start,pause,resume,stop') fail(`the recording's events are wrong: ${JSON.stringify(manifest.events)}`);
   const [pause, resume] = manifest.events.slice(1, 3);
-  if (manifest.segments.some((seg) => seg.end > pause.t + 500 && seg.start < resume.t)) fail(`a segment goes on through the pause: ${JSON.stringify(manifest)}`);
-  if (!manifest.endedAt || manifest.segments.some((seg) => seg.end === null || seg.end <= seg.start)) fail(`the recording's manifest is not finished: ${JSON.stringify(manifest)}`);
-  const screen = manifest.segments.find((seg) => seg.kind === 'screen');
-  const camera = manifest.segments.find((seg) => seg.kind === 'camera' && whose(seg).self);
+  if (segments.some((seg) => seg.end > pause.t + 500 && seg.start < resume.t)) fail(`a segment goes on through the pause: ${JSON.stringify(manifest)}`);
+  if (!manifest.endedAt || manifest.segments.some((seg) => seg.end === null) || segments.some((seg) => seg.end <= seg.start)) fail(`the recording's manifest is not finished: ${JSON.stringify(manifest)}`);
+  const screen = segments.find((seg) => seg.kind === 'screen');
+  const camera = segments.find((seg) => seg.kind === 'camera' && whose(seg).self);
   if (!(screen.end < camera.end - 1000)) fail('the screen’s segment does not end when the share stopped');
-  if (Object.values(sizes).some((n) => n < 1000)) fail(`a recorded file is empty: ${JSON.stringify(sizes)}`);
+  if (segments.some((seg) => sizes[seg.file] < 1000)) fail(`a recorded file is empty: ${JSON.stringify(sizes)}`);
 }
 await c1.eval("document.querySelector('.call-dock [data-call-act=\"settings\"]').click(); document.querySelector('.call-dock [data-call-act=\"dismiss\"]').click(); document.querySelector('.call-dock [data-call-act=\"cam\"]').click(); true");
 ok('recording a call saves each person’s audio, camera, and screen to files of their own, with a manifest of when, and a pause is a gap between segments');
+ok('a track whose recorder the browser stops by itself is recorded again, and the stop is noted in the manifest');
 
 // What Chrome recorded, rebuilt by dango recording render, where ffmpeg is.
 if (spawnSync('ffmpeg', ['-version']).status === 0) {

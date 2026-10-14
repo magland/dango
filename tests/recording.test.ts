@@ -85,6 +85,14 @@ test('cameras alone are laid out in a grid, a short last row centered', () => {
   assert.deepStrictEqual(three.get('c'), { x: 320, y: 360, w: 640, h: 360 });
 });
 
+test('a segment left empty, its recorder stopped as it started, is left out with the reason', () => {
+  const m = sampleManifest();
+  m.segments.push({ file: '009-alice-screen.webm', participant: 'a', kind: 'screen', start: 1400, end: 1400, error: 'stopped by the browser' });
+  const plan = planRecording(m);
+  assert.deepStrictEqual(plan.skipped.find((s) => s.file === '009-alice-screen.webm'), { file: '009-alice-screen.webm', reason: 'it is empty (stopped by the browser)' });
+  assert.ok(plan.intervals.every((iv) => iv.tiles.every((t) => t.file !== '009-alice-screen.webm')));
+});
+
 test('a manifest that is not a recording’s is refused', () => {
   assert.throws(() => planRecording({ ...sampleManifest(), format: 'other' }), /not a dango recording/);
   assert.throws(() => planRecording({ ...sampleManifest(), version: 2 }), /version 2/);

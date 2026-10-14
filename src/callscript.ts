@@ -504,12 +504,19 @@ function controlButton(act, label) {
 // open. A segment is therefore also closed after SEGMENT_MAX_MS, its
 // successor started a moment before, which bounds what can be lost.
 //
+// The browser can stop a recorder by itself, its track still live (seen
+// once, on a slow machine, for a screen the moment its recording began).
+// The segment then keeps the reason in the manifest, as its error, and the
+// track is recorded again after RETRY_MS, up to RETRY_LIMIT times.
+//
 // Pausing ends every segment and resuming starts new ones, so a pause is a
 // gap in the timeline rather than something hidden inside a file; the
 // manifest's events say when each began and ended. The others in the call
 // are told whenever a recording starts, pauses, resumes, or stops.
 const canRecord = typeof window.showDirectoryPicker === 'function' && typeof MediaRecorder !== 'undefined';
 const SEGMENT_MAX_MS = 5 * 60 * 1000;
+const RETRY_MS = 1000;
+const RETRY_LIMIT = 3;
 
 function recordingMime(kind) {
   const list = kind === 'audio' ? ['audio/webm;codecs=opus', 'audio/webm'] : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
@@ -538,6 +545,7 @@ class Recorder {
     this.segments = [];
     this.participants = {};
     this.seq = 0;
+    this.failures = new Map();
     this.paused = false;
     this.events = [{ t: 0, type: 'start' }];
     this.error = null;
@@ -557,17 +565,21 @@ class Recorder {
       if (!want.has(key) || entry.src.track.readyState === 'ended') { this.active.delete(key); this.finish(entry); }
     }
     for (const [key, src] of want) {
-      if (!this.active.has(key) && src.track.readyState !== 'ended') this.active.set(key, this.begin(src));
+      const f = this.failures.get(key);
+      if (f && (f.count > RETRY_LIMIT || Date.now() < f.at + RETRY_MS)) continue;
+      if (!this.active.has(key) && src.track.readyState !== 'ended') this.active.set(key, this.begin(src, key));
     }
   }
   tick() {
     this.call.renderRecording();
     for (const [key, entry] of Array.from(this.active)) {
       if (entry.seg.start !== null && this.now() - entry.seg.start > SEGMENT_MAX_MS) {
-        this.active.set(key, this.begin(entry.src));
+        this.active.set(key, this.begin(entry.src, key));
         this.finish(entry);
       }
     }
+    // A track whose recorder the browser stopped is started again from here.
+    if (this.failures.size) this.sync(this.call.recordingSources());
   }
   pause() {
     if (this.paused || this.endedAt) return;
@@ -584,7 +596,7 @@ class Recorder {
     this.events.push({ t: this.now(), type: 'resume' });
     this.saveManifest();
   }
-  begin(src) {
+  begin(src, key) {
     const name = String(++this.seq).padStart(3, '0') + '-' + fileSafe(src.who.name) + '-' + src.kind + '.webm';
     const seg = { file: name, participant: src.who.id, kind: src.kind, start: null, end: null };
     this.segments.push(seg);
@@ -598,8 +610,18 @@ class Recorder {
       if (e.data.size) entry.writing = entry.writing.then(() => entry.writable.write(e.data)).catch((err) => this.failed(err));
     };
     rec.onstart = () => { seg.start = this.now(); this.saveManifest(); };
+    rec.onerror = (e) => { seg.error = e.error ? e.error.name + ': ' + e.error.message : 'error'; };
     rec.onstop = () => {
       seg.end = this.now();
+      if (seg.start === null) seg.start = seg.end;
+      // Stopped here, a segment is taken out of active first; one still in
+      // it, its track still live, was stopped by the browser.
+      if (this.active.get(key) === entry && entry.src.track.readyState !== 'ended') {
+        this.active.delete(key);
+        if (!seg.error) seg.error = 'stopped by the browser';
+        const f = this.failures.get(key) || { count: 0, at: 0 };
+        this.failures.set(key, { count: f.count + 1, at: Date.now() });
+      }
       entry.writing = entry.writing.then(() => entry.writable.close()).catch((err) => this.failed(err));
       this.saveManifest();
     };
