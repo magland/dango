@@ -116,6 +116,22 @@ await waitFor('the title to clear once someone is back', async () => (await a2.e
 await waitFor('the server to hear it was read', async () => !(await api(alice, 'GET', '/unread')).rooms.some((r) => r.url === '/c/general'));
 ok('the first key pressed on returning reads it, and clears the title');
 
+// A visible window someone is working beside, without the focus, is not
+// being read either, however lately the pointer crossed it; clicking into it
+// reads what came. The focus is faked rather than taken from the browser.
+await a2.eval("document.hasFocus = () => false; true");
+await a2.eval("document.dispatchEvent(new PointerEvent('pointermove')); true");
+await api(bob, 'POST', '/channels/general/messages', { body: 'while alice is in her editor' });
+await waitFor('the message to appear', async () => (await a2.eval("document.getElementById('msg-list').textContent")).includes('in her editor'));
+await waitFor('the unfocused window’s title to count it', async () => (await a2.eval('document.title')) === '(1) dango');
+await sleep(300);
+if (!(await api(alice, 'GET', '/unread')).rooms.some((r) => r.url === '/c/general')) fail('a visible window without the focus reported a message read');
+ok('a visible window without the focus counts what arrives, and does not report it read');
+await a2.eval("delete document.hasFocus; window.dispatchEvent(new Event('focus')); true");
+await waitFor('the title to clear on focus', async () => (await a2.eval('document.title')) === 'dango');
+await waitFor('the server to hear it was read', async () => !(await api(alice, 'GET', '/unread')).rooms.some((r) => r.url === '/c/general'));
+ok('focusing the window reads it, and clears the title');
+
 // ---- @-completion ----
 
 await a2.eval("document.querySelector('.composer textarea').focus(); true");

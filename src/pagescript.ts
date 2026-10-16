@@ -685,21 +685,23 @@ document.addEventListener('DOMContentLoaded', function () {
 // ---- whether anyone is at the page ----
 // A visible page is not proof of a reader: a room left open on a desktop
 // nobody is sitting at is visible all night, and if it reported everything
-// read, the phone in its owner's pocket would never hear of any of it. So the
-// page counts as attended only while it is visible and has been used lately:
+// read, the phone in its owner's pocket would never hear of any of it. Nor is
+// a visible window someone is not working in: a conversation open beside an
+// editor, or on a second monitor, shows a message arriving, but a person
+// busy in the other window does not see it, and reporting it read would
+// spare them the notification they were waiting for. So the page counts as
+// attended only while its window has the focus and it has been used lately:
 // a key, a click or tap, a scroll, or the pointer moving over it, within the
-// last five minutes if the window has the focus, or two if it does not (a
-// second monitor, say). Someone who watches a busy room for longer than that
-// without touching anything is notified of what they saw, which is the
-// cheaper of the two mistakes. Browsers offer no idle signal of their own
-// that works everywhere without a permission prompt; this is the one that
-// does.
+// last five minutes. Someone who watches a busy room for longer than that
+// without touching anything, or reads it from a window they have not
+// clicked into, is notified of what they saw, which is the cheaper of the
+// two mistakes. Browsers offer no idle signal of their own that works
+// everywhere without a permission prompt; this is the one that does.
 var lastActive = Date.now();
-var IDLE_FOCUSED_MS = 5 * 60 * 1000;
-var IDLE_UNFOCUSED_MS = 2 * 60 * 1000;
+var IDLE_MS = 5 * 60 * 1000;
 function attended() {
-  if (document.visibilityState !== 'visible') return false;
-  return Date.now() - lastActive < (document.hasFocus() ? IDLE_FOCUSED_MS : IDLE_UNFOCUSED_MS);
+  if (document.visibilityState !== 'visible' || !document.hasFocus()) return false;
+  return Date.now() - lastActive < IDLE_MS;
 }
 // Coming back reads what arrived in the room while nobody was there.
 function catchUp() {
@@ -723,11 +725,15 @@ function arrived() {
 ['keydown', 'pointerdown', 'pointermove', 'touchstart', 'wheel', 'scroll'].forEach(function (type) {
   document.addEventListener(type, noteActivity, { capture: true, passive: true });
 });
-window.addEventListener('focus', noteActivity);
-// Returning to a tab is itself someone arriving, however briefly they were
-// gone: what came while it was hidden was counted, and is read now.
+// Returning to a tab, or clicking into its window, is itself someone
+// arriving, however briefly they were gone: what came while it was hidden,
+// or while they worked in another window, was counted, and is read now.
+window.addEventListener('focus', function () {
+  lastActive = Date.now();
+  arrived();
+});
 document.addEventListener('visibilitychange', function () {
-  if (document.visibilityState !== 'visible') return;
+  if (document.visibilityState !== 'visible' || !document.hasFocus()) return;
   lastActive = Date.now();
   arrived();
 });
