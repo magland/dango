@@ -10,7 +10,7 @@ import { dmTitle, readDm } from './dms';
 import { MeetingInfo, personLabel, readMeeting } from './meetings';
 import { Message, readMessage, readMessages } from './messages';
 import { canSeeChannel, canSeeDm, canSeeMeeting } from './perms';
-import { PushTarget, isPushEndpoint, sendPush } from './push';
+import { PushOutcome, PushTarget, isPushEndpoint, sendPush } from './push';
 import { Room } from './rooms';
 import { audienceOf, forgetMarkers, isKeyOf, mentionsUser, readKey, readMarkers, unreadRooms } from './reads';
 import { isGuestName, isValidChannelName, isValidWorkspaceUserName, userDir, usersDir } from './workspace';
@@ -218,6 +218,31 @@ export interface Device extends PushTarget {
   /** What the device said it was when it subscribed: "Chrome on Android". */
   label: string;
   created: string;
+  /** When the browser last offered this subscription itself, from a page of the workspace. */
+  seen?: string;
+  /** When a push service last accepted a notification for this device. */
+  delivered?: string;
+  /**
+   * Set while every push since the last accepted one has been refused, so a
+   * device that has stopped working shows as such on the account page
+   * instead of looking the same as one that works: when the refusals began,
+   * how many there have been, and what the push service said to the latest.
+   */
+  failing?: DeviceFailure;
+}
+
+export interface DeviceFailure {
+  since: string;
+  count: number;
+  status: number;
+  detail: string;
+}
+
+function normalizeFailure(raw: unknown): DeviceFailure | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.since !== 'string' || typeof r.count !== 'number' || typeof r.status !== 'number') return undefined;
+  return { since: r.since, count: r.count, status: r.status, detail: typeof r.detail === 'string' ? r.detail : '' };
 }
 
 export function deviceId(endpoint: string): string {
@@ -239,6 +264,9 @@ function normalizeDevices(parsed: unknown): Device[] {
       origin: typeof r.origin === 'string' ? r.origin : '',
       label: typeof r.label === 'string' ? r.label : 'A browser',
       created: typeof r.created === 'string' ? r.created : '',
+      seen: typeof r.seen === 'string' ? r.seen : undefined,
+      delivered: typeof r.delivered === 'string' ? r.delivered : undefined,
+      failing: normalizeFailure(r.failing),
     });
   }
   return out;
@@ -314,7 +342,10 @@ export function addDevice(
   updateDevices(root, username, (devices) => {
     // The page offers its subscription again each time the account page
     // opens, which keeps the keys current without resetting when it was added.
+    // How the device has fared is kept too, unless the keys changed: pushes
+    // refused under the old keys say nothing about the new ones.
     const earlier = devices.find((d) => d.endpoint === sub.endpoint);
+    const sameKeys = earlier && earlier.keys.p256dh === sub.keys.p256dh && earlier.keys.auth === sub.keys.auth;
     device = {
       id: deviceId(sub.endpoint),
       endpoint: sub.endpoint,
@@ -322,6 +353,9 @@ export function addDevice(
       origin: info.origin,
       label: info.label.slice(0, 80),
       created: earlier?.created || new Date().toISOString(),
+      seen: new Date().toISOString(),
+      delivered: earlier?.delivered,
+      failing: sameKeys ? earlier.failing : undefined,
     };
     const others = devices.filter((d) => d.endpoint !== sub.endpoint);
     return [...others, device].slice(-MAX_DEVICES);
@@ -370,7 +404,7 @@ export function renewDevice(
     if (!found) continue;
     updateDevices(root, username, (devices) => [
       ...devices.filter((d) => d.endpoint !== old.endpoint && d.endpoint !== next.endpoint),
-      { ...found, id: deviceId(next.endpoint), endpoint: next.endpoint, keys: next.keys },
+      { ...found, id: deviceId(next.endpoint), endpoint: next.endpoint, keys: next.keys, seen: new Date().toISOString(), failing: undefined },
     ]);
     return true;
   }
@@ -511,7 +545,11 @@ export function composeNotification(root: string, room: Room, messages: Message[
   return { title, body, tag: room.url, url: room.url, unread, time: Date.parse(newest.created) || Date.now() };
 }
 
-/** Send to every device a person has, forgetting the ones their push service says are gone. */
+/**
+ * Send to every device a person has, forgetting the ones their push service
+ * says are gone, and noting on each of the others whether this push was
+ * accepted (see Device.failing).
+ */
 export async function pushToUser(
   root: string,
   username: string,
@@ -520,20 +558,44 @@ export async function pushToUser(
 ): Promise<{ sent: number; gone: number; failed: { label: string; status: number; detail?: string }[] }> {
   const result = { sent: 0, gone: 0, failed: [] as { label: string; status: number; detail?: string }[] };
   const devices = readDevices(root, username).filter((d) => !opts.only || d.id === opts.only);
+  const outcomes = new Map<string, { outcome: PushOutcome; status: number; detail?: string }>();
   await Promise.all(
     devices.map(async (d) => {
       const r = await sendPush(root, d, payload, { urgency: opts.urgency, topic: opts.topic });
+      outcomes.set(d.id, r);
       if (r.outcome === 'sent') result.sent++;
-      else if (r.outcome === 'gone') {
-        result.gone++;
-        removeDevice(root, username, d.id);
-      } else {
+      else if (r.outcome === 'gone') result.gone++;
+      else {
         result.failed.push({ label: d.label, status: r.status, detail: r.detail });
         console.error(`push to ${username} (${d.label}) failed: ${r.status} ${r.detail ?? ''}`.trim());
       }
     })
   );
+  if (outcomes.size) recordOutcomes(root, username, outcomes);
   return result;
+}
+
+/** Write what the push services said back to the person's devices, in one pass under the lock. */
+function recordOutcomes(root: string, username: string, outcomes: Map<string, { outcome: PushOutcome; status: number; detail?: string }>): void {
+  const now = new Date().toISOString();
+  updateDevices(root, username, (devices) =>
+    devices
+      .filter((d) => outcomes.get(d.id)?.outcome !== 'gone')
+      .map((d) => {
+        const r = outcomes.get(d.id);
+        if (!r) return d;
+        if (r.outcome === 'sent') return { ...d, delivered: now, failing: undefined };
+        return {
+          ...d,
+          failing: {
+            since: d.failing?.since ?? now,
+            count: (d.failing?.count ?? 0) + 1,
+            status: r.status,
+            detail: (r.detail ?? '').slice(0, 200),
+          },
+        };
+      })
+  );
 }
 
 // ---- the wait ----

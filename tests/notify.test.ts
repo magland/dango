@@ -346,6 +346,47 @@ test('a subscription the push service says is gone is forgotten', async () => {
   assert.strictEqual(readDevices(root, 'alice').length, 0);
 });
 
+test('each device records whether its pushes are accepted, and a refusal is kept until one is', async () => {
+  const { root, room } = workspaceWithDm();
+  capturePushes(201);
+  queueNotifications(root, room, addMessage(room.dir, { author: 'bob', body: 'one' }), 20);
+  await settle(80);
+  let d = readDevices(root, 'alice')[0];
+  assert.ok(d.delivered, 'an accepted push is recorded');
+  assert.strictEqual(d.failing, undefined);
+  const delivered = d.delivered;
+  capturePushes(403);
+  for (const body of ['two', 'three']) {
+    queueNotifications(root, room, addMessage(room.dir, { author: 'bob', body }), 20);
+    await settle(80);
+  }
+  d = readDevices(root, 'alice')[0];
+  assert.strictEqual(d.delivered, delivered);
+  assert.strictEqual(d.failing?.count, 2);
+  assert.strictEqual(d.failing?.status, 403);
+  capturePushes(201);
+  queueNotifications(root, room, addMessage(room.dir, { author: 'bob', body: 'four' }), 20);
+  await settle(80);
+  d = readDevices(root, 'alice')[0];
+  assert.strictEqual(d.failing, undefined, 'an accepted push clears the refusals');
+});
+
+test('a browser offering its subscription again marks it seen, and new keys clear its refusals', () => {
+  const root = tmpRoot();
+  addUserToken(root, 'alice');
+  const b = browser();
+  addDevice(root, 'alice', b.sub, { origin: 'https://chat.example.org', label: 'x' });
+  const file = path.join(root, 'users', 'alice', 'push.json');
+  const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+  stored[0].failing = { since: '2026-01-01T00:00:00.000Z', count: 3, status: 403, detail: 'no' };
+  fs.writeFileSync(file, JSON.stringify(stored));
+  assert.strictEqual(addDevice(root, 'alice', b.sub, { origin: 'https://chat.example.org', label: 'x' }).failing?.count, 3);
+  const fresh = browser(b.sub.endpoint);
+  const d = addDevice(root, 'alice', fresh.sub, { origin: 'https://chat.example.org', label: 'x' });
+  assert.strictEqual(d.failing, undefined);
+  assert.ok(d.seen);
+});
+
 test('nothing is pushed inside quiet hours', async () => {
   const { root, room } = workspaceWithDm();
   // An hour either side of now, in UTC.

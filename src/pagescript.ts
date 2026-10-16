@@ -869,8 +869,8 @@ function markThisDevice(endpoint) {
     if (!row || row.querySelector('.this-device')) return;
     var mark = document.createElement('span');
     mark.className = 'muted this-device';
-    mark.textContent = '(this browser)';
-    row.firstElementChild.after(mark);
+    mark.textContent = ' (this browser)';
+    (row.querySelector('div > span') || row.firstElementChild).after(mark);
   });
 }
 function offText() {

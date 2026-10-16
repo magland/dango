@@ -1053,8 +1053,23 @@ function notificationsSection(root: string, viewer: Viewer, notify: AccountNotif
     html`<label class="checkbox" style="display:block;margin-bottom:6px"><input type="radio" name="level" value="${value}" ${prefs.level === value ? raw('checked') : ''}> ${label}<br><span class="muted">${hint}</span></label>`;
   const muteBox = (r: RoomUnread) =>
     html`<label class="checkbox" style="display:block;margin-bottom:4px"><input type="checkbox" name="mute" value="${readKey(r.url)}" ${prefs.muted.includes(readKey(r.url)) ? raw('checked') : ''}> ${r.title}</label>`;
+  // Under each device, how its pushes have fared: a device whose push service
+  // has been refusing them is said to be failing, with what the service said,
+  // so it is not mistaken for one that works.
+  const deviceHealth = (d: Device) => {
+    if (d.failing) {
+      const what = `${d.failing.count === 1 ? 'the last notification was' : `the last ${d.failing.count} notifications were`} refused (${d.failing.status || 'no answer'}${d.failing.detail ? `: ${d.failing.detail}` : ''})`;
+      return html`<div style="color:var(--danger);font-size:var(--t-sm)">Not receiving notifications since ${timeTag(d.failing.since, '')}: ${what}. Turn notifications off and on again in that browser.</div>`;
+    }
+    const parts = [
+      d.created ? html`added ${timeTag(d.created)}` : null,
+      d.delivered ? html`last notified ${timeTag(d.delivered)}` : html`nothing sent yet`,
+      d.seen ? html`last checked in ${timeTag(d.seen)}` : null,
+    ].filter((p): p is Html => p !== null);
+    return html`<div class="muted" style="font-size:var(--t-sm)">${joinHtml(parts, ' · ')}</div>`;
+  };
   const deviceRows = devices.map(
-    (d) => html`<li style="display:flex;align-items:center;gap:8px;margin-bottom:4px" data-device="${d.id}"><span>${d.label}</span>${d.created ? html`<span class="muted">added ${timeTag(d.created)}</span>` : ''}
+    (d) => html`<li style="display:flex;align-items:center;gap:8px;margin-bottom:8px" data-device="${d.id}"><div><span>${d.label}</span>${deviceHealth(d)}</div>
 <form method="post" action="/account/push/remove" style="margin-left:auto">${csrfField(viewer)}<input type="hidden" name="id" value="${d.id}"><button class="btn-link" type="submit">Remove</button></form></li>`
   );
   return html`<h2 id="notifications">Notifications</h2>
