@@ -570,6 +570,39 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     }
   });
 
+  // Every signed-in page checks now and then that this browser's
+  // notifications still work, offering its subscription (see "keeping
+  // notifications working" in the page script). Unlike subscribing, this
+  // never adds a device: one that is not on the list was removed, by the
+  // person on another device or because its push service said it was gone,
+  // and the page asks before turning it on again. The answer says whether
+  // the device is known and how many pushes to it have been refused in a
+  // row, which the page answers by subscribing afresh.
+  app.post('/account/push/checkin', json, (req, res) => {
+    const viewer = requireForm(req, res);
+    if (!viewer) return;
+    const sub = parseSubscription((req.body as Record<string, unknown>).subscription);
+    if (!sub) {
+      fail(res, viewer, 400, 'This browser offered a push service the workspace does not send to.');
+      return;
+    }
+    try {
+      limits.action(viewer.auth.username);
+    } catch (e) {
+      sendOpError(res, viewer, e);
+      return;
+    }
+    if (!readDevices(root, viewer.auth.username).some((d) => d.endpoint === sub.endpoint)) {
+      res.json({ known: false, failing: 0 });
+      return;
+    }
+    const device = addDevice(root, viewer.auth.username, sub, {
+      origin: originOf(req),
+      label: deviceLabel(req.get('user-agent') ?? ''),
+    });
+    res.json({ known: true, failing: device.failing?.count ?? 0 });
+  });
+
   // The service worker, when the browser has replaced its subscription by
   // itself. No session and no CSRF token: the worker has neither, and what
   // it presents instead is the old subscription's auth secret.

@@ -21,6 +21,7 @@ import { MAX_GUEST_NAME, MAX_TITLE, MeetingInfo, currentGuests, guestLink, listM
 import { Device, NotifyPrefs, isMuted, readPrefs } from './notify';
 import { Attachment, MAX_ATTACHMENTS_BYTES, MAX_REACTION, Message } from './messages';
 import { pageScript } from './pagescript';
+import { vapidKeys } from './push';
 import { canDeleteMessage, canEditMessage, canSeeChannel, isGuest, isSiteAdmin } from './perms';
 import { Pin, pinOf, readPins } from './pins';
 import { READ_FILE, RoomUnread, UNREAD_CAP, isNewsFor, mentionsUser, readKey, unreadRooms } from './reads';
@@ -179,10 +180,13 @@ export function layout(title: string, main: Html, opts: PageOpts): string {
   // script: the count stream marks the current room read as messages arrive,
   // and the composer's @-completion needs to know whom not to suggest. It
   // also says where the call script is, which is loaded on the first call,
-  // and who is waiting to be let in to the viewer's meetings.
+  // and who is waiting to be let in to the viewer's meetings, and the key
+  // this browser's notifications are subscribed under, so every page can
+  // check that they still work (see "keeping notifications working" in the
+  // page script).
   const lobby = member ? JSON.stringify(lobbiesFor(listMeetingsFor(opts.root, opts.viewer!.auth.username))) : '[]';
   const body = member
-    ? html`<div class="app ${opts.roomsPage ? 'rooms-page' : ''}" data-viewer="${opts.viewer!.auth.username}" data-current-room="${opts.active ?? ''}" data-csrf="${opts.viewer!.csrf}" data-call-script="/assets/call.js?v=${callScript().tag}" data-lobby="${lobby}">${sidebar(opts, rooms)}<div class="app-main">${main}</div></div>`
+    ? html`<div class="app ${opts.roomsPage ? 'rooms-page' : ''}" data-viewer="${opts.viewer!.auth.username}" data-current-room="${opts.active ?? ''}" data-csrf="${opts.viewer!.csrf}" data-call-script="/assets/call.js?v=${callScript().tag}" data-lobby="${lobby}" data-vapid="${vapidKeys(opts.root).publicKey}">${sidebar(opts, rooms)}<div class="app-main">${main}</div></div>`
     : guest
       ? html`<div class="app guest-app" data-viewer="${opts.viewer!.auth.username}" data-guest="1" data-current-room="${opts.active ?? ''}" data-csrf="${opts.viewer!.csrf}" data-call-script="/assets/call.js?v=${callScript().tag}" data-lobby="[]"><div class="app-main">${main}</div></div>`
       : html`<main class="container" style="padding-top: calc(48px + env(safe-area-inset-top))">${main}</main>`;

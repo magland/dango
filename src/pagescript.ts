@@ -534,6 +534,7 @@ function frame() {
     room: app.getAttribute('data-current-room') || '',
     viewer: app.getAttribute('data-viewer') || '',
     csrf: app.getAttribute('data-csrf') || '',
+    vapid: app.getAttribute('data-vapid') || '',
     guest: app.hasAttribute('data-guest'),
     title: t ? t.getAttribute('data-title') || t.textContent : document.title,
     icon: link,
@@ -799,7 +800,7 @@ function buildOf(text) {
 // src/sw.ts), so registering it changes nothing about how pages load.
 document.addEventListener('DOMContentLoaded', function () {
   if (frame() && !frame().guest && navigator.serviceWorker && window.isSecureContext) {
-    navigator.serviceWorker.register('/sw.js').catch(function () {});
+    navigator.serviceWorker.register('/sw.js').then(checkPush, function () {});
   }
 });
 function setupAccount() {
@@ -909,6 +910,7 @@ function pushSetup(box) {
       if (sub && sameKey(sub, key)) {
         show('Notifications are on in this browser.', 'on');
         markThisDevice(sub.endpoint);
+        remember(PUSH_ON, sub.endpoint);
         // Offered again on each visit, which keeps the workspace's copy of
         // the keys current and restores a device removed from another one.
         pushPost('/account/push/subscribe', { subscription: sub.toJSON() }).catch(function () {});
@@ -924,15 +926,7 @@ function pushSetup(box) {
       if (permission !== 'granted') { on.disabled = false; refresh(); return; }
       return navigator.serviceWorker.register('/sw.js')
         .then(function () { return navigator.serviceWorker.ready; })
-        .then(function (reg) {
-          return reg.pushManager.getSubscription().then(function (old) {
-            if (old && !sameKey(old, key)) return old.unsubscribe().then(function () { return null; });
-            return old;
-          }).then(function (sub) {
-            return sub || reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
-          });
-        })
-        .then(function (sub) { return pushPost('/account/push/subscribe', { subscription: sub.toJSON() }); })
+        .then(function (reg) { return subscribeHere(reg, key, false); })
         .then(function () { reloadPage(); });
     }).catch(function (e) {
       on.disabled = false;
@@ -944,7 +938,7 @@ function pushSetup(box) {
     currentSubscription().then(function (sub) {
       if (!sub) return;
       return pushPost('/account/push/remove', { endpoint: sub.endpoint }).catch(function () {}).then(function () { return sub.unsubscribe(); });
-    }).then(function () { reloadPage(); }, function (e) {
+    }).then(function () { remember(PUSH_ON, null); reloadPage(); }, function (e) {
       off.disabled = false;
       show('Notifications could not be turned off: ' + (e && e.message ? e.message : e), 'on');
     });
@@ -962,6 +956,137 @@ function pushSetup(box) {
     }).then(function () { test.disabled = false; });
   });
   refresh();
+}
+// ---- keeping notifications working ----
+// A browser can stop receiving notifications without anyone deciding that
+// it should: its push service ends the subscription, the browser replaces it
+// and the workspace never hears, the browser withdraws the permission in its
+// own tidying up, or the push service starts refusing what is sent to it.
+// Nothing on a page would show any of this, so each signed-in page, once
+// loaded, checks this browser:
+//
+//  - Notifications were on here (remembered in localStorage) and the
+//    permission is still granted, but the subscription is gone: subscribe
+//    again, which needs no prompt.
+//  - The subscription is there: offer it to the workspace every few hours
+//    (/account/push/checkin), which keeps its keys current and says when the
+//    browser was last seen. If the push service has been refusing pushes to
+//    it, replace it with a fresh one.
+//  - The permission has been withdrawn, the workspace no longer lists this
+//    browser, or subscribing again failed: say so in a notice over the page,
+//    with a button to turn notifications on again and one to leave them off,
+//    rather than letting them stop without a word.
+var PUSH_ON = 'dango.push';
+var PUSH_CHECKED = 'dango.push.checked';
+var PUSH_CHECK_EVERY = 6 * 3600 * 1000;
+function remember(name, value) {
+  try { if (value === null) localStorage.removeItem(name); else localStorage.setItem(name, value); } catch (e) {}
+}
+function recalled(name) {
+  try { return localStorage.getItem(name); } catch (e) { return null; }
+}
+// Subscribe this browser and tell the workspace. fresh drops whatever
+// subscription it has first, for one the push service has stopped taking.
+function subscribeHere(reg, key, fresh) {
+  return reg.pushManager.getSubscription().then(function (old) {
+    if (old && (fresh || !sameKey(old, key))) {
+      var endpoint = old.endpoint;
+      return old.unsubscribe().then(function () {
+        if (fresh) pushPost('/account/push/remove', { endpoint: endpoint }).catch(function () {});
+        return null;
+      });
+    }
+    return old;
+  }).then(function (sub) {
+    return sub || reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+  }).then(function (sub) {
+    return pushPost('/account/push/subscribe', { subscription: sub.toJSON() }).then(function () {
+      remember(PUSH_ON, sub.endpoint);
+      remember(PUSH_CHECKED, String(Date.now()));
+      return sub;
+    });
+  });
+}
+function checkPush() {
+  var f = frame();
+  if (!f || f.guest || !f.vapid || !pushSupported()) return;
+  var key = keyBytes(f.vapid);
+  var wasOn = recalled(PUSH_ON);
+  navigator.serviceWorker.getRegistration('/').then(function (reg) {
+    if (!reg) return;
+    return reg.pushManager.getSubscription().then(function (sub) {
+      if (sub && !sameKey(sub, key)) sub = null;
+      if (Notification.permission !== 'granted') {
+        if (wasOn || sub) pushStopped(Notification.permission === 'denied' ? 'blocked' : 'asked');
+        return;
+      }
+      if (!sub) {
+        if (wasOn) return subscribeHere(reg, key, false).catch(function () { pushStopped('ended'); });
+        return;
+      }
+      var last = Number(recalled(PUSH_CHECKED) || 0);
+      if (wasOn === sub.endpoint && Date.now() - last < PUSH_CHECK_EVERY) return;
+      return pushPost('/account/push/checkin', { subscription: sub.toJSON() }).then(function (r) {
+        remember(PUSH_CHECKED, String(Date.now()));
+        if (!r.known) { pushStopped('removed'); return; }
+        remember(PUSH_ON, sub.endpoint);
+        // Two refusals in a row and no acceptance since: a subscription the
+        // push service no longer takes, most likely, so it is replaced.
+        if (r.failing >= 2) return subscribeHere(reg, key, true).catch(function () { pushStopped('ended'); });
+      }, function () {});
+    });
+  }).catch(function () {});
+}
+var PUSH_STOPPED = {
+  blocked: 'Notifications are blocked for this workspace in this browser, so none arrive here. The account page says how to allow them again.',
+  asked: 'Notifications are no longer allowed for this workspace in this browser, so none arrive here.',
+  ended: 'Notifications stopped reaching this browser, and could not be restarted by themselves.',
+  removed: 'This browser is no longer among the devices that receive your notifications.'
+};
+function pushStopped(why) {
+  if (document.querySelector('.push-notice')) return;
+  var box = document.createElement('div');
+  box.className = 'push-notice';
+  box.setAttribute('role', 'status');
+  var text = document.createElement('span');
+  text.textContent = PUSH_STOPPED[why];
+  box.appendChild(text);
+  var row = document.createElement('div');
+  row.className = 'lobby-row';
+  function button(label, cls, fn) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = cls;
+    b.textContent = label;
+    b.addEventListener('click', function () { fn(b); });
+    row.appendChild(b);
+  }
+  if (why === 'blocked') {
+    button('Account page', 'btn btn-primary', function () { box.remove(); navigate('/account#notifications', { push: true }); });
+  } else {
+    // Asked from the press itself: Safari grants the prompt only to a gesture.
+    button('Turn on again', 'btn btn-primary', function (b) {
+      b.disabled = true;
+      Promise.resolve(Notification.requestPermission()).then(function (permission) {
+        if (permission !== 'granted') throw new Error('the browser did not allow it');
+        return navigator.serviceWorker.register('/sw.js').then(function () { return navigator.serviceWorker.ready; });
+      }).then(function (reg) {
+        return subscribeHere(reg, keyBytes(frame().vapid), why !== 'asked');
+      }).then(function () { box.remove(); }, function (e) {
+        b.disabled = false;
+        text.textContent = 'Notifications could not be turned on: ' + (e && e.message ? e.message : e) + '. The account page has more.';
+      });
+    });
+  }
+  // Leaving them off is remembered, and this browser's subscription let go,
+  // so the notice does not come back on the next page.
+  button('Leave off', 'btn', function () {
+    remember(PUSH_ON, null);
+    box.remove();
+    currentSubscription().then(function (sub) { if (sub) return sub.unsubscribe(); }).catch(function () {});
+  });
+  box.appendChild(row);
+  document.body.appendChild(box);
 }
 // ---- the chime ----
 // When a notification arrives and a workspace tab is open, the service worker
@@ -1059,7 +1184,7 @@ document.addEventListener('submit', function (e) {
   e.preventDefault();
   form.setAttribute('data-leaving', '1');
   var sent = false;
-  function go() { if (sent) return; sent = true; setAppBadge(0); form.submit(); }
+  function go() { if (sent) return; sent = true; setAppBadge(0); remember(PUSH_ON, null); form.submit(); }
   setTimeout(go, 2000);
   currentSubscription().then(function (sub) {
     if (!sub) return;

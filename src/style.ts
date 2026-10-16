@@ -223,6 +223,15 @@ dialog.ask p { margin: 0 0 var(--s4); }
   padding: var(--s2) var(--s3); border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--bg); color: var(--fg); font-size: var(--t-sm); box-shadow: 0 4px 12px var(--shadow);
 }
+/* Notifications that stopped working in this browser: a notice in the same
+   place, out of the way while someone is waiting to be let in. */
+.push-notice {
+  position: fixed; top: var(--s2); right: var(--s2); z-index: 89;
+  display: flex; flex-direction: column; gap: var(--s2); max-width: min(440px, calc(100vw - 16px));
+  padding: var(--s2) var(--s3); border: 1px solid var(--border); border-left: 3px solid var(--danger); border-radius: var(--radius);
+  background: var(--bg); color: var(--fg); font-size: var(--t-sm); box-shadow: 0 4px 12px var(--shadow);
+}
+body:has(.lobby-notice) .push-notice { display: none; }
 .lobby-row { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
 .lobby-row > span { flex: 1 1 180px; min-width: 0; }
 
@@ -746,7 +755,7 @@ body > main.container {
   padding-bottom: calc(var(--s6) + env(safe-area-inset-bottom));
 }
 .signed-out { top: calc(var(--s2) + env(safe-area-inset-top)); }
-.lobby-notice { top: calc(var(--s2) + env(safe-area-inset-top)); right: calc(var(--s2) + env(safe-area-inset-right)); }
+.lobby-notice, .push-notice { top: calc(var(--s2) + env(safe-area-inset-top)); right: calc(var(--s2) + env(safe-area-inset-right)); }
 .call-dock.mini { right: calc(16px + env(safe-area-inset-right)); bottom: calc(16px + env(safe-area-inset-bottom)); }
 .call-dock.full {
   padding: max(var(--s3), env(safe-area-inset-top)) max(var(--s3), env(safe-area-inset-right))
