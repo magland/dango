@@ -368,3 +368,34 @@ test('a call in a meeting is notified like one in a conversation, and a guest’
     { url: room.url, title: 'Review', kind: 'meeting', count: 1, mentions: 0 }
   );
 });
+
+test('guest rooms may be framed by the sites the admin lists, and nothing else may be', async () => {
+  const { cspFor } = await import('../src/server');
+  const root = tmpRoot();
+  const frame = (p: string) => cspFor(root, p).match(/frame-ancestors [^;]*/)![0];
+  assert.strictEqual(frame('/m/3'), "frame-ancestors 'self'", 'no sites listed');
+  updateConfig(root, { calls: { ...loadConfig(root).calls, embedOrigins: ['https://hub.example.org/some/page', 'not a url', 'https://hub.example.org'] } });
+  assert.deepStrictEqual(loadConfig(root).calls.embedOrigins, ['https://hub.example.org'], 'origins only, deduplicated');
+  assert.strictEqual(frame('/m/3'), "frame-ancestors 'self' https://hub.example.org");
+  assert.strictEqual(frame('/m/3/join'), "frame-ancestors 'self' https://hub.example.org");
+  assert.strictEqual(frame('/m/3/t/17'), "frame-ancestors 'self' https://hub.example.org");
+  for (const p of ['/', '/c/general', '/d/4', '/login', '/admin', '/m/new', '/mx/3']) assert.strictEqual(frame(p), "frame-ancestors 'self'", p);
+  updateConfig(root, { calls: { ...loadConfig(root).calls, guests: false } });
+  assert.strictEqual(frame('/m/3'), "frame-ancestors 'self'", 'guest links off');
+});
+
+test("a guest's cookie is SameSite=None and partitioned only while guest rooms may be embedded, over https", () => {
+  const root = tmpRoot();
+  const m = createMeeting(root, { title: 'Review', createdBy: 'alice' });
+  const issued = (protocol: string) => {
+    let opts: Record<string, unknown> = {};
+    const res = { cookie: (_n: string, _v: string, o: Record<string, unknown>) => (opts = o) } as unknown as Response;
+    issueGuest({ protocol, headers: {} } as unknown as Request, res, root, readMeeting(root, m.id)!, 'Dana');
+    return opts;
+  };
+  assert.strictEqual(issued('https').sameSite, 'lax');
+  assert.strictEqual(issued('https').partitioned, undefined);
+  updateConfig(root, { calls: { ...loadConfig(root).calls, embedOrigins: ['https://hub.example.org'] } });
+  assert.deepStrictEqual([issued('https').sameSite, issued('https').partitioned, issued('https').secure], ['none', true, true]);
+  assert.strictEqual(issued('http').sameSite, 'lax', 'SameSite=None needs https');
+});

@@ -72,6 +72,13 @@ export interface CallsConfig {
    * guest is taken out of the meeting they are in.
    */
   guests: boolean;
+  /**
+   * Sites (origins such as https://example.org) whose pages may show this
+   * workspace's guest rooms in a frame. Empty, no other site may frame any
+   * page. Non-empty, guest-room pages may be framed by these sites, and a
+   * guest's cookie is made one a browser keeps inside such a frame.
+   */
+  embedOrigins: string[];
 }
 
 export interface WorkspaceConfig {
@@ -110,6 +117,7 @@ const DEFAULTS: WorkspaceConfig = {
     stun: DEFAULT_STUN,
     turn: { mode: 'none', urls: [], username: '', credential: '', secret: '', keyId: '', apiToken: '' },
     guests: true,
+    embedOrigins: [],
   },
 };
 
@@ -129,12 +137,28 @@ function text(v: unknown): string {
   return typeof v === 'string' ? v.trim() : '';
 }
 
+/** The origin of an http(s) URL (scheme, host and port, nothing else), or null. */
+export function webOrigin(v: string): string | null {
+  try {
+    const u = new URL(v.trim());
+    return u.protocol === 'https:' || u.protocol === 'http:' ? u.origin : null;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeCalls(v: unknown): CallsConfig {
-  const out: CallsConfig = { stun: [...DEFAULTS.calls.stun], turn: { ...DEFAULTS.calls.turn, urls: [] }, guests: DEFAULTS.calls.guests };
+  const out: CallsConfig = {
+    stun: [...DEFAULTS.calls.stun],
+    turn: { ...DEFAULTS.calls.turn, urls: [] },
+    guests: DEFAULTS.calls.guests,
+    embedOrigins: [],
+  };
   if (typeof v !== 'object' || v === null) return out;
   const rec = v as Record<string, unknown>;
   out.stun = strings(rec.stun) ?? out.stun;
   if (rec.guests === false) out.guests = false;
+  out.embedOrigins = [...new Set((strings(rec.embedOrigins) ?? []).map(webOrigin).filter((o): o is string => o !== null))];
   const t = rec.turn;
   if (typeof t === 'object' && t !== null) {
     const r = t as Record<string, unknown>;

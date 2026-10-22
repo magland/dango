@@ -1295,6 +1295,8 @@ ${mode('cloudflare', 'Cloudflare Realtime TURN', 'A TURN key from the Cloudflare
 <div class="field"><label for="cf_api_token">Cloudflare API token</label><input type="password" id="cf_api_token" name="cf_api_token" autocomplete="new-password"><p class="muted">${saved(t.apiToken, 'token')}</p></div>
 <h3>Guests</h3>
 <label class="checkbox" style="display:block;margin-bottom:12px"><input type="checkbox" name="guests" value="1" ${calls.guests ? raw('checked') : ''}> Guest rooms may have guest links<br><span class="muted">A guest room's link lets people outside the workspace read and write in that room and join its calls, and nothing else. Guests join calls that a member has started, are given the relay's credentials as members are (except a fixed password, which is kept from them), and cannot attach files. Turned off, every guest link stops working and every guest leaves.</span></label>
+<div class="field"><label for="embed_origins">Sites that may embed guest rooms</label><textarea id="embed_origins" name="embed_origins" rows="2" placeholder="https://example.org">${calls.embedOrigins.join('\n')}</textarea>
+<p class="muted">One per line. These sites may show a guest room in a frame on their own pages, so their visitors can join it there; nothing else in the workspace can be framed. While any are listed, a guest's cookie is one the browser keeps inside such a frame (SameSite=None, partitioned). Some browsers, Safari among them, still refuse it there, and their visitors need to open the room in a tab of its own.</p></div>
 <button class="btn btn-primary" type="submit">Save</button>
 </form>`;
 }

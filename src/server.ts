@@ -36,7 +36,7 @@ import { registerWeb } from './web';
  * of the images about to be sent, which the page script makes itself. form-action needs no second origin
  * here, since nothing posts anywhere else.
  */
-const APP_CSP = [
+const CSP_BASE = [
   "default-src 'self'",
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
@@ -46,8 +46,23 @@ const APP_CSP = [
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'self'",
-  "frame-ancestors 'self'",
-].join('; ');
+];
+const APP_CSP = [...CSP_BASE, "frame-ancestors 'self'"].join('; ');
+
+/** A guest room's pages: the room, its join, return and lobby pages, and the rest under /m/<id>. */
+const GUEST_ROOM_PATH = /^\/m\/\d+(\/|$)/;
+
+/**
+ * The page's policy. Guest-room pages may also be framed by the sites the
+ * admin lists (calls.embedOrigins), while guest links are on; every other
+ * page, the sign-in page included, may be framed only by the workspace itself.
+ */
+export function cspFor(root: string, path: string): string {
+  if (!GUEST_ROOM_PATH.test(path)) return APP_CSP;
+  const calls = loadConfig(root).calls;
+  if (!calls.guests || !calls.embedOrigins.length) return APP_CSP;
+  return [...CSP_BASE, `frame-ancestors 'self' ${calls.embedOrigins.join(' ')}`].join('; ');
+}
 
 function isRateExempt(req: Request): boolean {
   return (
@@ -118,8 +133,8 @@ export function createApp(root: string) {
       .send(views.errorPage(429, 'Too many requests from this address. Try again in a moment.', { viewer: null, root }));
   });
 
-  app.use((_req, res, next) => {
-    res.setHeader('Content-Security-Policy', APP_CSP);
+  app.use((req, res, next) => {
+    res.setHeader('Content-Security-Policy', cspFor(root, req.path));
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     next();

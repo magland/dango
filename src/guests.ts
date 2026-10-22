@@ -99,12 +99,27 @@ export function readGuestCookie(req: Request, root: string): Guest | null {
   return { id: p.g, meeting: p.m, name: p.n, gen: p.k, csrf: p.c, exp: p.e };
 }
 
+/**
+ * Whether a guest's cookie must work inside another site's frame: the admin
+ * lists sites that may embed guest rooms, and the workspace is served over
+ * https (SameSite=None needs Secure). Such a cookie is SameSite=None, so the
+ * browser sends it from inside the frame, and partitioned, so it is kept for
+ * that site's frames alone rather than as a cookie that follows the person
+ * from site to site. The guest's requests still carry the CSRF token and are
+ * still checked for coming from the workspace's own pages.
+ */
+function embeddable(req: Request, root: string): boolean {
+  return req.protocol === 'https' && loadConfig(root).calls.embedOrigins.length > 0;
+}
+
 function writeGuestCookie(req: Request, res: Response, root: string, g: Guest): void {
   const body = Buffer.from(JSON.stringify({ g: g.id, m: g.meeting, n: g.name, k: g.gen, c: g.csrf, e: g.exp }), 'utf8').toString('base64url');
+  const embed = embeddable(req, root);
   res.cookie(cookieName(req), `${body}.${sign(root, body)}`, {
     httpOnly: true,
-    sameSite: 'lax',
+    sameSite: embed ? 'none' : 'lax',
     secure: req.protocol === 'https',
+    ...(embed ? { partitioned: true } : {}),
     maxAge: GUEST_MS,
     path: '/',
   });
@@ -136,6 +151,8 @@ export function renewGuest(req: Request, res: Response, root: string, g: Guest):
 
 export function clearGuestCookie(res: Response): void {
   res.clearCookie('__Host-dango_guest', { path: '/', secure: true });
+  // A partitioned cookie is a separate cookie and is cleared only by a partitioned clear.
+  res.clearCookie('__Host-dango_guest', { path: '/', secure: true, sameSite: 'none', partitioned: true });
   res.clearCookie('dango_guest', { path: '/' });
 }
 

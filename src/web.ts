@@ -32,7 +32,7 @@ import {
 } from './channels';
 import { allowReport, parseReport, recordReport } from './calllog';
 import { MAX_IN_CALL, joinCall, leaveCall, participantUser, pruneCalls, relaySignals } from './calls';
-import { CallsConfig, TurnMode, loadConfig, updateConfig } from './config';
+import { CallsConfig, TurnMode, loadConfig, updateConfig, webOrigin } from './config';
 import { openDm } from './dms';
 import { buildTag } from './build';
 import { RoomEvent, clientOwner, isClientId, publish, serveEvents, serveUserEvents } from './events';
@@ -776,17 +776,21 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
         apiToken: field(body.cf_api_token) || current.turn.apiToken,
       },
       guests: body.guests === '1',
+      embedOrigins: [...new Set(lines(body.embed_origins).map((o) => webOrigin(o) ?? o))],
     };
     const bad = [...stun.filter((u) => !isIceUrl(u, 'stun')), ...urls.filter((u) => !isIceUrl(u, 'turn'))];
+    const badOrigins = next.embedOrigins.filter((o) => webOrigin(o) !== o);
     const problem = bad.length
       ? `Not saved: ${bad.join(', ')} ${bad.length === 1 ? 'is not a usable URL' : 'are not usable URLs'}. STUN servers are written stun:host:port, and TURN servers turn:host:port or turns:host:port, optionally ending in ?transport=udp or ?transport=tcp.`
-      : turnProblem(next);
+      : badOrigins.length
+        ? `Not saved: ${badOrigins.join(', ')} ${badOrigins.length === 1 ? 'is not a site' : 'are not sites'}. Sites that may embed guest rooms are written as https://example.org, one per line.`
+        : turnProblem(next);
     const state = loadVault(root);
     if (problem || state.status !== 'ok') {
       res
         .status(400)
         .type('html')
-        .send(state.status === 'ok' ? views.adminPage(root, viewer, state.vault, { error: bad.length ? problem! : `Not saved: ${problem}.`, calls: next }) : 'The workspace could not be read.');
+        .send(state.status === 'ok' ? views.adminPage(root, viewer, state.vault, { error: bad.length || badOrigins.length ? problem! : `Not saved: ${problem}.`, calls: next }) : 'The workspace could not be read.');
       return;
     }
     updateConfig(root, { calls: next });
