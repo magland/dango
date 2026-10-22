@@ -26,11 +26,15 @@ import { isGuestName } from './workspace';
 const cookieName = (req: Request) => (req.protocol === 'https' ? '__Host-dango_guest' : 'dango_guest');
 
 /**
- * How long a guest's cookie lasts unused. Each request of theirs renews it,
- * so a guest in a long call keeps their place; one who comes back a day
- * later is a new guest, and asks to be let in again.
+ * How long a guest's cookie lasts unused, as long as a member's session. A
+ * guest room serves for a conversation in writing as well as for a call, so
+ * a guest who comes back to it days later, in the same browser, is still the
+ * guest they were, and goes straight in. Their requests renew it, once it is
+ * past half its life; a guest who stays away longer is a new guest, and asks
+ * to be let in again. Leaving, being taken out, and a new link each end it
+ * sooner.
  */
-export const GUEST_MS = 24 * 60 * 60 * 1000;
+export const GUEST_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** A waiting guest who has not asked after themselves for this long has gone. */
 export const WAIT_MS = 30 * 1000;
