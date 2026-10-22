@@ -224,7 +224,7 @@ export function askToJoin(root: string, g: Guest, address: string): { state: Lob
     here.seen = Date.now();
     return { state: 'waiting', knocked: false };
   }
-  if ((lobby?.size ?? 0) >= MAX_WAITING) throw new OpError('Too many people are waiting to join this meeting. Try again in a minute.', 'conflict');
+  if ((lobby?.size ?? 0) >= MAX_WAITING) throw new OpError('Too many people are waiting to join this room. Try again in a minute.', 'conflict');
   if (!knocks.hit(address).ok) throw new OpError('You have asked to join too often. Wait a few minutes and try again.', 'conflict');
   if (!lobby) {
     lobby = new Map();

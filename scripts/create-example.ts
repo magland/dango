@@ -47,7 +47,7 @@ addMessage(dmDir(root, dm.id), { author: 'alice', body: 'Direct messages are the
 addMessage(dmDir(root, dm.id), { author: 'bob', body: 'Visible to the two of us and nobody else.' });
 
 const meeting = createMeeting(root, { title: 'Weekly review', createdBy: 'alice', members: ['bob'] });
-addMessage(meetingDir(root, meeting.id), { author: 'alice', body: 'A meeting has a guest link for people outside the workspace; its settings page shows it.' });
+addMessage(meetingDir(root, meeting.id), { author: 'alice', body: 'A guest room has a guest link for people outside the workspace; its settings page shows it.' });
 
 console.log(`Example workspace at ${root}`);
 console.log('  site admin: dev    token dango_example_dev_token_000000');

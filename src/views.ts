@@ -151,8 +151,8 @@ function sidebar(opts: PageOpts, rooms: RoomUnread[]): Html {
       .filter((r) => r.kind === 'dm')
       .map((r) => roomLink(r, r.with && r.with.length === 1 ? avatar(r.with[0], 18) : icon('people'), opts.active, isMuted(prefs, r.url), calls.get(r.url)))
   )}</ul>
-<div class="side-cap"><span>Meetings</span><a href="/m/new" title="New meeting">${icon('plus')}</a></div>
-<ul>${joinHtml(rooms.filter((r) => r.kind === 'meeting').map((r) => roomLink(r, CALL_ICON, opts.active, isMuted(prefs, r.url), calls.get(r.url))))}</ul>
+<div class="side-cap"><span>Guest rooms</span><a href="/m/new" title="New guest room">${icon('plus')}</a></div>
+<ul>${joinHtml(rooms.filter((r) => r.kind === 'meeting').map((r) => roomLink(r, GUEST_ROOM_ICON, opts.active, isMuted(prefs, r.url), calls.get(r.url))))}</ul>
 </div>
 <div class="side-foot">${userMenu(opts)}<a class="topbar-icon" href="/search" aria-label="Search">${icon('search')}</a></div>
 </nav>`;
@@ -292,6 +292,10 @@ const PAPERCLIP_ICON = raw(
 /** A video camera, in the same manner: calls. */
 export const CALL_ICON = raw(
   '<svg class="glyph" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="4" width="9" height="8" rx="1.5"/><path d="M10.5 7.2L14.5 5v6l-4-2.2"/></svg>'
+);
+/** A door standing open, in the same manner: guest rooms. */
+const GUEST_ROOM_ICON = raw(
+  '<svg class="glyph" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 14.5h12M4 14.5V2h8v12.5M4 2l4.5 1.5v11"/><path d="M7 9v.5"/></svg>'
 );
 const BELL_OFF_ICON = raw(
   '<svg class="glyph" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10.5V7a4 4 0 0 1 8 0v3.5l1.5 1.5h-11zM6.5 14a1.5 1.5 0 0 0 3 0M2 2l12 12"/></svg>'
@@ -601,8 +605,8 @@ export function dmPage(root: string, room: Room, messages: Message[], viewer: Vi
 }
 
 /**
- * A meeting's page. For a member it is a room like any other, with the
- * guest link at hand in its header; for a guest it is the whole of what
+ * A meeting's page (a guest room, as the interface calls it). For a
+ * member it is a room like any other, with the guest link at hand in its header; for a guest it is the whole of what
  * they see of the workspace. `origin` makes the guest link, which is shown
  * only where the workspace allows guests.
  */
@@ -612,17 +616,17 @@ export function meetingPage(root: string, room: Room, messages: Message[], viewe
   const guestsOn = loadConfig(root).calls.guests;
   const tools = guest
     ? html`<form method="post" action="${room.url}/guest/leave" data-full-page data-confirm="Leave ${meeting.title}? To come back you will need the link, and to be let in again.">${csrfField(viewer)}<button class="btn" type="submit">Leave</button></form>`
-    : html`${guestsOn ? html`<button class="btn guest-link-btn" type="button" data-copy="${guestLink(root, origin, meeting)}" title="Copy the link that lets people outside the workspace join">Guest link</button>` : ''}<a class="topbar-icon" href="${room.url}/settings" aria-label="Meeting settings" title="Meeting settings">${icon('sliders')}</a>`;
+    : html`${guestsOn ? html`<button class="btn guest-link-btn" type="button" data-copy="${guestLink(root, origin, meeting)}" title="Copy the link that lets people outside the workspace join">Guest link</button>` : ''}<a class="topbar-icon" href="${room.url}/settings" aria-label="Room settings" title="Room settings">${icon('sliders')}</a>`;
   const guests = currentGuests(meeting).length;
   const topic = guest
-    ? `A meeting in ${loadConfig(root).name}`
+    ? `A guest room in ${loadConfig(root).name}`
     : `${meeting.members.length} ${meeting.members.length === 1 ? 'member' : 'members'}${guests ? `, ${guests} ${guests === 1 ? 'guest' : 'guests'}` : ''}`;
   const main = html`${roomHead(root, room, viewer, tools, topic)}${meetingIntro(root, room, viewer, messages.length === 0, origin)}${messageList(root, room, messages, viewer, readUpTo)}${composer(room, viewer, `Message ${meeting.title}`)}`;
   return layout(meeting.title, main, { viewer, root, active: room.url });
 }
 
 /**
- * What a meeting says about itself above its timeline, until something has
+ * What a guest room says about itself above its timeline, until something has
  * been said in it: for a member, how guests come in; for a guest, what they
  * can and cannot do here.
  */
@@ -630,15 +634,15 @@ function meetingIntro(root: string, room: Room, viewer: Viewer, empty: boolean, 
   if (!empty) return '';
   const meeting = room.meeting!;
   if (isGuest(viewer.auth)) {
-    return html`<div class="meeting-intro"><p>You are a guest in <strong>${meeting.title}</strong>. You can join its call when someone from the workspace starts it, and read and write here; the people in the meeting see what you write, under the name you gave.</p></div>`;
+    return html`<div class="meeting-intro"><p>You are a guest in <strong>${meeting.title}</strong>. You can read and write here, and join a call when someone from the workspace starts one; the people in the room see what you write, under the name you gave.</p></div>`;
   }
   if (!loadConfig(root).calls.guests) {
-    return html`<div class="meeting-intro"><p>A meeting is a room for a call. This workspace does not let meetings have guests, so only its members can join.</p></div>`;
+    return html`<div class="meeting-intro"><p>A guest room is for talking with people outside the workspace. This workspace does not allow guest links, so only the members added here can see it.</p></div>`;
   }
   const link = guestLink(root, origin, meeting);
-  return html`<div class="meeting-intro"><p>A meeting is a room for a call, with a link for people outside the workspace. Send them this link; ${
+  return html`<div class="meeting-intro"><p>A guest room is for talking with people outside the workspace. Send them this link; ${
     meeting.lobby ? 'each asks to join, and anyone here can let them in.' : 'anyone who has it joins without being let in.'
-  } Guests can join the call and read and write in this room, and see nothing else in the workspace.</p>
+  } Guests can read and write in this room and join its calls, and see nothing else in the workspace.</p>
 <div class="copy-row"><input type="text" readonly value="${link}" aria-label="Guest link"><button class="btn" type="button" data-copy="${link}">Copy link</button></div></div>`;
 }
 
@@ -673,7 +677,7 @@ export function homePage(root: string, viewer: Viewer): string {
   });
   const waiting = [...unread.values()].filter((r) => r.count > 0);
   const content = html`<h1>${wsName}</h1>
-<p class="muted">Pick a channel, start a <a href="/d/new">direct conversation</a>, or set up a <a href="/m/new">meeting</a> for a call with people outside the workspace.</p>
+<p class="muted">Pick a channel, start a <a href="/d/new">direct conversation</a>, or set up a <a href="/m/new">guest room</a> for talking with people outside the workspace.</p>
 ${
     waiting.length
       ? html`<p>Unread: ${joinHtml(
@@ -794,7 +798,7 @@ ${error ? html`<div class="form-error">${error}</div>` : ''}
   return doc('New conversation', content, { viewer, root });
 }
 
-/** The people a new meeting or a meeting's settings can add: every member of the workspace but these. */
+/** The people a new guest room or a guest room's settings can add: every member of the workspace but these. */
 function peopleBoxes(root: string, except: string[]): Html[] {
   const state = loadVault(root);
   const users = state.status === 'ok' ? Object.keys(state.vault.users).filter((u) => !except.includes(u)).sort() : [];
@@ -816,8 +820,8 @@ export function newMeetingPage(root: string, viewer: Viewer, error?: string, for
   const guestsOn = loadConfig(root).calls.guests;
   const boxes = peopleBoxes(root, [viewer.auth.username]);
   const content = html`<div class="form-box">
-<h1>New meeting</h1>
-<p class="muted">A room for a call${guestsOn ? ', with a link that lets people outside the workspace join it' : ''}. It is visible to the members you add and to nobody else.</p>
+<h1>New guest room</h1>
+<p class="muted">A room for talking with people outside the workspace${guestsOn ? ', who join it with a link' : ''}. They can write here and join its calls. From the workspace, it is visible to the members you add and to nobody else.</p>
 ${error ? html`<div class="form-error">${error}</div>` : ''}
 <form method="post" action="/m/new">${csrfField(viewer)}
 <div class="field"><label for="title">Title</label><input type="text" id="title" name="title" value="${form?.title ?? ''}" required maxlength="${String(MAX_TITLE)}" autocomplete="off" data-1p-ignore autofocus></div>
@@ -828,9 +832,9 @@ ${
       ? html`<div class="field"><label class="checkbox"><input type="checkbox" name="lobby" value="1" ${form === undefined || form.lobby ? raw('checked') : ''}> Guests wait to be let in<br><span class="muted">Each guest asks to join, and a member lets them in. Without this, anyone who has the link joins at once.</span></label></div>`
       : ''
   }
-<button class="btn btn-primary" type="submit">Create meeting</button>
+<button class="btn btn-primary" type="submit">Create guest room</button>
 </form></div>`;
-  return doc('New meeting', content, { viewer, root });
+  return doc('New guest room', content, { viewer, root });
 }
 
 export function meetingSettingsPage(root: string, room: Room, viewer: Viewer, origin: string, opts: { error?: string; flash?: string } = {}): string {
@@ -839,7 +843,7 @@ export function meetingSettingsPage(root: string, room: Room, viewer: Viewer, or
   const me = viewer.auth.username;
   const memberRows = joinHtml(
     m.members.map(
-      (u) => html`<li style="display:flex;align-items:center;gap:8px;margin-bottom:4px">${avatar(u, 20)} <a href="/${encodeURIComponent(u)}">${u}</a>${u === m.createdBy ? html` <span class="muted">(made the meeting)</span>` : ''}
+      (u) => html`<li style="display:flex;align-items:center;gap:8px;margin-bottom:4px">${avatar(u, 20)} <a href="/${encodeURIComponent(u)}">${u}</a>${u === m.createdBy ? html` <span class="muted">(made the room)</span>` : ''}
 <form method="post" action="${room.url}/members/remove" style="margin-left:auto" data-confirm="${u === me ? `Leave ${m.title}? You will need to be added back.` : `Remove ${u} from ${m.title}?`}">${csrfField(viewer)}<input type="hidden" name="user" value="${u}"><button class="btn-link" type="submit">${u === me ? 'Leave' : 'Remove'}</button></form></li>`
     )
   );
@@ -853,18 +857,18 @@ export function meetingSettingsPage(root: string, room: Room, viewer: Viewer, or
   const link = guestLink(root, origin, m);
   const guestSection = guestsOn
     ? html`<h2>Guests</h2>
-<p class="muted">Anyone with the guest link can ${m.lobby ? 'ask to join' : 'join'} this meeting. A guest can join its call and read and write here, and sees nothing else in the workspace. A guest cannot attach files.</p>
+<p class="muted">Anyone with the guest link can ${m.lobby ? 'ask to join' : 'join'} this room. A guest can read and write here and join its calls, and sees nothing else in the workspace. A guest cannot attach files.</p>
 <div class="copy-row"><input type="text" readonly value="${link}" aria-label="Guest link"><button class="btn" type="button" data-copy="${link}">Copy link</button></div>
 <form method="post" action="${room.url}/settings">${csrfField(viewer)}<input type="hidden" name="what" value="lobby">
 <label class="checkbox"><input type="checkbox" name="lobby" value="1" ${m.lobby ? raw('checked') : ''}> Guests wait to be let in</label>
 <div style="margin-top:8px"><button class="btn" type="submit">Save</button></div></form>
-${guests.length ? html`<h3>In the meeting now</h3><ul style="list-style:none;padding:0;max-width:520px">${guestRows}</ul>` : html`<p class="muted">No guest is in the meeting.</p>`}
-<form method="post" action="${room.url}/link/reset" data-confirm="Make a new guest link? The old one stops working, and every guest let in with it is taken out of the meeting.">${csrfField(viewer)}<button class="btn" type="submit">Make a new link</button> <span class="muted">The old link stops working, and the guests let in with it are taken out.</span></form>`
-    : html`<h2>Guests</h2><p class="muted">This workspace does not let meetings have guests; a site admin can change that on the Admin page.</p>`;
+${guests.length ? html`<h3>In the room now</h3><ul style="list-style:none;padding:0;max-width:520px">${guestRows}</ul>` : html`<p class="muted">No guest is in the room.</p>`}
+<form method="post" action="${room.url}/link/reset" data-confirm="Make a new guest link? The old one stops working, and every guest let in with it is taken out of the room.">${csrfField(viewer)}<button class="btn" type="submit">Make a new link</button> <span class="muted">The old link stops working, and the guests let in with it are taken out.</span></form>`
+    : html`<h2>Guests</h2><p class="muted">This workspace does not allow guest links; a site admin can change that on the Admin page.</p>`;
   const danger = mayDeleteMeeting(m, me)
-    ? html`<div class="danger-zone"><h3>Delete this meeting</h3>
+    ? html`<div class="danger-zone"><h3>Delete this room</h3>
 <p>Everything said in it goes with it, and its guest link stops working. There is no undo.</p>
-<form method="post" action="${room.url}/delete" data-confirm="Delete ${m.title} and everything said in it? There is no undo.">${csrfField(viewer)}<button class="btn btn-danger" type="submit">Delete meeting</button></form></div>`
+<form method="post" action="${room.url}/delete" data-confirm="Delete ${m.title} and everything said in it? There is no undo.">${csrfField(viewer)}<button class="btn btn-danger" type="submit">Delete room</button></form></div>`
     : '';
   const content = html`<h1>${m.title} settings</h1>
 ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}${opts.flash ? html`<div class="flash">${opts.flash}</div>` : ''}
@@ -886,48 +890,48 @@ ${danger}`;
 /**
  * What a guest link opens. The key is in the fragment, which the server
  * never sees, and the page script moves it into the form, as the invite page
- * does with a token. The page names nothing, the meeting's title included,
- * until the key has been checked: a meeting's number is easily guessed.
+ * does with a token. The page names nothing, the room's title included,
+ * until the key has been checked: a guest room's number is easily guessed.
  * Someone signed in to the workspace joins as themselves.
  */
 export function meetingJoinPage(meetingId: number, signedInAs: string | null, opts: { error?: string; name?: string } = {}): string {
   const action = `/m/${meetingId}/join`;
   const form = signedInAs
-    ? html`<p>This browser is signed in to the workspace as <strong>${signedInAs}</strong>, so you join as yourself: the meeting is added to your sidebar.</p>
+    ? html`<p>This browser is signed in to the workspace as <strong>${signedInAs}</strong>, so you join as yourself: the room is added to your sidebar.</p>
 <form method="post" action="${action}"><input type="hidden" name="k" value="" data-meeting-key>
 <button class="btn btn-primary" type="submit">Join as ${signedInAs}</button></form>`
     : html`<form method="post" action="${action}"><input type="hidden" name="k" value="" data-meeting-key>
 <div class="field"><label for="guest-name">Your name</label><input type="text" id="guest-name" name="name" value="${opts.name ?? ''}" required maxlength="${String(MAX_GUEST_NAME)}" autocomplete="name" autofocus>
-<p class="muted">What the people in the meeting will see you as.</p></div>
+<p class="muted">What the people in the room will see you as.</p></div>
 <button class="btn btn-primary" type="submit">Ask to join</button></form>`;
   const content = html`${SIGNIN_MARK}<div class="form-box" style="margin:0 auto" data-meeting-join>
-<h1>Join a meeting</h1>
+<h1>Join a conversation</h1>
 ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}
 <div class="form-error" data-meeting-key-missing hidden>This link has no key in it. It may have been cut short when it was copied; ask for it again.</div>
 ${form}</div>`;
-  return layout('Join a meeting', content, { viewer: null, root: '' });
+  return layout('Join a conversation', content, { viewer: null, root: '' });
 }
 
 /**
  * Where a guest waits to be let in. The page script asks after them every
  * few seconds, which is also what keeps them in the lobby, and goes on to
- * the meeting once they are let in.
+ * the room once they are let in.
  */
 export function meetingLobbyPage(meetingId: number, title: string, name: string, csrf: string): string {
   const url = `/m/${meetingId}`;
   const content = html`${SIGNIN_MARK}<div class="form-box" style="margin:0 auto" data-lobby-wait="${url}/lobby/state" data-lobby-room="${url}">
 <h1>${title}</h1>
-<p data-lobby-status>You have asked to join as <strong>${name}</strong>. Someone in the meeting will let you in; this page goes on by itself when they do.</p>
+<p data-lobby-status>You have asked to join as <strong>${name}</strong>. Someone in the room will let you in; this page goes on by itself when they do.</p>
 <p class="muted" data-lobby-noscript>Waiting needs script. Reload the page to see whether you have been let in.</p>
 <form method="post" action="${url}/guest/leave"><input type="hidden" name="csrf" value="${csrf}"><button class="btn" type="submit">Stop waiting</button></form>
 </div>`;
   return layout(title, content, { viewer: null, root: '' });
 }
 
-/** What a guest sees after leaving a meeting, or when their link no longer works. */
+/** What a guest sees after leaving a guest room, or when their link no longer works. */
 export function guestGonePage(message: string): string {
-  const content = html`${SIGNIN_MARK}<div class="form-box" style="margin:0 auto"><h1>Meeting</h1><p>${message}</p></div>`;
-  return layout('Meeting', content, { viewer: null, root: '' });
+  const content = html`${SIGNIN_MARK}<div class="form-box" style="margin:0 auto"><h1>Guest room</h1><p>${message}</p></div>`;
+  return layout('Guest room', content, { viewer: null, root: '' });
 }
 
 export interface SearchHit {
@@ -960,7 +964,7 @@ export function searchPage(
   // with script, and its time is the link without.
   const rows = hits.map(
     (h) => html`<div class="search-result" data-href="${h.url}">
-<div class="where"><a href="${h.room}">${h.kind === 'dm' ? html`${icon('people')} Conversation with ${h.where}` : h.kind === 'meeting' ? html`${CALL_ICON} ${h.where}` : h.where}</a><span class="who">${avatar(h.message.author, 16)} ${isGuestName(h.message.author) ? `${searchGuestName(root, h.room, h.message.author)}` : h.message.author}</span><a class="result-time" href="${h.url}" title="Show this message">${timeTag(h.message.created, '')}</a></div>
+<div class="where"><a href="${h.room}">${h.kind === 'dm' ? html`${icon('people')} Conversation with ${h.where}` : h.kind === 'meeting' ? html`${GUEST_ROOM_ICON} ${h.where}` : h.where}</a><span class="who">${avatar(h.message.author, 16)} ${isGuestName(h.message.author) ? `${searchGuestName(root, h.room, h.message.author)}` : h.message.author}</span><a class="result-time" href="${h.url}" title="Show this message">${timeTag(h.message.created, '')}</a></div>
 <div class="markdown-body">${bodyHtml(root, h.message.body, viewer)}</div>
 </div>`
   );
@@ -973,7 +977,7 @@ ${query === '' ? '' : html`<p class="muted">${searchSummary(hits.length, partial
   return doc('Search', content, { viewer, root });
 }
 
-/** A guest's name in a search result, from the meeting the result is in. */
+/** A guest's name in a search result, from the guest room the result is in. */
 function searchGuestName(root: string, roomUrl: string, guest: string): string {
   const m = /^\/m\/([0-9]+)/.exec(roomUrl);
   return personLabel(m ? readMeeting(root, parseInt(m[1], 10)) ?? undefined : undefined, guest);
@@ -1269,7 +1273,7 @@ ${mode('cloudflare', 'Cloudflare Realtime TURN', 'A TURN key from the Cloudflare
 <div class="field"><label for="cf_key_id">Cloudflare TURN key id</label><input type="text" id="cf_key_id" name="cf_key_id" value="${t.keyId}" autocomplete="off"></div>
 <div class="field"><label for="cf_api_token">Cloudflare API token</label><input type="password" id="cf_api_token" name="cf_api_token" autocomplete="new-password"><p class="muted">${saved(t.apiToken, 'token')}</p></div>
 <h3>Guests</h3>
-<label class="checkbox" style="display:block;margin-bottom:12px"><input type="checkbox" name="guests" value="1" ${calls.guests ? raw('checked') : ''}> Meetings may have guest links<br><span class="muted">A meeting's guest link lets people outside the workspace join its call and read and write in the meeting, and nothing else. Guests join calls that a member has started, are given the relay's credentials as members are (except a fixed password, which is kept from them), and cannot attach files. Turned off, every guest link stops working and every guest leaves.</span></label>
+<label class="checkbox" style="display:block;margin-bottom:12px"><input type="checkbox" name="guests" value="1" ${calls.guests ? raw('checked') : ''}> Guest rooms may have guest links<br><span class="muted">A guest room's link lets people outside the workspace read and write in that room and join its calls, and nothing else. Guests join calls that a member has started, are given the relay's credentials as members are (except a fixed password, which is kept from them), and cannot attach files. Turned off, every guest link stops working and every guest leaves.</span></label>
 <button class="btn btn-primary" type="submit">Save</button>
 </form>`;
 }

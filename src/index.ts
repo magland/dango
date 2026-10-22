@@ -330,8 +330,9 @@ token once. Options: -p/--port <n> (default 3000), --host <addr> (default
   {
     path: ['meeting', 'create'],
     summary: 'Create a meeting, and print its guest link',
-    description: `A meeting is a room for a call, with a link that lets people outside the
-workspace join it. Guests wait to be let in unless --open is given.
+    description: `A meeting (a guest room, in the web interface) is a room for talking with
+people outside the workspace, who join it with a link; they can write in it
+and join its calls. Guests wait to be let in unless --open is given.
 
   dango meeting create Weekly review --with alice,bob`,
     args: [{ name: 'title', required: true, variadic: true }],
@@ -358,7 +359,7 @@ workspace join it. Guests wait to be let in unless --open is given.
     async run(inv) {
       const target = await targetFrom(inv);
       const data = await api(target, 'GET', `/api/meetings/${encodeURIComponent(inv.args[0])}`);
-      if (!data.link) throw new CliError('This workspace does not let meetings have guests.', EXIT_FAIL);
+      if (!data.link) throw new CliError('This workspace does not allow guest links.', EXIT_FAIL);
       console.log(data.link);
     },
   },

@@ -191,7 +191,7 @@ function resumable(room: Room, callId: string): Message | null {
 export function joinCall(root: string, room: Room, user: string, peer: string, resume?: string, charge?: () => void): string {
   if (room.kind === 'thread') throw new OpError('A call belongs to a channel or a conversation, not a thread.');
   const guest = isGuestName(user);
-  if (guest && !room.meeting) throw new OpError('Only a meeting has guests.');
+  if (guest && !room.meeting) throw new OpError('Only a guest room has guests.');
   if (clientOwner(peer) !== user) {
     throw new OpError('This page has lost its connection to the workspace. Wait a moment and try again, or reload the page.', 'conflict');
   }
@@ -326,7 +326,7 @@ export function pruneCalls(root: string): void {
     };
     for (const p of [...call.participants.values()]) {
       if (canSee(p.user)) continue;
-      const reason = isGuestName(p.user) ? 'You are no longer a guest in this meeting, so you have left its call.' : 'You can no longer see this room, so you have left its call.';
+      const reason = isGuestName(p.user) ? 'You are no longer a guest in this room, so you have left its call.' : 'You can no longer see this room, so you have left its call.';
       sendToClient(p.peer, { type: 'call-gone', url: call.room.url, reason });
       leaveCall(call.room.url, p.peer);
     }

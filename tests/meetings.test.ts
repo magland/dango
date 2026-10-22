@@ -265,7 +265,7 @@ test('a guest joins a call a member started, and never starts one', () => {
   // A guest in a channel's call is refused outright.
   const channel = createChannel(root, 'general', { createdBy: 'alice' });
   void channel;
-  assert.throws(() => joinCall(root, channelRoom(root, 'general', auth('alice'))!, GUEST, guestPage.id), /Only a meeting has guests/);
+  assert.throws(() => joinCall(root, channelRoom(root, 'general', auth('alice'))!, GUEST, guestPage.id), /Only a guest room has guests/);
 });
 
 test('a call left with guests alone ends for them after a while', () => {

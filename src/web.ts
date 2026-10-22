@@ -242,7 +242,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     }
     // A guest's way back is their meeting; the rest of the workspace is not theirs.
     const meeting = (res.req.params as Record<string, string>).meeting;
-    const back = viewer && isGuest(viewer.auth) && meeting ? { url: `/m/${parseInt(meeting, 10)}`, label: 'Back to the meeting' } : undefined;
+    const back = viewer && isGuest(viewer.auth) && meeting ? { url: `/m/${parseInt(meeting, 10)}`, label: 'Back to the room' } : undefined;
     res.status(status).type('html').send(views.errorPage(status, message, { viewer, root, back }));
   };
 
@@ -854,9 +854,9 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     const meetingId = parseInt((req.params as Record<string, string>).meeting ?? '', 10);
     const g = Number.isInteger(meetingId) ? readGuestCookie(req, root) : null;
     if (g && g.meeting === meetingId) {
-      if (wantsJson(req)) res.status(403).json({ error: 'You are no longer a guest in this meeting.' });
+      if (wantsJson(req)) res.status(403).json({ error: 'You are no longer a guest in this room.' });
       else if (waitingGuest(meetingId, g.id)) res.redirect(303, `/m/${meetingId}/lobby`);
-      else res.status(403).type('html').send(views.guestGonePage('You are no longer a guest in this meeting. To come back, open its link again.'));
+      else res.status(403).type('html').send(views.guestGonePage('You are no longer a guest in this room. To come back, open its link again.'));
       return;
     }
     if (wantsJson(req)) res.status(401).json({ error: 'You are signed out. Sign in again, then send.' });
@@ -1657,7 +1657,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       (viewer, room) => {
         const user = String((req.body as Record<string, unknown>).user ?? '');
         if (user !== viewer.auth.username && !mayDeleteMeeting(room.meeting!, viewer.auth.username)) {
-          throw new OpError('You can remove yourself; removing others is for whoever made the meeting.');
+          throw new OpError('You can remove yourself; removing others is for whoever made the room.');
         }
         limits.action(viewer.auth.username);
         removeMeetingMember(root, room.meeting!.id, user);
@@ -1702,7 +1702,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       req,
       res,
       (viewer, room) => {
-        if (!mayDeleteMeeting(room.meeting!, viewer.auth.username)) throw new OpError('Only whoever made the meeting may delete it.');
+        if (!mayDeleteMeeting(room.meeting!, viewer.auth.username)) throw new OpError('Only whoever made the room may delete it.');
         clearLobby(root, room.meeting!.id);
         deleteMeeting(root, room.meeting!.id);
         forgetRoom(root, room.url);
@@ -1763,7 +1763,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     const again = (status: number, error: string) =>
       res.status(status).type('html').send(views.meetingJoinPage(id, getViewer(req, root)?.auth.username ?? null, { error, name: String(body.name ?? '') }));
     if (!originOk(req) || req.get('sec-fetch-site') === 'cross-site') {
-      again(403, 'Join from the meeting’s own link.');
+      again(403, 'Join from the room’s own link.');
       return;
     }
     const allowed = authLimiter.allow(req, null);
@@ -1774,7 +1774,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     const meeting = readMeeting(root, id);
     if (!meeting || !guestKeyMatches(root, meeting, body.k)) {
       authLimiter.fail(req, null);
-      again(404, 'This link does not work. It may have been replaced by a newer one, or the meeting deleted; ask whoever sent it.');
+      again(404, 'This link does not work. It may have been replaced by a newer one, or the room deleted; ask whoever sent it.');
       return;
     }
     const viewer = getViewer(req, root);
@@ -1792,7 +1792,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       return;
     }
     if (!guestsAllowed(root)) {
-      again(403, 'This workspace does not let meetings have guests.');
+      again(403, 'This workspace does not allow guest links.');
       return;
     }
     // A browser already waiting, or already in, under this link goes on as that guest.
@@ -1809,7 +1809,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     }
     const name = cleanGuestName(body.name);
     if (!name) {
-      again(400, 'Give the name the people in the meeting will see you as, of at most 40 characters.');
+      again(400, 'Give the name the people in the room will see you as, of at most 40 characters.');
       return;
     }
     const address = req.ip ?? '';
@@ -1842,7 +1842,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       return;
     }
     if (!meeting || meeting.gen !== g.gen || !guestsAllowed(root)) {
-      res.status(410).type('html').send(views.guestGonePage('This meeting’s link no longer works. Ask whoever sent it for a new one.'));
+      res.status(410).type('html').send(views.guestGonePage('This room’s link no longer works. Ask whoever sent it for a new one.'));
       return;
     }
     if (isCurrentGuest(meeting, g.id)) {
@@ -1892,7 +1892,7 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       pruneCalls(root);
     }
     clearGuestCookie(res);
-    res.type('html').send(views.guestGonePage(meeting ? `You have left ${meeting.title}. To come back, open its link again.` : 'You have left the meeting.'));
+    res.type('html').send(views.guestGonePage(meeting ? `You have left ${meeting.title}. To come back, open its link again.` : 'You have left the room.'));
   });
 
   // Guests who stopped waiting are let go of, and the members told.

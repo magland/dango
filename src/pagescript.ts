@@ -170,9 +170,9 @@ document.addEventListener('DOMContentLoaded', function () {
   function ask() {
     fetch(url, { credentials: 'same-origin', headers: { Accept: 'application/json' } }).then(function (r) { return r.json(); }).then(function (d) {
       if (d.state === 'admitted') { location.assign(room); return; }
-      if (d.state === 'turned-away') { say('You were not let in to this meeting.'); return; }
-      if (d.state === 'closed') { say('This meeting’s link no longer works. Ask whoever sent it for a new one.'); return; }
-      if (d.state === 'refused') say(d.error || 'The meeting cannot take you just now.');
+      if (d.state === 'turned-away') { say('You were not let in to this room.'); return; }
+      if (d.state === 'closed') { say('This room’s link no longer works. Ask whoever sent it for a new one.'); return; }
+      if (d.state === 'refused') say(d.error || 'The room cannot take you just now.');
       setTimeout(ask, d.state === 'refused' ? 15000 : 3000);
     }, function () {
       setTimeout(ask, 5000);
@@ -499,7 +499,7 @@ function showSignedOut() {
   box.setAttribute('role', 'alert');
   var f = frame();
   if (f && f.guest) {
-    box.appendChild(document.createTextNode('You are no longer a guest in this meeting, so nothing new will appear here.'));
+    box.appendChild(document.createTextNode('You are no longer a guest in this room, so nothing new will appear here.'));
     document.body.appendChild(box);
     return;
   }

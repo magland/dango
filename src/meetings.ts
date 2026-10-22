@@ -159,8 +159,8 @@ export function listMeetingsFor(root: string, user: string): MeetingInfo[] {
 /** A title as it is kept: one line, its spaces collapsed. */
 export function cleanTitle(raw: string): string {
   const t = raw.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
-  if (t === '') throw new OpError('A meeting needs a title.');
-  if (t.length > MAX_TITLE) throw new OpError(`A meeting's title may be at most ${MAX_TITLE} characters.`);
+  if (t === '') throw new OpError('A guest room needs a title.');
+  if (t.length > MAX_TITLE) throw new OpError(`A guest room's title may be at most ${MAX_TITLE} characters.`);
   return t;
 }
 
@@ -211,7 +211,7 @@ export function createMeeting(
     writeMeeting(root, info);
     return info;
   }
-  throw new OpError('Could not allocate a meeting; try again.', 'conflict');
+  throw new OpError('Could not allocate a guest room; try again.', 'conflict');
 }
 
 /** Every edit to meeting.json is a read, a change, and a write, under one lock. */
@@ -224,7 +224,7 @@ function editMeeting(root: string, id: number, fn: (info: MeetingInfo) => void):
     } catch {
       info = null;
     }
-    if (!info) throw new OpError('That meeting does not exist.', 'notfound');
+    if (!info) throw new OpError('That guest room does not exist.', 'notfound');
     fn(info);
     writeMeeting(root, info);
     return info;
@@ -245,7 +245,7 @@ export function setLobby(root: string, id: number, lobby: boolean): MeetingInfo 
 }
 
 export function addMeetingMember(root: string, id: number, user: string): MeetingInfo {
-  if (isGuestName(user)) throw new OpError('Only a member of the workspace can be added to a meeting.');
+  if (isGuestName(user)) throw new OpError('Only a member of the workspace can be added to a guest room.');
   return editMeeting(root, id, (info) => {
     if (!info.members.includes(user)) info.members.push(user);
     if (info.former) info.former = info.former.filter((f) => f !== user);
@@ -255,7 +255,7 @@ export function addMeetingMember(root: string, id: number, user: string): Meetin
 export function removeMeetingMember(root: string, id: number, user: string): MeetingInfo {
   return editMeeting(root, id, (info) => {
     if (info.members.length === 1 && info.members[0] === user) {
-      throw new OpError('A meeting keeps its last member; delete the meeting instead.');
+      throw new OpError('A guest room keeps its last member; delete the room instead.');
     }
     info.members = info.members.filter((m) => m !== user);
   });
@@ -273,7 +273,7 @@ export function admitGuest(root: string, id: number, guest: string, name: string
   if (!isGuestName(guest)) throw new OpError('That is not a guest.');
   return editMeeting(root, id, (info) => {
     if (!info.guests[guest] && Object.keys(info.guests).length >= MAX_GUESTS) {
-      throw new OpError(`This meeting has let in the most guests one meeting keeps (${MAX_GUESTS}). Make a new meeting for more.`, 'conflict');
+      throw new OpError(`This room has let in the most guests one guest room keeps (${MAX_GUESTS}). Make a new guest room for more.`, 'conflict');
     }
     info.guests = { ...info.guests, [guest]: { name, since: new Date().toISOString(), gen: info.gen } };
   });
@@ -283,7 +283,7 @@ export function admitGuest(root: string, id: number, guest: string, name: string
 export function removeGuest(root: string, id: number, guest: string): MeetingInfo {
   return editMeeting(root, id, (info) => {
     const g = info.guests[guest];
-    if (!g) throw new OpError('That guest is not in this meeting.', 'notfound');
+    if (!g) throw new OpError('That guest is not in this room.', 'notfound');
     info.guests = { ...info.guests, [guest]: { ...g, removed: true } };
   });
 }
@@ -328,7 +328,7 @@ export function leaveAllMeetings(root: string, user: string): void {
 
 /** Remove a meeting and everything in it. The caller checks who may. */
 export function deleteMeeting(root: string, id: number): void {
-  if (!readMeeting(root, id)) throw new OpError('That meeting does not exist.', 'notfound');
+  if (!readMeeting(root, id)) throw new OpError('That guest room does not exist.', 'notfound');
   fs.rmSync(meetingDir(root, id), { recursive: true, force: true });
   meetingCache.invalidate(meetingFile(root, id));
 }
