@@ -17,7 +17,7 @@ import { CallsConfig, DEFAULT_STUN, loadConfig } from './config';
 import { DmInfo, dmTitle, isSelfDm } from './dms';
 import { lobbiesFor } from './guests';
 import { MARK } from './logo';
-import { MAX_GUEST_NAME, MAX_TITLE, MeetingInfo, currentGuests, guestLink, listMeetingsFor, mayDeleteMeeting, personLabel, readMeeting } from './meetings';
+import { MAX_GUEST_NAME, MAX_TITLE, MeetingInfo, currentGuests, guestLink, listMeetingsFor, mayDeleteMeeting, personLabel, readMeeting, returnLink } from './meetings';
 import { Device, NotifyPrefs, isMuted, readPrefs } from './notify';
 import { Attachment, MAX_ATTACHMENTS_BYTES, MAX_REACTION, Message } from './messages';
 import { pageScript } from './pagescript';
@@ -615,7 +615,7 @@ export function meetingPage(root: string, room: Room, messages: Message[], viewe
   const guest = isGuest(viewer.auth);
   const guestsOn = loadConfig(root).calls.guests;
   const tools = guest
-    ? html`<form method="post" action="${room.url}/guest/leave" data-full-page data-confirm="Leave ${meeting.title}? To come back you will need the link, and to be let in again.">${csrfField(viewer)}<button class="btn" type="submit">Leave</button></form>`
+    ? html`<button class="btn guest-link-btn" type="button" data-copy="${returnLink(root, origin, meeting, viewer.auth.username)}" title="Copy your own link back to this room, to come back later or from another browser or device">Your link</button><form method="post" action="${room.url}/guest/leave" data-full-page data-confirm="Leave ${meeting.title}? To come back you will need the link, and to be let in again.">${csrfField(viewer)}<button class="btn" type="submit">Leave</button></form>`
     : html`${guestsOn ? html`<button class="btn guest-link-btn" type="button" data-copy="${guestLink(root, origin, meeting)}" title="Copy the link that lets people outside the workspace join">Guest link</button>` : ''}<a class="topbar-icon" href="${room.url}/settings" aria-label="Room settings" title="Room settings">${icon('sliders')}</a>`;
   const guests = currentGuests(meeting).length;
   const topic = guest
@@ -634,7 +634,7 @@ function meetingIntro(root: string, room: Room, viewer: Viewer, empty: boolean, 
   if (!empty) return '';
   const meeting = room.meeting!;
   if (isGuest(viewer.auth)) {
-    return html`<div class="meeting-intro"><p>You are a guest in <strong>${meeting.title}</strong>. You can read and write here, and join a call when someone from the workspace starts one; the people in the room see what you write, under the name you gave.</p></div>`;
+    return html`<div class="meeting-intro"><p>You are a guest in <strong>${meeting.title}</strong>. You can read and write here, and join a call when someone from the workspace starts one; the people in the room see what you write, under the name you gave. To come back later, or from another browser or device, keep the link that <strong>Your link</strong> copies.</p></div>`;
   }
   if (!loadConfig(root).calls.guests) {
     return html`<div class="meeting-intro"><p>A guest room is for talking with people outside the workspace. This workspace does not allow guest links, so only the members added here can see it.</p></div>`;
@@ -851,13 +851,14 @@ export function meetingSettingsPage(root: string, room: Room, viewer: Viewer, or
   const guestRows = joinHtml(
     guests.map(
       (g) => html`<li style="display:flex;align-items:center;gap:8px;margin-bottom:4px">${avatar(g, 20)} ${m.guests[g].name} <span class="muted">let in ${timeTag(m.guests[g].since)}</span>
-<form method="post" action="${room.url}/guests/remove" style="margin-left:auto" data-confirm="Take ${m.guests[g].name} out of ${m.title}? They leave its call, and would have to ask to join again.">${csrfField(viewer)}<input type="hidden" name="guest" value="${g}"><button class="btn-link" type="submit">Remove</button></form></li>`
+<button class="btn-link" type="button" style="margin-left:auto" data-copy="${returnLink(root, origin, m, g)}" title="Copy ${m.guests[g].name}’s own link back in, to send them if they come back from another browser or device">Copy their link</button>
+<form method="post" action="${room.url}/guests/remove" data-confirm="Take ${m.guests[g].name} out of ${m.title}? They leave its call, and would have to ask to join again.">${csrfField(viewer)}<input type="hidden" name="guest" value="${g}"><button class="btn-link" type="submit">Remove</button></form></li>`
     )
   );
   const link = guestLink(root, origin, m);
   const guestSection = guestsOn
     ? html`<h2>Guests</h2>
-<p class="muted">Anyone with the guest link can ${m.lobby ? 'ask to join' : 'join'} this room. A guest can read and write here and join its calls, and sees nothing else in the workspace. A guest cannot attach files.</p>
+<p class="muted">Anyone with the guest link can ${m.lobby ? 'ask to join' : 'join'} this room. A guest can read and write here and join its calls, and sees nothing else in the workspace. A guest cannot attach files. Each guest also has a link of their own, which brings them back as themselves from any browser without waiting to be let in; it stops working when they leave or are removed, or the guest link is replaced.</p>
 <div class="copy-row"><input type="text" readonly value="${link}" aria-label="Guest link"><button class="btn" type="button" data-copy="${link}">Copy link</button></div>
 <form method="post" action="${room.url}/settings">${csrfField(viewer)}<input type="hidden" name="what" value="lobby">
 <label class="checkbox"><input type="checkbox" name="lobby" value="1" ${m.lobby ? raw('checked') : ''}> Guests wait to be let in</label>
@@ -910,6 +911,26 @@ ${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}
 <div class="form-error" data-meeting-key-missing hidden>This link has no key in it. It may have been cut short when it was copied; ask for it again.</div>
 ${form}</div>`;
   return layout('Join a conversation', content, { viewer: null, root: '' });
+}
+
+/**
+ * What a guest's return link opens. As on the join page, the key is moved
+ * from the fragment into the form, and the page names nothing until it has
+ * been checked. Someone signed in to the workspace is told the link is not
+ * for them, since a member's session would be read before a guest's cookie.
+ */
+export function meetingReturnPage(meetingId: number, signedInAs: string | null, opts: { error?: string } = {}): string {
+  const body = signedInAs
+    ? html`<p>This link brings a guest back to a conversation, and this browser is signed in to the workspace as <strong>${signedInAs}</strong>. Open it in a browser that is not signed in.</p>`
+    : html`<p>This link is your own way back in, as the guest you were. Keep it to yourself: whoever has it is taken for you.</p>
+<form method="post" action="/m/${String(meetingId)}/return"><input type="hidden" name="k" value="" data-meeting-key>
+<button class="btn btn-primary" type="submit">Come back in</button></form>`;
+  const content = html`${SIGNIN_MARK}<div class="form-box" style="margin:0 auto" data-meeting-join>
+<h1>Back to a conversation</h1>
+${opts.error ? html`<div class="form-error">${opts.error}</div>` : ''}
+<div class="form-error" data-meeting-key-missing hidden>This link has no key in it. It may have been cut short when it was copied; ask for it again.</div>
+${body}</div>`;
+  return layout('Back to a conversation', content, { viewer: null, root: '' });
 }
 
 /**

@@ -110,10 +110,14 @@ function writeGuestCookie(req: Request, res: Response, root: string, g: Guest): 
   });
 }
 
-/** A new guest of a meeting, with the name they gave, and their cookie. */
-export function issueGuest(req: Request, res: Response, root: string, meeting: MeetingInfo, name: string): Guest {
+/**
+ * A new guest of a meeting, with the name they gave, and their cookie. Given
+ * `id`, a guest already let in, come back by their return link, is given a
+ * cookie in this browser instead.
+ */
+export function issueGuest(req: Request, res: Response, root: string, meeting: MeetingInfo, name: string, id?: string): Guest {
   const g: Guest = {
-    id: `~${randomBytes(6).toString('hex')}`,
+    id: id ?? `~${randomBytes(6).toString('hex')}`,
     meeting: meeting.id,
     name,
     gen: meeting.gen,

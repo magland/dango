@@ -80,6 +80,7 @@ import {
   cleanGuestName,
   createMeeting,
   deleteMeeting,
+  guestByReturnKey,
   guestKeyMatches,
   isCurrentGuest,
   mayDeleteMeeting,
@@ -123,7 +124,7 @@ import * as views from './views';
 import { channelNameFrom, isValidChannelName, isValidWorkspaceUserName } from './workspace';
 
 // Every page and form of the web interface. Anonymous requests reach the
-// sign-in page, the assets, and a meeting's guest link; everything else
+// sign-in page, the assets, and a meeting's guest and return links; everything else
 // resolves a viewer first and redirects to /login without one, because a
 // workspace is members-only all the way down.
 //
@@ -1829,6 +1830,54 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       clearGuestCookie(res);
       again(opErrorStatus(e.kind), e.message);
     }
+  });
+
+  // A guest's return link lands here, and, like the guest link, names
+  // nothing until its key is checked; a browser already in the meeting as
+  // that guest goes straight to it.
+  app.get('/m/:meeting/return', (req, res) => {
+    const id = parseInt(req.params.meeting, 10);
+    const viewer = getViewer(req, root);
+    const inside = admittedGuest(req, root);
+    if (!viewer && inside && inside.meeting.id === id) {
+      res.redirect(303, `/m/${id}`);
+      return;
+    }
+    res.set('Cache-Control', 'no-store').type('html').send(views.meetingReturnPage(id, viewer ? viewer.auth.username : null));
+  });
+
+  // The return key presented: the guest it was made for, if still in the
+  // meeting, is given a cookie in this browser and goes straight in, under
+  // the name they gave when first let in. Refused from another site, as a
+  // join is, and counted against the address when the key is wrong.
+  app.post('/m/:meeting/return', urlenc, (req, res) => {
+    const id = parseInt(req.params.meeting, 10);
+    const body = req.body as Record<string, unknown>;
+    const viewer = getViewer(req, root);
+    const again = (status: number, error: string) =>
+      res.status(status).type('html').send(views.meetingReturnPage(id, viewer ? viewer.auth.username : null, { error }));
+    if (!originOk(req) || req.get('sec-fetch-site') === 'cross-site') {
+      again(403, 'Come back from your own link.');
+      return;
+    }
+    if (viewer) {
+      again(409, 'This browser is signed in to the workspace; a guest’s link does not work here.');
+      return;
+    }
+    const allowed = authLimiter.allow(req, null);
+    if (!allowed.ok) {
+      again(429, 'Too many attempts; wait a few minutes.');
+      return;
+    }
+    const meeting = readMeeting(root, id);
+    const guest = meeting && guestsAllowed(root) ? guestByReturnKey(root, meeting, body.k) : null;
+    if (!meeting || !guest) {
+      authLimiter.fail(req, null);
+      again(404, 'This link does not work. You may have left the room or been taken out of it, or its link been replaced; ask whoever sent it.');
+      return;
+    }
+    issueGuest(req, res, root, meeting, meeting.guests[guest].name, guest);
+    res.redirect(303, `/m/${id}`);
   });
 
   // Where a guest waits. What they have proved is that they had the link,

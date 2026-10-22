@@ -27,6 +27,8 @@ import {
   removeGuest,
   removeMeetingMember,
   resetGuestLink,
+  returnKey,
+  guestByReturnKey,
 } from '../src/meetings';
 import { DEFAULT_PREFS, wantsPush } from '../src/notify';
 import { canSeeChannel, canSeeDm, canSeeMeeting, isSiteAdmin } from '../src/perms';
@@ -125,6 +127,25 @@ test('resetting the link, or taking a guest out, ends what they can see', () => 
   // Their names stay, beside what they wrote.
   assert.strictEqual(personLabel(after, GUEST), 'Dana (guest)');
   assert.strictEqual(personLabel(after, 'alice'), 'alice');
+});
+
+test('a return key names its own guest while they are in the meeting, and nobody after', () => {
+  const root = tmpRoot();
+  const m0 = createMeeting(root, { title: 'Review', createdBy: 'alice' });
+  admitGuest(root, m0.id, GUEST, 'Dana');
+  const m = admitGuest(root, m0.id, OTHER_GUEST, 'Eli');
+  const dana = returnKey(root, m, GUEST);
+  assert.strictEqual(guestByReturnKey(root, m, dana), GUEST);
+  assert.strictEqual(guestByReturnKey(root, m, returnKey(root, m, OTHER_GUEST)), OTHER_GUEST);
+  // Another guest's name with Dana's key, a key cut short, or none at all.
+  assert.strictEqual(guestByReturnKey(root, m, `${OTHER_GUEST.slice(1)}${dana.slice(dana.indexOf('.'))}`), null);
+  assert.strictEqual(guestByReturnKey(root, m, dana.slice(0, -1)), null);
+  assert.strictEqual(guestByReturnKey(root, m, guestKey(root, m)), null, 'the guest link is not a return link');
+  assert.strictEqual(guestByReturnKey(root, m, undefined), null);
+  const removed = removeGuest(root, m.id, OTHER_GUEST);
+  assert.strictEqual(guestByReturnKey(root, removed, returnKey(root, m, OTHER_GUEST)), null, 'a guest taken out cannot come back by it');
+  const reset = resetGuestLink(root, m.id);
+  assert.strictEqual(guestByReturnKey(root, reset, dana), null, 'nor can one let in under a link since replaced');
 });
 
 test('a meeting keeps its last member, and whoever made it decides who else goes', () => {

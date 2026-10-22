@@ -363,3 +363,40 @@ export function guestKeyMatches(root: string, meeting: { id: number; gen: number
 export function guestLink(root: string, origin: string, meeting: { id: number; gen: number }): string {
   return `${origin}/m/${meeting.id}/join#k=${guestKey(root, meeting)}`;
 }
+
+// A guest's own way back. The cookie that says who a guest is lives in one
+// browser, so a guest who comes back from another browser or device, or
+// after their cookie has lapsed, would otherwise be a new guest, knocking
+// under a new identity. The return link names one guest and carries a key
+// made for them, as the guest link carries one made for the meeting: from
+// .secret, the meeting's number, the link's generation, and the guest. It is
+// never stored, so the guest and the members can be shown it again at any
+// time, and it stops working with everything else that ends a guest's place:
+// leaving, being taken out, and a new guest link.
+
+function returnMac(root: string, meeting: { id: number; gen: number }, guest: string): string {
+  return createHmac('sha256', getSecret(root)).update(`dango-guest-return:${meeting.id}:${meeting.gen}:${guest}`).digest('base64url').slice(0, 24);
+}
+
+/** The key in a guest's return link: the guest's name without its ~, then the key made for them. */
+export function returnKey(root: string, meeting: { id: number; gen: number }, guest: string): string {
+  return `${guest.slice(1)}.${returnMac(root, meeting, guest)}`;
+}
+
+/** The guest a presented return key names, if it is theirs and they are in the meeting now; otherwise null. */
+export function guestByReturnKey(root: string, meeting: MeetingInfo, presented: unknown): string | null {
+  if (typeof presented !== 'string') return null;
+  const dot = presented.indexOf('.');
+  if (dot === -1) return null;
+  const guest = `~${presented.slice(0, dot)}`;
+  if (!isGuestName(guest)) return null;
+  const a = Buffer.from(presented.slice(dot + 1));
+  const b = Buffer.from(returnMac(root, meeting, guest));
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+  return isCurrentGuest(meeting, guest) ? guest : null;
+}
+
+/** A guest's return link, with its key in the fragment, as the guest link has. */
+export function returnLink(root: string, origin: string, meeting: { id: number; gen: number }, guest: string): string {
+  return `${origin}/m/${meeting.id}/return#k=${returnKey(root, meeting, guest)}`;
+}
