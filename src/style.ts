@@ -173,6 +173,22 @@ dialog.ask::backdrop { background: rgba(0, 0, 0, 0.35); }
 dialog.ask p { margin: 0 0 var(--s4); }
 .ask-row { display: flex; justify-content: flex-end; gap: var(--s2); flex-wrap: wrap; }
 
+/* A picture opened from a message, over the whole screen and clear of a
+   phone's notch and home indicator. */
+dialog.viewer {
+  width: 100vw; height: 100vh; height: 100dvh; max-width: none; max-height: none; margin: 0; border: 0; box-sizing: border-box;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  background: transparent; outline: none;
+}
+dialog.viewer[open] { display: flex; align-items: center; justify-content: center; }
+dialog.viewer::backdrop { background: rgba(0, 0, 0, 0.88); }
+dialog.viewer img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.viewer-close {
+  position: fixed; top: calc(env(safe-area-inset-top) + 8px); right: calc(env(safe-area-inset-right) + 8px);
+  width: 44px; height: 44px; display: flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 50%; background: rgba(0, 0, 0, 0.55); color: #fff; cursor: pointer;
+}
+
 /* A continuation: the same person again within a few minutes, drawn as more
    of what they were saying. The avatar keeps its column but is not drawn,
    the name stays for a screen reader only, and the time sits in the gutter,

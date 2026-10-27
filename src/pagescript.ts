@@ -1830,6 +1830,52 @@ function ask(text, opts) {
 }
 function notice(text) { return ask(text, { cancel: null }); }
 
+// A picture in a message opens over the page, as large as the screen allows,
+// rather than as the bare file in a tab: an app on a phone's Home Screen
+// opens that file inside itself, with nothing to tap to come back. A tap
+// anywhere, Escape, or the back button closes it; a click with a modifier
+// still opens the file itself.
+var CLOSE_ICON = '<svg class="glyph" width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
+var viewer = null;
+function openViewer(a) {
+  var d = document.createElement('dialog');
+  d.className = 'viewer';
+  var img = document.createElement('img');
+  img.src = a.href;
+  img.alt = (a.querySelector('img') || {}).alt || '';
+  var close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'viewer-close';
+  close.setAttribute('aria-label', 'Close');
+  close.innerHTML = CLOSE_ICON;
+  d.appendChild(img);
+  d.appendChild(close);
+  d.addEventListener('click', function () { d.close(); });
+  // The back button closes the picture rather than leaving the room: the
+  // picture has an entry in the history of its own, at the same address, and
+  // closing it any other way takes that entry back off.
+  d.addEventListener('close', function () {
+    d.remove();
+    viewer = null;
+    if (history.state && history.state.dangoViewer) history.back();
+  });
+  document.body.appendChild(d);
+  d.showModal();
+  close.focus();
+  viewer = d;
+  if (history.pushState) history.pushState({ dangoViewer: true }, '', location.href);
+}
+document.addEventListener('click', function (e) {
+  if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  var a = closestOf(e.target, '.msg-media a[href]');
+  if (!a || !a.querySelector('img.msg-img') || !window.HTMLDialogElement) return;
+  e.preventDefault();
+  openViewer(a);
+});
+window.addEventListener('popstate', function () {
+  if (viewer && !(history.state && history.state.dangoViewer)) viewer.close();
+});
+
 // Deleting a message asks first, then deletes without leaving the room; the
 // event stream repaints the message as deleted. Without script the trash
 // button is a link to a page that asks the same question.

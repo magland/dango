@@ -246,6 +246,23 @@ const sentFiles = ((await api(bob, 'GET', '/channels/random/messages?limit=1')).
 if (sentFiles.join('|') !== [pasted[0], 'notes.txt'].join('|')) fail(`what was sent is not what was shown: ${JSON.stringify(sentFiles)}`);
 if (!(await s1.eval("document.querySelector('[data-file-list]').hidden && document.querySelector('.composer input[type=file]').files.length === 0"))) fail('the files stayed chosen after sending');
 ok('pasting an image attaches it under its own name, and a paste with text stays text');
+// A picture in a message opens over the page, not as the bare file, and the
+// close button or the back button closes it without leaving the room.
+await waitFor('the picture to be shown', async () => s1.eval("!!document.querySelector('.msg-media a img.msg-img')"));
+const roomAt = await s1.eval('location.href');
+const viewerOpen = () => s1.eval("!!document.querySelector('dialog.viewer[open]')");
+await s1.eval("document.querySelector('.msg-media a img.msg-img').click(); true");
+if (!(await viewerOpen())) fail('tapping a picture did not open it over the page');
+if (!(await s1.eval("history.state && history.state.dangoViewer === true"))) fail('an open picture has no history entry for the back button');
+await s1.eval("document.querySelector('.viewer-close').click(); true");
+if (await viewerOpen()) fail('the close button did not close the picture');
+await waitFor('closing to take back the history entry', async () => !(await s1.eval('history.state && history.state.dangoViewer')));
+await s1.eval("document.querySelector('.msg-media a img.msg-img').click(); true");
+await s1.eval('history.back(); true');
+await waitFor('the back button to close the picture', async () => !(await viewerOpen()));
+await sleep(300);
+if ((await s1.eval('location.href')) !== roomAt || !(await s1.eval("!!document.querySelector('.composer')"))) fail('closing a picture left the room');
+ok('a picture opens over the page, and its close button or the back button closes it');
 // A file copied in a file manager arrives with its path as the text; the
 // file is what was meant, under its own name.
 if (!(await pasteInto('/home/someone/Downloads/cymbal (1).gif', 'cymbal (1).gif', 'image/gif'))) fail('a file pasted with its path was taken as text');
