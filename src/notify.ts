@@ -653,38 +653,43 @@ export function queueNotifications(root: string, room: Room, m: Message, delayMs
 }
 
 async function deliver(root: string, username: string, entry: Pending): Promise<void> {
+  // Each wait that ends says in the server's log what became of it, so that a
+  // notification someone did not get can be told apart from one not sent.
+  const say = (what: string) => console.log(`push: ${username} in ${entry.room.url}, #${entry.ids.join(', #')}: ${what}`);
   // Still a member, and still able to see the room, as the files say now: a
   // person removed from a private channel inside the wait hears nothing more
   // from it.
   const auth = authFor(root, username);
-  if (!auth) return;
+  if (!auth) return say('not sent, no longer a member');
   const base = baseRoom(entry.room);
   if (base.meeting) {
     const meeting = readMeeting(root, base.meeting.id);
-    if (!meeting || !canSeeMeeting(auth, meeting)) return;
+    if (!meeting || !canSeeMeeting(auth, meeting)) return say('not sent, cannot see the room');
     // Named by the file as it is now, so a guest's name is the one they gave.
     base.meeting = meeting;
   } else {
     const room = base.dm ? readDm(root, base.dm.id) : readChannel(root, base.channel!.name);
-    if (!room) return;
-    if ('participants' in room ? !canSeeDm(auth, room) : !canSeeChannel(auth, room)) return;
+    if (!room || ('participants' in room ? !canSeeDm(auth, room) : !canSeeChannel(auth, room))) return say('not sent, cannot see the room');
   }
   // Read in the meantime, on some other screen, or deleted, or muted since:
   // not news. Inside quiet hours nothing goes, and nothing is kept for later.
   const prefs = readPrefs(root, username);
-  if (isQuiet(prefs)) return;
+  if (isQuiet(prefs)) return say('not sent, quiet hours');
   const marker = readMarkers(root, username)[readKey(entry.room.url)] ?? 0;
+  const unread = entry.ids.filter((id) => id > marker);
+  if (!unread.length) return say(`not sent, already read (to #${marker})`);
   let people: Set<string> | null = null;
   const inThread = () => (people ??= threadPeople(entry.room));
-  const messages = entry.ids
-    .filter((id) => id > marker)
+  const messages = unread
     .map((id) => readMessage(entry.room.dir, id))
     .filter((x): x is Message => x !== null && wantsPush(prefs, entry.room, x, username, inThread));
-  if (!messages.length) return;
-  if (!pushesTo.hit(username).ok) return;
+  if (!messages.length) return say('not sent, deleted or no longer wanted');
+  if (!pushesTo.hit(username).ok) return say(`not sent, over ${MAX_PUSHES_PER_MINUTE} a minute`);
   const note = composeNotification(root, entry.room, messages, username, prefs);
   const urgent = entry.room.dm !== undefined || messages.some((x) => mentionsUser(x.body, username));
-  await pushToUser(root, username, note, { urgency: urgent ? 'high' : 'normal', topic: entry.room.url });
+  const r = await pushToUser(root, username, note, { urgency: urgent ? 'high' : 'normal', topic: entry.room.url });
+  const devices = r.sent + r.gone + r.failed.length;
+  say(`accepted for ${r.sent} of ${devices} device${devices === 1 ? '' : 's'}${r.gone ? `, ${r.gone} gone` : ''}${r.failed.length ? `, ${r.failed.length} refused` : ''}`);
 }
 
 /**
