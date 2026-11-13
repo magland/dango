@@ -19,7 +19,7 @@ import { lobbiesFor } from './guests';
 import { MARK } from './logo';
 import { MAX_GUEST_NAME, MAX_TITLE, MeetingInfo, currentGuests, guestLink, listMeetingsFor, mayDeleteMeeting, personLabel, readMeeting, returnLink } from './meetings';
 import { Device, NotifyPrefs, isMuted, readPrefs } from './notify';
-import { Attachment, MAX_ATTACHMENTS_BYTES, MAX_REACTION, Message } from './messages';
+import { Attachment, MAX_ATTACHMENTS_BYTES, MAX_REACTION, Message, ROOM_PAGE, hasOlder, newerPageBefore } from './messages';
 import { pageScript } from './pagescript';
 import { vapidKeys } from './push';
 import { canDeleteMessage, canEditMessage, canSeeChannel, isGuest, isSiteAdmin } from './perms';
@@ -510,10 +510,27 @@ function messageItems(root: string, room: Room, messages: Message[], viewer: Vie
  * back to the newest message when they have scrolled away from it or
  * something has arrived below them; the page script shows it.
  */
-function messageList(root: string, room: Room, messages: Message[], viewer: Viewer, readUpTo?: number): Html {
+/**
+ * A room's timeline: its newest messages, which the room's stream keeps
+ * current, or (`history`) a page of older ones, which nothing changes and
+ * which links on to the page after it. Either links back to the page before.
+ */
+function messageList(root: string, room: Room, messages: Message[], viewer: Viewer, readUpTo?: number, history = false): Html {
   const items = messageItems(root, room, messages, viewer, readUpTo);
+  const first = messages.length ? messages[0].id : 0;
   const last = messages.length ? messages[messages.length - 1].id : 0;
-  return html`<div class="msgs"><ul id="msg-list" data-stream="${room.url}/events" data-last="${last}" data-at="${String(Date.now())}">${joinHtml(items)}</ul></div>${JUMP_NEWEST}`;
+  const older = first && hasOlder(room.dir, first) ? html`<div class="page-link"><a href="${room.url}?before=${first}">Older messages</a></div>` : '';
+  if (history) {
+    const next = newerPageBefore(room.dir, last, ROOM_PAGE);
+    const newer = html`<div class="page-link"><a href="${next === null ? room.url : `${room.url}?before=${next}`}">Newer messages</a></div>`;
+    return html`<div class="msgs">${older}<ul id="msg-list">${joinHtml(items)}</ul>${newer}</div>`;
+  }
+  return html`<div class="msgs">${older}<ul id="msg-list" data-stream="${room.url}/events" data-last="${last}" data-at="${String(Date.now())}">${joinHtml(items)}</ul></div>${JUMP_NEWEST}`;
+}
+
+/** What stands in for the composer on a page of older messages. */
+function historyFoot(room: Room): Html {
+  return html`<div class="composer history-foot">You are reading older messages. <a href="${room.url}">Back to the latest</a></div>`;
 }
 
 const JUMP_NEWEST = html`<div class="jump-newest-wrap"><button class="jump-newest" type="button" data-jump-newest hidden>Jump to newest ${raw(
@@ -592,15 +609,15 @@ ${pinned.length === 0 ? html`<p class="muted">Nothing is pinned here yet. Pin a 
 }
 
 /** readUpTo is where the viewer's read marker stood before this page, for the "New" rule. */
-export function channelPage(root: string, room: Room, messages: Message[], viewer: Viewer, readUpTo?: number): string {
+export function channelPage(root: string, room: Room, messages: Message[], viewer: Viewer, readUpTo?: number, history = false): string {
   const tools = html`<a class="topbar-icon" href="${room.url}/settings" aria-label="Channel settings" title="Channel settings">${icon('sliders')}</a>`;
-  const main = html`${roomHead(root, room, viewer, tools)}${messageList(root, room, messages, viewer, readUpTo)}${composer(room, viewer, `Message ${room.title}`)}`;
+  const main = html`${roomHead(root, room, viewer, tools)}${messageList(root, room, messages, viewer, readUpTo, history)}${history ? historyFoot(room) : composer(room, viewer, `Message ${room.title}`)}`;
   return layout(`${room.title}`, main, { viewer, root, active: room.url });
 }
 
-export function dmPage(root: string, room: Room, messages: Message[], viewer: Viewer, readUpTo?: number): string {
+export function dmPage(root: string, room: Room, messages: Message[], viewer: Viewer, readUpTo?: number, history = false): string {
   const topic = isSelfDm(room.dm!) ? 'Notes to self. Only you can see this conversation.' : undefined;
-  const main = html`${roomHead(root, room, viewer, '', topic)}${messageList(root, room, messages, viewer, readUpTo)}${composer(room, viewer, `Message ${room.title}`)}`;
+  const main = html`${roomHead(root, room, viewer, '', topic)}${messageList(root, room, messages, viewer, readUpTo, history)}${history ? historyFoot(room) : composer(room, viewer, `Message ${room.title}`)}`;
   return layout(room.title, main, { viewer, root, active: room.url });
 }
 
@@ -610,7 +627,7 @@ export function dmPage(root: string, room: Room, messages: Message[], viewer: Vi
  * they see of the workspace. `origin` makes the guest link, which is shown
  * only where the workspace allows guests.
  */
-export function meetingPage(root: string, room: Room, messages: Message[], viewer: Viewer, origin: string, readUpTo?: number): string {
+export function meetingPage(root: string, room: Room, messages: Message[], viewer: Viewer, origin: string, readUpTo?: number, history = false): string {
   const meeting = room.meeting!;
   const guest = isGuest(viewer.auth);
   const guestsOn = loadConfig(root).calls.guests;
@@ -621,7 +638,7 @@ export function meetingPage(root: string, room: Room, messages: Message[], viewe
   const topic = guest
     ? `A guest room in ${loadConfig(root).name}`
     : `${meeting.members.length} ${meeting.members.length === 1 ? 'member' : 'members'}${guests ? `, ${guests} ${guests === 1 ? 'guest' : 'guests'}` : ''}`;
-  const main = html`${roomHead(root, room, viewer, tools, topic)}${meetingIntro(root, room, viewer, messages.length === 0, origin)}${messageList(root, room, messages, viewer, readUpTo)}${composer(room, viewer, `Message ${meeting.title}`)}`;
+  const main = html`${roomHead(root, room, viewer, tools, topic)}${meetingIntro(root, room, viewer, messages.length === 0 && !history, origin)}${messageList(root, room, messages, viewer, readUpTo, history)}${history ? historyFoot(room) : composer(room, viewer, `Message ${meeting.title}`)}`;
   return layout(meeting.title, main, { viewer, root, active: room.url });
 }
 

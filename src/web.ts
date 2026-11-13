@@ -967,6 +967,18 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
     return before;
   };
 
+  // What a room page shows: its newest messages, read on being shown, or with
+  // ?before=<id> the page of older ones just short of that id, which moves no
+  // read marker and has no "New" rule.
+  const roomPage = (req: Request, viewer: Viewer, room: Room): { messages: Message[]; readUpTo?: number; history: boolean } => {
+    const before = parseInt(String(req.query.before ?? ''), 10);
+    if (Number.isInteger(before) && before >= 1) {
+      return { messages: readMessages(room.dir, { limit: ROOM_PAGE, before }), history: true };
+    }
+    const messages = readMessages(room.dir, { limit: ROOM_PAGE });
+    return { messages, readUpTo: seen(req, viewer, room, messages), history: false };
+  };
+
   // ---- meetings: making one ----
   //
   // Registered before the room pages, so /m/new is not taken for a meeting.
@@ -1005,23 +1017,20 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
   // The room pages themselves.
   app.get('/m/:meeting', (req, res) =>
     withRoom(req, res, (viewer, room) => {
-      const messages = readMessages(room.dir, { limit: ROOM_PAGE });
-      const readUpTo = seen(req, viewer, room, messages);
-      res.type('html').send(views.meetingPage(root, room, messages, viewer, originOf(req), readUpTo));
+      const { messages, readUpTo, history } = roomPage(req, viewer, room);
+      res.type('html').send(views.meetingPage(root, room, messages, viewer, originOf(req), readUpTo, history));
     })
   );
   app.get('/c/:channel', (req, res) =>
     withRoom(req, res, (viewer, room) => {
-      const messages = readMessages(room.dir, { limit: ROOM_PAGE });
-      const readUpTo = seen(req, viewer, room, messages);
-      res.type('html').send(views.channelPage(root, room, messages, viewer, readUpTo));
+      const { messages, readUpTo, history } = roomPage(req, viewer, room);
+      res.type('html').send(views.channelPage(root, room, messages, viewer, readUpTo, history));
     })
   );
   app.get('/d/:dm', (req, res) =>
     withRoom(req, res, (viewer, room) => {
-      const messages = readMessages(room.dir, { limit: ROOM_PAGE });
-      const readUpTo = seen(req, viewer, room, messages);
-      res.type('html').send(views.dmPage(root, room, messages, viewer, readUpTo));
+      const { messages, readUpTo, history } = roomPage(req, viewer, room);
+      res.type('html').send(views.dmPage(root, room, messages, viewer, readUpTo, history));
     })
   );
   app.get(['/c/:channel/t/:tid', '/d/:dm/t/:tid', '/m/:meeting/t/:tid'], (req, res) =>

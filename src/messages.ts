@@ -292,6 +292,21 @@ export function lastMessageId(room: string): number {
   return ids.length ? ids[ids.length - 1] : 0;
 }
 
+/** Whether the room has a message older than this one. */
+export function hasOlder(room: string, id: number): boolean {
+  const ids = messageIds(room);
+  return ids.length > 0 && ids[0] < id;
+}
+
+/**
+ * The `before` that reads the page of `limit` messages just after `id`, or
+ * null when those are the newest, so the room's own page shows them.
+ */
+export function newerPageBefore(room: string, id: number, limit: number): number | null {
+  const after = messageIds(room).filter((n) => n > id);
+  return after.length > limit ? after[limit] : null;
+}
+
 export function checkBody(body: string): string {
   const b = body.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   if (b.length > MAX_MESSAGE) throw new OpError(`A message may be at most ${MAX_MESSAGE} characters.`);

@@ -7,6 +7,8 @@ import { test } from 'node:test';
 import {
   addMessage,
   findByNonce,
+  hasOlder,
+  newerPageBefore,
   isValidNonce,
   deleteMessage,
   editMessage,
@@ -40,6 +42,18 @@ test('before and after slice history the way paging and catch-up need', () => {
   assert.deepStrictEqual(readMessages(room, { before: 4 }).map((m) => m.id), [1, 2, 3]);
   assert.deepStrictEqual(readMessages(room, { after: 3 }).map((m) => m.id), [4, 5]);
   assert.deepStrictEqual(readMessages(room, { limit: 2 }).map((m) => m.id), [4, 5]);
+});
+
+test('a page of history knows whether there is an older one, and how to reach the newer one', () => {
+  const room = tmpRoom();
+  for (let i = 1; i <= 7; i++) addMessage(room, { author: 'a', body: `m${i}` });
+  assert.strictEqual(hasOlder(room, 1), false);
+  assert.strictEqual(hasOlder(room, 3), true);
+  // Pages of 2: [2,3] is followed by [4,5], read as before=6; [4,5] by the newest.
+  assert.strictEqual(newerPageBefore(room, 3, 2), 6);
+  assert.deepStrictEqual(readMessages(room, { before: 6, limit: 2 }).map((m) => m.id), [4, 5]);
+  assert.strictEqual(newerPageBefore(room, 5, 2), null);
+  assert.strictEqual(newerPageBefore(room, 4, 2), 7);
 });
 
 test('an empty message is refused, an oversized one too', () => {

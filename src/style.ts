@@ -126,6 +126,9 @@ const CHAT_CSS = `
    composer below it does not. */
 .msgs { flex: 1; overflow-y: auto; padding: var(--s4) var(--s4) var(--s2); }
 .msgs > ul { list-style: none; margin: 0; padding: 0; max-width: 920px; }
+/* Between pages of a room's history: older above the list, newer below it on a page of older messages. */
+.page-link { max-width: 920px; text-align: center; padding: var(--s2) 0; font-size: 13px; }
+.history-foot { color: var(--fg-muted); font-size: 13px; text-align: center; }
 .msg { display: flex; gap: var(--s3); padding: 6px var(--s2); border-radius: var(--radius); position: relative; }
 .msg:hover { background: var(--surface); }
 .msg > .avatar { margin-top: 2px; }
