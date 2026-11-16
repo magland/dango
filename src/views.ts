@@ -1025,7 +1025,7 @@ ${opening}
 </div>`;
   });
   const content = html`<h1>Threads</h1>
-<p class="muted">Threads you started, replied in, opened, or were mentioned in, newest reply first.</p>
+<p class="muted">Threads you started, replied in, opened, or were mentioned in, and every thread in your direct conversations, newest reply first.</p>
 ${rows.length ? joinHtml(rows) : html`<p>No threads yet. A thread shows here once you start one, reply in one, open one, or are mentioned in one.</p>`}`;
   return doc('Threads', content, { viewer, root, active: THREADS_URL });
 }

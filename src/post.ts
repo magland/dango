@@ -74,12 +74,15 @@ function everyoneIn(root: string): () => string[] {
  * Who a reply makes follow its thread, so that it is counted under Threads
  * before they have opened it: whoever wrote the message it hangs from, and
  * whoever that message or the reply @mentions, among the people the room
- * reaches. Those who already follow it are untouched (see followThread).
+ * reaches. In a direct conversation it is everyone in it, since everything
+ * said there is addressed to them, as their notifications already have it.
+ * Those who already follow it are untouched (see followThread).
  */
 function followers(root: string, room: Room, parent: Message | null, reply: Message): string[] {
   const out = new Set<string>();
   const anchor = parent && !parent.deleted ? parent : null;
   if (anchor && authFor(root, anchor.author)) out.add(anchor.author);
+  for (const username of room.dm?.participants ?? []) if (authFor(root, username)) out.add(username);
   if (reply.body.includes('@') || anchor?.body.includes('@')) {
     for (const username of audienceOf(room, everyoneIn(root))) {
       if (mentionsUser(reply.body, username) || (anchor && mentionsUser(anchor.body, username))) out.add(username);

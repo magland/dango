@@ -10,7 +10,7 @@ import { openDm } from '../src/dms';
 import { addMessage, deleteMessage, readMessage, threadRoomDir } from '../src/messages';
 import { audienceOf, followThread, followedThreads, markRead, mentionsUser, newReplies, readMarkers, threadsUnread, unreadIn, unreadRooms } from '../src/reads';
 import { postMessage } from '../src/post';
-import { channelRoom, threadRoom } from '../src/rooms';
+import { channelRoom, dmRoom, threadRoom } from '../src/rooms';
 import { channelDir, dmDir } from '../src/workspace';
 
 function tmpRoot(): string {
@@ -149,4 +149,19 @@ test('a reply makes whoever it or the message @mentions follow the thread, if th
   const s = postMessage(root, secret, { author: 'alice', body: 'between us' });
   postMessage(root, threadRoom(secret, s.id)!, { author: 'alice', body: 'should @erin know?' });
   assert.strictEqual(readMarkers(root, 'erin')['c/secret/t/1'], undefined);
+});
+
+test('a reply in a direct conversation makes everyone in it follow the thread', () => {
+  const root = tmpRoot();
+  for (const u of ['alice', 'bob', 'carol', 'dave']) addUserToken(root, u, {});
+  const d = openDm(root, ['alice', 'bob', 'carol']);
+  const room = dmRoom(root, d.id, auth('alice'))!;
+  const m = postMessage(root, room, { author: 'alice', body: 'plans for Friday' });
+  postMessage(root, threadRoom(room, m.id)!, { author: 'bob', body: 'I can do the morning' });
+  const key = `d/${d.id}/t/${m.id}`;
+  assert.strictEqual(readMarkers(root, 'carol')[key], 0);
+  assert.strictEqual(readMarkers(root, 'dave')[key], undefined);
+  assert.deepStrictEqual(threadsUnread(root, auth('carol')), { count: 1, mentions: 0 });
+  assert.deepStrictEqual(threadsUnread(root, auth('alice')), { count: 1, mentions: 0 });
+  assert.deepStrictEqual(threadsUnread(root, auth('bob')), { count: 0, mentions: 0 });
 });
