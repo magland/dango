@@ -3,7 +3,7 @@ import { listeningUsers, publish, publishToUser } from './events';
 import { Attachment, CallRecord, Message, addMessage, findByNonce, readMessage, unsendMessage } from './messages';
 import { authFor, queueNotifications } from './notify';
 import { Room } from './rooms';
-import { THREADS_URL, audienceOf, followThread, isNewsFor, markRead, readKey, readMarkers, threadsUnread, unreadIn } from './reads';
+import { THREADS_URL, audienceOf, followThread, isNewsFor, markRead, mentionsUser, readKey, readMarkers, threadsUnread, unreadIn } from './reads';
 import { stopTyping } from './typing';
 
 // Sending a message, whichever door it came through. The web and the JSON
@@ -50,9 +50,7 @@ export function postMessage(
   if (room.kind === 'thread') {
     // The parent message's reply count changed, so the parent room repaints it.
     const parent = readMessage(room.parent!.dir, room.threadOf!);
-    // Whoever wrote the message follows its thread, so a reply to them is
-    // counted under Threads before they have opened it.
-    if (parent && !parent.deleted && authFor(root, parent.author)) followThread(root, parent.author, room.url);
+    followers(root, room, parent, m).forEach((username) => followThread(root, username, room.url));
     if (parent) publish(room.parent!.url, { type: 'update', message: parent });
     // A reply is not counted against the room: the sidebar counts what
     // arrives in a room, and a thread is read from inside its message. It
@@ -64,6 +62,32 @@ export function postMessage(
   return m;
 }
 
+/** Everyone in the workspace, by name: who a public channel's news reaches. */
+function everyoneIn(root: string): () => string[] {
+  return () => {
+    const state = loadVault(root);
+    return state.status === 'ok' ? Object.keys(state.vault.users) : [];
+  };
+}
+
+/**
+ * Who a reply makes follow its thread, so that it is counted under Threads
+ * before they have opened it: whoever wrote the message it hangs from, and
+ * whoever that message or the reply @mentions, among the people the room
+ * reaches. Those who already follow it are untouched (see followThread).
+ */
+function followers(root: string, room: Room, parent: Message | null, reply: Message): string[] {
+  const out = new Set<string>();
+  const anchor = parent && !parent.deleted ? parent : null;
+  if (anchor && authFor(root, anchor.author)) out.add(anchor.author);
+  if (reply.body.includes('@') || anchor?.body.includes('@')) {
+    for (const username of audienceOf(room, everyoneIn(root))) {
+      if (mentionsUser(reply.body, username) || (anchor && mentionsUser(anchor.body, username))) out.add(username);
+    }
+  }
+  return [...out];
+}
+
 /**
  * Tell everyone the room reaches, who has a page open, what their count is
  * now. Computed per person, since each has their own marker; only the people
@@ -73,10 +97,7 @@ export function postMessage(
 function notifyUnread(root: string, room: Room, m: Message): void {
   const listening = new Set(listeningUsers());
   if (listening.size === 0) return;
-  const everyone = () => {
-    const state = loadVault(root);
-    return state.status === 'ok' ? Object.keys(state.vault.users) : [];
-  };
+  const everyone = everyoneIn(root);
   for (const username of audienceOf(room, everyone)) {
     if (!listening.has(username) || !isNewsFor(m, username)) continue;
     publishToUser(username, { type: 'unread', url: room.url, title: room.title, ...unreadIn(root, username, room.url, room.dir) });
@@ -87,10 +108,7 @@ function notifyUnread(root: string, room: Room, m: Message): void {
 function notifyThreads(root: string, room: Room, m: Message): void {
   const listening = new Set(listeningUsers());
   if (listening.size === 0) return;
-  const everyone = () => {
-    const state = loadVault(root);
-    return state.status === 'ok' ? Object.keys(state.vault.users) : [];
-  };
+  const everyone = everyoneIn(root);
   const key = readKey(room.url);
   for (const username of audienceOf(room, everyone)) {
     if (!listening.has(username) || !isNewsFor(m, username)) continue;

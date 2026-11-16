@@ -995,8 +995,8 @@ function searchSummary(n: number, partial: boolean): string {
 const THREADS_PAGE = 50;
 
 /**
- * The threads the viewer follows (those they started, replied in, or
- * opened), newest reply first: each with its room, the message it hangs
+ * The threads the viewer follows (those they started, replied in, opened, or
+ * were mentioned in), newest reply first: each with its room, the message it hangs
  * from, its latest reply, and how many replies are new. A thread opens
  * wherever it is clicked, as a search result does.
  */
@@ -1025,8 +1025,8 @@ ${opening}
 </div>`;
   });
   const content = html`<h1>Threads</h1>
-<p class="muted">Threads you started, replied in, or opened, newest reply first.</p>
-${rows.length ? joinHtml(rows) : html`<p>No threads yet. A thread shows here once you start one, reply in one, or open one.</p>`}`;
+<p class="muted">Threads you started, replied in, opened, or were mentioned in, newest reply first.</p>
+${rows.length ? joinHtml(rows) : html`<p>No threads yet. A thread shows here once you start one, reply in one, open one, or are mentioned in one.</p>`}`;
   return doc('Threads', content, { viewer, root, active: THREADS_URL });
 }
 

@@ -129,3 +129,24 @@ test('the threads a user follows are those in rooms they can still see, with the
   assert.deepStrictEqual(threadsUnread(root, auth('carol')), { count: 1, mentions: 1 });
   assert.deepStrictEqual(threadsUnread(root, auth('dave')), { count: 0, mentions: 0 });
 });
+
+test('a reply makes whoever it or the message @mentions follow the thread, if the room reaches them', () => {
+  const root = tmpRoot();
+  for (const u of ['alice', 'bob', 'carol', 'dave', 'erin']) addUserToken(root, u, {});
+  createChannel(root, 'general', { createdBy: 'alice' });
+  createChannel(root, 'secret', { createdBy: 'alice', private: true });
+  const general = channelRoom(root, 'general', auth('alice'))!;
+  const m = postMessage(root, general, { author: 'alice', body: 'what do you think, @dave?' });
+  postMessage(root, threadRoom(general, m.id)!, { author: 'bob', body: 'ask @carol too' });
+  const followed = (u: string) => readMarkers(root, u)['c/general/t/1'];
+  assert.strictEqual(followed('alice'), 0);
+  assert.strictEqual(followed('bob'), 1);
+  assert.strictEqual(followed('carol'), 0);
+  assert.strictEqual(followed('dave'), 0);
+  assert.strictEqual(followed('erin'), undefined);
+  // A private channel reaches its members only, so a mention does not reach past them.
+  const secret = channelRoom(root, 'secret', auth('alice'))!;
+  const s = postMessage(root, secret, { author: 'alice', body: 'between us' });
+  postMessage(root, threadRoom(secret, s.id)!, { author: 'alice', body: 'should @erin know?' });
+  assert.strictEqual(readMarkers(root, 'erin')['c/secret/t/1'], undefined);
+});
