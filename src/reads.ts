@@ -26,6 +26,9 @@ import { channelDir, dmDir, isGuestName, meetingDir, userDir } from './workspace
 
 export const READ_FILE = 'read.json';
 
+/** The page of the threads a person follows, and its key among the counts. */
+export const THREADS_URL = '/threads';
+
 /** A room's key in read.json: its URL without the leading slash. */
 export function readKey(roomUrl: string): string {
   return roomUrl.replace(/^\//, '');
@@ -94,6 +97,31 @@ export function markRead(root: string, username: string, roomUrl: string, id: nu
   });
 }
 
+/**
+ * Have a user follow a thread without reading any of it: a marker at 0. A
+ * user follows the threads they have a marker for, which is those they opened
+ * or replied in, and this adds the ones hung off their own messages, so that
+ * an answer to them is counted before they have looked.
+ */
+export function followThread(root: string, username: string, threadUrl: string): void {
+  if (isGuestName(username)) return;
+  const key = readKey(threadUrl);
+  if (readMarkers(root, username)[key] !== undefined) return;
+  const file = readFile(root, username);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  withFileLock(`${file}.lock`, () => {
+    let markers: Record<string, number> = {};
+    try {
+      markers = normalize(JSON.parse(fs.readFileSync(file, 'utf8')));
+    } catch {
+      markers = {};
+    }
+    if (markers[key] !== undefined) return;
+    markers[key] = 0;
+    writeFileAtomic(file, JSON.stringify(markers, null, 2) + '\n', { mode: 0o600 });
+  });
+}
+
 /** Whether a read.json key is this room's, or one of its threads'. */
 export function isKeyOf(key: string, roomUrl: string): boolean {
   const k = readKey(roomUrl);
@@ -154,15 +182,14 @@ export function unreadIn(root: string, username: string, roomUrl: string, roomDi
 
 /**
  * How many replies in a message's thread a user has not read, for the mark on
- * its reply link. Counted only in a thread the user has a marker for (they
- * opened it or replied in it) or whose message they wrote: a thread they never
- * looked into is not news to them, and counting every such thread would mark
- * old history all over the workspace.
+ * its reply link. Counted only in a thread the user follows (see
+ * followThread): a thread they never looked into is not news to them, and
+ * counting every such thread would mark old history all over the workspace.
  */
 export function newReplies(root: string, username: string, roomUrl: string, roomDir: string, anchor: Message): number {
   if (anchor.replyCount === 0 || isGuestName(username)) return 0;
   const url = `${roomUrl}/t/${anchor.id}`;
-  if (readMarkers(root, username)[readKey(url)] === undefined && anchor.author !== username) return 0;
+  if (readMarkers(root, username)[readKey(url)] === undefined) return 0;
   return unreadIn(root, username, url, threadRoomDir(roomDir, anchor.id)).count;
 }
 
@@ -179,25 +206,82 @@ export interface RoomUnread extends Unread {
   with?: string[];
 }
 
-/** Every room the user can see, with what is unread in it, in sidebar order. */
-export function unreadRooms(root: string, auth: AuthResult): RoomUnread[] {
-  const out: RoomUnread[] = [];
+export interface VisibleRoom {
+  url: string;
+  title: string;
+  kind: 'channel' | 'dm' | 'meeting';
+  with?: string[];
+  dir: string;
+}
+
+/** Every room the user can see, in sidebar order. */
+function visibleRooms(root: string, auth: AuthResult): VisibleRoom[] {
+  const out: VisibleRoom[] = [];
   if (isGuestName(auth.username)) return out;
   for (const c of listChannels(root)) {
     if (!canSeeChannel(auth, c)) continue;
-    const url = `/c/${encodeURIComponent(c.name)}`;
-    out.push({ url, title: `#${c.name}`, kind: 'channel', ...unreadIn(root, auth.username, url, channelDir(root, c.name)) });
+    out.push({ url: `/c/${encodeURIComponent(c.name)}`, title: `#${c.name}`, kind: 'channel', dir: channelDir(root, c.name) });
   }
   for (const d of listDmsFor(root, auth.username)) {
-    const url = `/d/${d.id}`;
     const others = dmPeople(d).filter((p) => p !== auth.username);
-    out.push({ url, title: dmTitle(d, auth.username), kind: 'dm', with: others.length ? others : [auth.username], ...unreadIn(root, auth.username, url, dmDir(root, d.id)) });
+    out.push({ url: `/d/${d.id}`, title: dmTitle(d, auth.username), kind: 'dm', with: others.length ? others : [auth.username], dir: dmDir(root, d.id) });
   }
   for (const m of listMeetingsFor(root, auth.username)) {
-    const url = `/m/${m.id}`;
-    out.push({ url, title: m.title, kind: 'meeting', ...unreadIn(root, auth.username, url, meetingDir(root, m.id)) });
+    out.push({ url: `/m/${m.id}`, title: m.title, kind: 'meeting', dir: meetingDir(root, m.id) });
   }
   return out;
+}
+
+/** Every room the user can see, with what is unread in it, in sidebar order. */
+export function unreadRooms(root: string, auth: AuthResult): RoomUnread[] {
+  return visibleRooms(root, auth).map(({ dir, ...r }) => ({ ...r, ...unreadIn(root, auth.username, r.url, dir) }));
+}
+
+export interface ThreadUnread extends Unread {
+  /** The thread's page: /c/general/t/14. */
+  url: string;
+  /** The message it hangs from, by its id in the room. */
+  anchor: number;
+  room: VisibleRoom;
+  /** The thread's own directory. */
+  dir: string;
+}
+
+const THREAD_KEY = /^(.+)\/t\/([1-9][0-9]*)$/;
+
+/**
+ * The threads a user follows, in rooms they can still see, with what is
+ * unread in each. They are the thread keys in read.json, so this is one file
+ * read and a directory listing per thread.
+ */
+export function followedThreads(root: string, auth: AuthResult): ThreadUnread[] {
+  if (isGuestName(auth.username)) return [];
+  const markers = readMarkers(root, auth.username);
+  const keys = Object.keys(markers).filter((k) => THREAD_KEY.test(k));
+  if (keys.length === 0) return [];
+  const rooms = new Map(visibleRooms(root, auth).map((r) => [readKey(r.url), r]));
+  const out: ThreadUnread[] = [];
+  for (const key of keys) {
+    const [, roomKey, idText] = THREAD_KEY.exec(key)!;
+    const room = rooms.get(roomKey);
+    if (!room) continue;
+    const anchor = parseInt(idText, 10);
+    const url = `${room.url}/t/${anchor}`;
+    const dir = threadRoomDir(room.dir, anchor);
+    out.push({ url, anchor, room, dir, ...unreadIn(root, auth.username, url, dir) });
+  }
+  return out;
+}
+
+/** What is unread across the threads a user follows, for the sidebar's Threads. */
+export function threadsUnread(root: string, auth: AuthResult): Unread {
+  let count = 0;
+  let mentions = 0;
+  for (const t of followedThreads(root, auth)) {
+    count += t.count;
+    mentions += t.mentions;
+  }
+  return { count, mentions };
 }
 
 /**

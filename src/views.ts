@@ -19,12 +19,12 @@ import { lobbiesFor } from './guests';
 import { MARK } from './logo';
 import { MAX_GUEST_NAME, MAX_TITLE, MeetingInfo, currentGuests, guestLink, listMeetingsFor, mayDeleteMeeting, personLabel, readMeeting, returnLink } from './meetings';
 import { Device, NotifyPrefs, isMuted, readPrefs } from './notify';
-import { Attachment, MAX_ATTACHMENTS_BYTES, MAX_REACTION, Message } from './messages';
+import { Attachment, MAX_ATTACHMENTS_BYTES, MAX_REACTION, Message, readMessage, readMessages } from './messages';
 import { pageScript } from './pagescript';
 import { vapidKeys } from './push';
 import { canDeleteMessage, canEditMessage, canSeeChannel, isGuest, isSiteAdmin } from './perms';
 import { Pin, pinOf, readPins } from './pins';
-import { READ_FILE, RoomUnread, UNREAD_CAP, isNewsFor, mentionsUser, newReplies, readKey, unreadRooms } from './reads';
+import { READ_FILE, RoomUnread, THREADS_URL, UNREAD_CAP, Unread, followedThreads, isNewsFor, mentionsUser, newReplies, readKey, threadsUnread, unreadRooms } from './reads';
 import { Room, channelRoom, dmRoom, meetingRoom } from './rooms';
 import { MAX_HITS, SCAN_LIMIT, parseQuery } from './search';
 import { styleSheet } from './style';
@@ -105,7 +105,7 @@ function isUrgent(u: { url: string; count: number; mentions: number }): boolean 
  * on the favicon, red when a mention or a direct message is among it, which
  * is visible even where tabs are too narrow for their titles.
  */
-function unreadSummary(rooms: RoomUnread[]): { total: number; urgent: boolean } {
+function unreadSummary(rooms: { url: string; count: number; mentions: number }[]): { total: number; urgent: boolean } {
   let total = 0;
   let urgent = false;
   for (const r of rooms) {
@@ -132,7 +132,17 @@ function roomLink(u: RoomUnread, glyph: Html | string, active?: string, muted = 
   }${callMarker(call)}${badge(u)}</a></li>`;
 }
 
-function sidebar(opts: PageOpts, rooms: RoomUnread[]): Html {
+/**
+ * The sidebar's first entry: the threads the viewer follows, counted like a
+ * room, so that a reply in one is not missed for being inside a message.
+ */
+function threadsLink(threads: Unread, active?: string): Html {
+  const u = { url: THREADS_URL, ...threads };
+  const cls = [THREADS_URL === active ? 'current' : '', u.count ? 'unread' : ''].join(' ');
+  return html`<ul class="side-top"><li><a class="${cls}" href="${THREADS_URL}" data-room="${THREADS_URL}"><span class="room-glyph">${icon('comment')}</span><span class="room-name">Threads</span>${badge(u)}</a></li></ul>`;
+}
+
+function sidebar(opts: PageOpts, rooms: RoomUnread[], threads: Unread): Html {
   const root = opts.root;
   const privateNames = new Set(listChannels(root).filter((c) => c.private).map((c) => `/c/${encodeURIComponent(c.name)}`));
   const wsName = loadConfig(root).name;
@@ -141,6 +151,7 @@ function sidebar(opts: PageOpts, rooms: RoomUnread[]): Html {
   return html`<nav class="app-side">
 <div class="side-head"><a class="brand" href="/">${raw(MARK)}<span>${wsName}</span></a></div>
 <div class="side-rooms">
+${threadsLink(threads, opts.active)}
 <div class="side-cap"><span>Channels</span><a href="/new" title="New channel">${icon('plus')}</a></div>
 <ul>${joinHtml(
     rooms.filter((r) => r.kind === 'channel').map((r) => roomLink(r, privateNames.has(r.url) ? icon('lock') : '#', opts.active, isMuted(prefs, r.url), calls.get(r.url)))
@@ -168,7 +179,8 @@ export function layout(title: string, main: Html, opts: PageOpts): string {
   const guest = opts.viewer !== null && isGuest(opts.viewer.auth);
   const member = opts.viewer !== null && !guest;
   const rooms = member ? unreadRooms(opts.root, opts.viewer!.auth) : [];
-  const unread = unreadSummary(rooms);
+  const threads = member ? threadsUnread(opts.root, opts.viewer!.auth) : { count: 0, mentions: 0 };
+  const unread = unreadSummary([...rooms, { url: THREADS_URL, ...threads }]);
   // The workspace's name, not the page's: a tab is a workspace, and the room
   // in view changes too often to be what a tab is known by. A guest's tab is
   // their meeting.
@@ -186,7 +198,7 @@ export function layout(title: string, main: Html, opts: PageOpts): string {
   // page script).
   const lobby = member ? JSON.stringify(lobbiesFor(listMeetingsFor(opts.root, opts.viewer!.auth.username))) : '[]';
   const body = member
-    ? html`<div class="app ${opts.roomsPage ? 'rooms-page' : ''}" data-viewer="${opts.viewer!.auth.username}" data-current-room="${opts.active ?? ''}" data-csrf="${opts.viewer!.csrf}" data-call-script="/assets/call.js?v=${callScript().tag}" data-lobby="${lobby}" data-vapid="${vapidKeys(opts.root).publicKey}">${sidebar(opts, rooms)}<div class="app-main">${main}</div></div>`
+    ? html`<div class="app ${opts.roomsPage ? 'rooms-page' : ''}" data-viewer="${opts.viewer!.auth.username}" data-current-room="${opts.active ?? ''}" data-csrf="${opts.viewer!.csrf}" data-call-script="/assets/call.js?v=${callScript().tag}" data-lobby="${lobby}" data-vapid="${vapidKeys(opts.root).publicKey}">${sidebar(opts, rooms, threads)}<div class="app-main">${main}</div></div>`
     : guest
       ? html`<div class="app guest-app" data-viewer="${opts.viewer!.auth.username}" data-guest="1" data-current-room="${opts.active ?? ''}" data-csrf="${opts.viewer!.csrf}" data-call-script="/assets/call.js?v=${callScript().tag}" data-lobby="[]"><div class="app-main">${main}</div></div>`
       : html`<main class="container" style="padding-top: calc(48px + env(safe-area-inset-top))">${main}</main>`;
@@ -977,6 +989,45 @@ function searchSummary(n: number, partial: boolean): string {
   return partial
     ? `${found} Rooms with more than ${SCAN_LIMIT.toLocaleString('en-US')} messages were searched in their newest ${SCAN_LIMIT.toLocaleString('en-US')} only.`
     : found;
+}
+
+/** How many threads the Threads page lists, newest reply first. */
+const THREADS_PAGE = 50;
+
+/**
+ * The threads the viewer follows (those they started, replied in, or
+ * opened), newest reply first: each with its room, the message it hangs
+ * from, its latest reply, and how many replies are new. A thread opens
+ * wherever it is clicked, as a search result does.
+ */
+export function threadsPage(root: string, viewer: Viewer): string {
+  const threads = followedThreads(root, viewer.auth)
+    .map((t) => ({ t, last: readMessages(t.dir, { limit: 1 })[0] }))
+    .filter((x): x is { t: (typeof x)['t']; last: Message } => x.last !== undefined)
+    .sort((a, b) => b.last.created.localeCompare(a.last.created))
+    .slice(0, THREADS_PAGE);
+  const who = (roomUrl: string, author: string) =>
+    html`<span class="who">${avatar(author, 16)} ${isGuestName(author) ? searchGuestName(root, roomUrl, author) : author}</span>`;
+  const rows = threads.map(({ t, last }) => {
+    const anchor = readMessage(t.room.dir, t.anchor);
+    const where = t.room.kind === 'dm' ? html`${icon('people')} ${t.room.title}` : t.room.kind === 'meeting' ? html`${GUEST_ROOM_ICON} ${t.room.title}` : t.room.title;
+    const n = anchor?.replyCount ?? 0;
+    const mark = t.count ? html`<span class="thread-new"> · ${t.count > UNREAD_CAP ? `${UNREAD_CAP}+` : String(t.count)} new</span>` : '';
+    const opening =
+      anchor && !anchor.deleted
+        ? html`<div class="thread-anchor-text">${who(t.room.url, anchor.author)}<div class="markdown-body">${bodyHtml(root, anchor.body, viewer)}</div></div>`
+        : html`<div class="thread-anchor-text muted">This message was deleted.</div>`;
+    const latest = last.deleted ? html`<span class="muted">This message was deleted.</span>` : bodyHtml(root, last.body, viewer);
+    return html`<div class="search-result thread-result" data-href="${t.url}">
+<div class="where"><a href="${t.room.url}">${where}</a><a class="thread-link ${t.count ? 'has-new' : ''}" href="${t.url}">${n} ${n === 1 ? 'reply' : 'replies'}${mark}</a><a class="result-time" href="${t.url}" title="Latest reply">${timeTag(last.created, '')}</a></div>
+${opening}
+<div class="thread-latest">${who(t.room.url, last.author)}<div class="markdown-body">${latest}</div></div>
+</div>`;
+  });
+  const content = html`<h1>Threads</h1>
+<p class="muted">Threads you started, replied in, or opened, newest reply first.</p>
+${rows.length ? joinHtml(rows) : html`<p>No threads yet. A thread shows here once you start one, reply in one, or open one.</p>`}`;
+  return doc('Threads', content, { viewer, root, active: THREADS_URL });
 }
 
 export function searchPage(

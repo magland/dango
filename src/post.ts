@@ -1,9 +1,9 @@
 import { loadVault } from '../../mochiforge/src/vault';
 import { listeningUsers, publish, publishToUser } from './events';
 import { Attachment, CallRecord, Message, addMessage, findByNonce, readMessage, unsendMessage } from './messages';
-import { queueNotifications } from './notify';
+import { authFor, queueNotifications } from './notify';
 import { Room } from './rooms';
-import { audienceOf, isNewsFor, markRead, unreadIn } from './reads';
+import { THREADS_URL, audienceOf, followThread, isNewsFor, markRead, readKey, readMarkers, threadsUnread, unreadIn } from './reads';
 import { stopTyping } from './typing';
 
 // Sending a message, whichever door it came through. The web and the JSON
@@ -50,9 +50,14 @@ export function postMessage(
   if (room.kind === 'thread') {
     // The parent message's reply count changed, so the parent room repaints it.
     const parent = readMessage(room.parent!.dir, room.threadOf!);
+    // Whoever wrote the message follows its thread, so a reply to them is
+    // counted under Threads before they have opened it.
+    if (parent && !parent.deleted && authFor(root, parent.author)) followThread(root, parent.author, room.url);
     if (parent) publish(room.parent!.url, { type: 'update', message: parent });
     // A reply is not counted against the room: the sidebar counts what
-    // arrives in a room, and a thread is read from inside its message.
+    // arrives in a room, and a thread is read from inside its message. It
+    // is counted under Threads, for those who follow the thread.
+    notifyThreads(root, room, m);
     return m;
   }
   notifyUnread(root, room, m);
@@ -78,6 +83,27 @@ function notifyUnread(root: string, room: Room, m: Message): void {
   }
 }
 
+/** Everyone following a thread who has a page open is told their Threads count. */
+function notifyThreads(root: string, room: Room, m: Message): void {
+  const listening = new Set(listeningUsers());
+  if (listening.size === 0) return;
+  const everyone = () => {
+    const state = loadVault(root);
+    return state.status === 'ok' ? Object.keys(state.vault.users) : [];
+  };
+  const key = readKey(room.url);
+  for (const username of audienceOf(room, everyone)) {
+    if (!listening.has(username) || !isNewsFor(m, username)) continue;
+    if (readMarkers(root, username)[key] === undefined) continue;
+    publishThreads(root, username);
+  }
+}
+
+function publishThreads(root: string, username: string): void {
+  const auth = authFor(root, username);
+  if (auth) publishToUser(username, { type: 'unread', url: THREADS_URL, title: 'Threads', ...threadsUnread(root, auth) });
+}
+
 /** A person read a room up to a message: their other pages learn the count is now zero. */
 export function noteRead(root: string, username: string, room: Room, id: number): void {
   if (!markRead(root, username, room.url, id)) return;
@@ -86,6 +112,7 @@ export function noteRead(root: string, username: string, room: Room, id: number)
     // so the parent room repaints it: the reader's other pages drop the mark.
     const parent = readMessage(room.parent!.dir, room.threadOf!);
     if (parent) publish(room.parent!.url, { type: 'update', message: parent });
+    publishThreads(root, username);
     return;
   }
   publishToUser(username, { type: 'unread', url: room.url, title: room.title, ...unreadIn(root, username, room.url, room.dir) });

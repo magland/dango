@@ -519,7 +519,8 @@ function displayName(root: string, username: string, meeting?: MeetingInfo): str
   return (state.status === 'ok' && state.vault.users[username]?.profile?.name) || username;
 }
 
-function authFor(root: string, username: string): AuthResult | null {
+/** A member as the permission checks take them, or null when they are not in the workspace. */
+export function authFor(root: string, username: string): AuthResult | null {
   const state = loadVault(root);
   if (state.status !== 'ok' || !state.vault.users[username]) return null;
   return { username, user: state.vault.users[username], token: { hash: '' } } as AuthResult;

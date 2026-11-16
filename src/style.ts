@@ -494,6 +494,9 @@ form[data-busy] button[type="submit"] { opacity: 0.6; cursor: progress; }
 .search-result .where { display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--s2); font-size: var(--t-sm); margin-bottom: 2px; }
 .search-result .who { display: inline-flex; align-items: center; gap: 4px; color: var(--fg-muted); }
 .search-result .markdown-body { overflow-wrap: anywhere; }
+.thread-result .markdown-body { max-height: 7.5em; overflow: hidden; }
+.thread-latest { margin: 4px 0 0 var(--s2); padding-left: var(--s2); border-left: 2px solid var(--border); }
+.side-top { margin-bottom: var(--s2); }
 [data-highlight] mark { background: var(--line-mark); color: inherit; border-radius: 2px; }
 .this-device { margin-left: 6px; }
 

@@ -4,11 +4,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
-import { AuthResult } from '../../mochiforge/src/vault';
+import { AuthResult, addUserToken } from '../../mochiforge/src/vault';
 import { createChannel } from '../src/channels';
 import { openDm } from '../src/dms';
 import { addMessage, deleteMessage, readMessage, threadRoomDir } from '../src/messages';
-import { audienceOf, markRead, mentionsUser, newReplies, readMarkers, unreadIn, unreadRooms } from '../src/reads';
+import { audienceOf, followThread, followedThreads, markRead, mentionsUser, newReplies, readMarkers, threadsUnread, unreadIn, unreadRooms } from '../src/reads';
+import { postMessage } from '../src/post';
+import { channelRoom, threadRoom } from '../src/rooms';
 import { channelDir, dmDir } from '../src/workspace';
 
 function tmpRoot(): string {
@@ -73,28 +75,57 @@ test('a room’s news reaches everyone, its members, or its participants', () =>
   assert.deepStrictEqual(audienceOf({ dm: { id: 1, participants: ['alice', 'bob'] } }, everyone), ['alice', 'bob']);
 });
 
-test('new replies are counted for the message author and for whoever opened or replied in its thread', () => {
+test('new replies are counted in a thread the user follows: opened, replied in, or hung off their message', () => {
   const root = tmpRoot();
+  for (const u of ['alice', 'bob', 'carol']) addUserToken(root, u, {});
   createChannel(root, 'general', { createdBy: 'alice' });
-  const dir = channelDir(root, 'general');
-  const m = addMessage(dir, { author: 'alice', body: 'question' });
-  const thread = threadRoomDir(dir, m.id);
-  const anchor = () => readMessage(dir, m.id)!;
-  assert.strictEqual(newReplies(root, 'alice', '/c/general', dir, anchor()), 0);
-  addMessage(thread, { author: 'bob', body: 'answer' });
-  markRead(root, 'bob', '/c/general/t/1', 1);
-  // The author has never opened the thread and is told; carol never looked into it and is not.
-  assert.strictEqual(newReplies(root, 'alice', '/c/general', dir, anchor()), 1);
-  assert.strictEqual(newReplies(root, 'carol', '/c/general', dir, anchor()), 0);
-  assert.strictEqual(newReplies(root, 'bob', '/c/general', dir, anchor()), 0);
+  const general = channelRoom(root, 'general', auth('alice'))!;
+  const m = postMessage(root, general, { author: 'alice', body: 'question' });
+  const thread = threadRoom(general, m.id)!;
+  const anchor = () => readMessage(general.dir, m.id)!;
+  assert.strictEqual(newReplies(root, 'alice', '/c/general', general.dir, anchor()), 0);
+  postMessage(root, thread, { author: 'bob', body: 'answer' });
+  // The reply made alice follow her message's thread; carol never looked into it.
+  assert.strictEqual(readMarkers(root, 'alice')['c/general/t/1'], 0);
+  assert.strictEqual(newReplies(root, 'alice', '/c/general', general.dir, anchor()), 1);
+  assert.strictEqual(newReplies(root, 'carol', '/c/general', general.dir, anchor()), 0);
+  assert.strictEqual(newReplies(root, 'bob', '/c/general', general.dir, anchor()), 0);
   markRead(root, 'alice', '/c/general/t/1', 1);
   markRead(root, 'carol', '/c/general/t/1', 1);
-  addMessage(thread, { author: 'alice', body: 'thanks' });
-  const gone = addMessage(thread, { author: 'bob', body: 'oops' });
-  deleteMessage(thread, gone.id);
-  addMessage(thread, { author: 'bob', body: 'one more thing' });
-  // Your own replies and deleted ones are not news.
-  assert.strictEqual(newReplies(root, 'alice', '/c/general', dir, anchor()), 1);
-  assert.strictEqual(newReplies(root, 'carol', '/c/general', dir, anchor()), 2);
-  assert.strictEqual(newReplies(root, 'bob', '/c/general', dir, anchor()), 1);
+  postMessage(root, thread, { author: 'alice', body: 'thanks' });
+  const gone = postMessage(root, thread, { author: 'bob', body: 'oops' });
+  deleteMessage(thread.dir, gone.id);
+  postMessage(root, thread, { author: 'bob', body: 'one more thing' });
+  // Your own replies and deleted ones are not news, and sending one reads the thread.
+  assert.strictEqual(newReplies(root, 'alice', '/c/general', general.dir, anchor()), 1);
+  assert.strictEqual(newReplies(root, 'carol', '/c/general', general.dir, anchor()), 2);
+  assert.strictEqual(newReplies(root, 'bob', '/c/general', general.dir, anchor()), 0);
+});
+
+test('following a thread never unreads it', () => {
+  const root = tmpRoot();
+  markRead(root, 'alice', '/c/general/t/3', 4);
+  followThread(root, 'alice', '/c/general/t/3');
+  followThread(root, 'alice', '/c/general/t/5');
+  assert.deepStrictEqual(readMarkers(root, 'alice'), { 'c/general/t/3': 4, 'c/general/t/5': 0 });
+});
+
+test('the threads a user follows are those in rooms they can still see, with their counts', () => {
+  const root = tmpRoot();
+  createChannel(root, 'general', { createdBy: 'alice' });
+  createChannel(root, 'secret', { createdBy: 'alice', private: true });
+  const general = channelDir(root, 'general');
+  const secret = channelDir(root, 'secret');
+  const a = addMessage(general, { author: 'alice', body: 'one' });
+  const b = addMessage(secret, { author: 'alice', body: 'two' });
+  addMessage(threadRoomDir(general, a.id), { author: 'bob', body: 'reply, @carol' });
+  addMessage(threadRoomDir(secret, b.id), { author: 'bob', body: 'secret reply' });
+  for (const t of ['/c/general/t/1', '/c/secret/t/1']) followThread(root, 'carol', t);
+  // Carol is not in #secret, so its thread is not hers to see, whatever read.json says.
+  assert.deepStrictEqual(
+    followedThreads(root, auth('carol')).map((t) => [t.url, t.count, t.mentions]),
+    [['/c/general/t/1', 1, 1]]
+  );
+  assert.deepStrictEqual(threadsUnread(root, auth('carol')), { count: 1, mentions: 1 });
+  assert.deepStrictEqual(threadsUnread(root, auth('dave')), { count: 0, mentions: 0 });
 });

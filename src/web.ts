@@ -116,7 +116,7 @@ import {
 } from './notify';
 import { noteRead, postMessage } from './post';
 import { vapidKeys } from './push';
-import { readChangedAt, readKey, readMarkers } from './reads';
+import { THREADS_URL, readChangedAt, readKey, readMarkers } from './reads';
 import { Room, channelRoom, dmRoom, meetingRoom, removeWorkspaceUser, threadRoom } from './rooms';
 import { searchMessages } from './search';
 import { noteTyping, stopTyping, typingIn } from './typing';
@@ -389,6 +389,19 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       }
       throw e;
     }
+  });
+
+  // The threads the viewer follows. Never kept by the browser: it is a
+  // summary of what they have read, which the back button must not bring
+  // back as it was.
+  app.get(THREADS_URL, (req, res) => {
+    const viewer = requireViewer(req, res);
+    if (!viewer) return;
+    if (isGuest(viewer.auth)) {
+      res.redirect(303, '/');
+      return;
+    }
+    res.set('Cache-Control', 'no-store').type('html').send(views.threadsPage(root, viewer));
   });
 
   app.get('/search', (req, res) => {
