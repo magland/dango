@@ -325,6 +325,8 @@ body:has(.lobby-notice) .push-notice { display: none; }
 .react-pill:hover { border-color: var(--accent-soft); }
 .react-pill.mine { background: var(--chip-bg); border-color: var(--accent-soft); color: var(--fg); }
 .thread-link { font-size: var(--t-sm); }
+.thread-link.has-new { font-weight: 600; }
+.thread-new { color: var(--danger); }
 
 /* Attached files: one bordered row per file, the icon in the gutter. */
 .msg-files { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }

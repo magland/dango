@@ -24,7 +24,7 @@ import { pageScript } from './pagescript';
 import { vapidKeys } from './push';
 import { canDeleteMessage, canEditMessage, canSeeChannel, isGuest, isSiteAdmin } from './perms';
 import { Pin, pinOf, readPins } from './pins';
-import { READ_FILE, RoomUnread, UNREAD_CAP, isNewsFor, mentionsUser, readKey, unreadRooms } from './reads';
+import { READ_FILE, RoomUnread, UNREAD_CAP, isNewsFor, mentionsUser, newReplies, readKey, unreadRooms } from './reads';
 import { Room, channelRoom, dmRoom, meetingRoom } from './rooms';
 import { MAX_HITS, SCAN_LIMIT, parseQuery } from './search';
 import { styleSheet } from './style';
@@ -372,6 +372,20 @@ function msgTools(room: Room, m: Message, viewer: Viewer): Html {
 }
 
 /**
+ * The link under a message to its thread, "3 replies", or nothing when it has
+ * none. Replies the viewer has not read are added to it, "3 replies · 2 new",
+ * so that an answer arriving in a thread is seen from the room. Not on the
+ * message atop its own thread's page, whose replies are right below it.
+ */
+function threadLink(root: string, room: Room, m: Message, viewer: Viewer, idPrefix: string, glyph = true): Html | '' {
+  if (room.kind === 'thread' || m.replyCount === 0) return '';
+  const fresh = idPrefix === 'parent-' ? 0 : newReplies(root, viewer.auth.username, room.url, room.dir, m);
+  const label = `${m.replyCount} ${m.replyCount === 1 ? 'reply' : 'replies'}`;
+  const mark = fresh ? html`<span class="thread-new"> · ${fresh > UNREAD_CAP ? `${UNREAD_CAP}+` : String(fresh)} new</span>` : '';
+  return html`<a class="thread-link ${fresh ? 'has-new' : ''}" href="${room.url}/t/${m.id}">${glyph ? html`${icon('comment')} ` : ''}${label}${mark}</a>`;
+}
+
+/**
  * One message as a list item. This is what the page renders and what the
  * event stream sends, so a message looks the same however it arrived. Its
  * author and time ride on the item, so the page script can tell, as the
@@ -380,19 +394,14 @@ function msgTools(room: Room, m: Message, viewer: Viewer): Html {
 export function messageHtml(root: string, room: Room, m: Message, viewer: Viewer, cont = false, idPrefix = 'msg-'): Html {
   if (m.deleted) {
     return html`<li class="msg msg-gone" id="${idPrefix}${m.id}" data-mid="${m.id}" data-created="${m.created}"><span class="avatar-gap" aria-hidden="true"></span><div class="msg-main"><span class="msg-deleted">This message was deleted.</span>${
-      m.replyCount > 0 && room.kind !== 'thread'
-        ? html`<div class="msg-below"><a class="thread-link" href="${room.url}/t/${m.id}">${m.replyCount} ${m.replyCount === 1 ? 'reply' : 'replies'}</a></div>`
-        : ''
+      m.replyCount > 0 && room.kind !== 'thread' ? html`<div class="msg-below">${threadLink(root, room, m, viewer, idPrefix, false)}</div>` : ''
     }</div></li>`;
   }
-  if (m.call) return callEntryHtml(room, m, viewer, cont, idPrefix);
+  if (m.call) return callEntryHtml(root, room, m, viewer, cont, idPrefix);
   const reactions = Object.entries(m.reactions).map(([emoji, users]) =>
     reactForm(room.url, m.id, emoji, viewer, users.includes(viewer.auth.username), users.length)
   );
-  const thread =
-    room.kind !== 'thread' && m.replyCount > 0
-      ? html`<a class="thread-link" href="${room.url}/t/${m.id}">${icon('comment')} ${m.replyCount} ${m.replyCount === 1 ? 'reply' : 'replies'}</a>`
-      : '';
+  const thread = threadLink(root, room, m, viewer, idPrefix);
   const below = reactions.length || thread ? html`<div class="msg-below">${joinHtml(reactions)}${thread}</div>` : '';
   // A message that names the viewer is marked down its left side, so it can be
   // found in a scroll the way a flagged line can be found on a page.
@@ -422,7 +431,7 @@ export function callLength(ms: number): string {
  * long. An entry whose call is not going on, and never recorded its end, is
  * one the workspace was restarted under while nobody was left to resume it.
  */
-function callEntryHtml(room: Room, m: Message, viewer: Viewer, cont: boolean, idPrefix: string): Html {
+function callEntryHtml(root: string, room: Room, m: Message, viewer: Viewer, cont: boolean, idPrefix: string): Html {
   const rec = m.call!;
   const live = liveCall(room.url);
   const isLive = live !== null && live.id === rec.id;
@@ -441,10 +450,7 @@ function callEntryHtml(room: Room, m: Message, viewer: Viewer, cont: boolean, id
   const reactions = Object.entries(m.reactions).map(([emoji, users]) =>
     reactForm(room.url, m.id, emoji, viewer, users.includes(viewer.auth.username), users.length)
   );
-  const thread =
-    room.kind !== 'thread' && m.replyCount > 0
-      ? html`<a class="thread-link" href="${room.url}/t/${m.id}">${icon('comment')} ${m.replyCount} ${m.replyCount === 1 ? 'reply' : 'replies'}</a>`
-      : '';
+  const thread = threadLink(root, room, m, viewer, idPrefix);
   const below = reactions.length || thread ? html`<div class="msg-below">${joinHtml(reactions)}${thread}</div>` : '';
   const pin = room.kind === 'thread' ? null : pinOf(room.dir, m.id);
   return html`<li class="msg msg-call ${pin ? 'pinned' : ''} ${cont ? 'msg-cont' : ''}" id="${idPrefix}${m.id}" data-mid="${m.id}" data-author="${m.author}" data-created="${m.created}">${avatar(m.author, 32)}<div class="msg-main">

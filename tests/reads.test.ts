@@ -7,8 +7,8 @@ import { test } from 'node:test';
 import { AuthResult } from '../../mochiforge/src/vault';
 import { createChannel } from '../src/channels';
 import { openDm } from '../src/dms';
-import { addMessage, deleteMessage } from '../src/messages';
-import { audienceOf, markRead, mentionsUser, readMarkers, unreadIn, unreadRooms } from '../src/reads';
+import { addMessage, deleteMessage, readMessage, threadRoomDir } from '../src/messages';
+import { audienceOf, markRead, mentionsUser, newReplies, readMarkers, unreadIn, unreadRooms } from '../src/reads';
 import { channelDir, dmDir } from '../src/workspace';
 
 function tmpRoot(): string {
@@ -71,4 +71,30 @@ test('a room’s news reaches everyone, its members, or its participants', () =>
   assert.deepStrictEqual(audienceOf({ channel: { name: 'g', topic: '', private: false, members: [] } }, everyone), everyone());
   assert.deepStrictEqual(audienceOf({ channel: { name: 's', topic: '', private: true, members: ['alice'] } }, everyone), ['alice']);
   assert.deepStrictEqual(audienceOf({ dm: { id: 1, participants: ['alice', 'bob'] } }, everyone), ['alice', 'bob']);
+});
+
+test('new replies are counted for the message author and for whoever opened or replied in its thread', () => {
+  const root = tmpRoot();
+  createChannel(root, 'general', { createdBy: 'alice' });
+  const dir = channelDir(root, 'general');
+  const m = addMessage(dir, { author: 'alice', body: 'question' });
+  const thread = threadRoomDir(dir, m.id);
+  const anchor = () => readMessage(dir, m.id)!;
+  assert.strictEqual(newReplies(root, 'alice', '/c/general', dir, anchor()), 0);
+  addMessage(thread, { author: 'bob', body: 'answer' });
+  markRead(root, 'bob', '/c/general/t/1', 1);
+  // The author has never opened the thread and is told; carol never looked into it and is not.
+  assert.strictEqual(newReplies(root, 'alice', '/c/general', dir, anchor()), 1);
+  assert.strictEqual(newReplies(root, 'carol', '/c/general', dir, anchor()), 0);
+  assert.strictEqual(newReplies(root, 'bob', '/c/general', dir, anchor()), 0);
+  markRead(root, 'alice', '/c/general/t/1', 1);
+  markRead(root, 'carol', '/c/general/t/1', 1);
+  addMessage(thread, { author: 'alice', body: 'thanks' });
+  const gone = addMessage(thread, { author: 'bob', body: 'oops' });
+  deleteMessage(thread, gone.id);
+  addMessage(thread, { author: 'bob', body: 'one more thing' });
+  // Your own replies and deleted ones are not news.
+  assert.strictEqual(newReplies(root, 'alice', '/c/general', dir, anchor()), 1);
+  assert.strictEqual(newReplies(root, 'carol', '/c/general', dir, anchor()), 2);
+  assert.strictEqual(newReplies(root, 'bob', '/c/general', dir, anchor()), 1);
 });

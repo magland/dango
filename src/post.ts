@@ -81,6 +81,12 @@ function notifyUnread(root: string, room: Room, m: Message): void {
 /** A person read a room up to a message: their other pages learn the count is now zero. */
 export function noteRead(root: string, username: string, room: Room, id: number): void {
   if (!markRead(root, username, room.url, id)) return;
-  if (room.kind === 'thread') return;
+  if (room.kind === 'thread') {
+    // The parent's reply link says how many replies are new to each viewer,
+    // so the parent room repaints it: the reader's other pages drop the mark.
+    const parent = readMessage(room.parent!.dir, room.threadOf!);
+    if (parent) publish(room.parent!.url, { type: 'update', message: parent });
+    return;
+  }
   publishToUser(username, { type: 'unread', url: room.url, title: room.title, ...unreadIn(root, username, room.url, room.dir) });
 }

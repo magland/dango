@@ -116,7 +116,7 @@ import {
 } from './notify';
 import { noteRead, postMessage } from './post';
 import { vapidKeys } from './push';
-import { readKey, readMarkers } from './reads';
+import { readChangedAt, readKey, readMarkers } from './reads';
 import { Room, channelRoom, dmRoom, meetingRoom, removeWorkspaceUser, threadRoom } from './rooms';
 import { searchMessages } from './search';
 import { noteTyping, stopTyping, typingIn } from './typing';
@@ -1107,6 +1107,16 @@ export function registerWeb(app: Express, root: string, authLimiter: AuthLimiter
       let catchUp: RoomEvent[] | 'reload' = 'reload';
       if (after === 0 || countAfter(room.dir, after) <= CATCH_UP) {
         const changed = Number.isInteger(since) && since > 0 && after > 0 ? changedSince(room.dir, after, since - 2000, CATCH_UP) : [];
+        // Reading a thread changes none of the room's messages, only how many
+        // replies its link calls new. A page coming back after its viewer read
+        // something (the back button brings a room back as it was first drawn)
+        // repaints the messages that have threads.
+        if (room.kind !== 'thread' && since > 0 && after > 0 && readChangedAt(root, viewer.auth.username) > since - 2000) {
+          const sent = new Set(changed.map((m) => m.id));
+          for (const m of readMessages(room.dir, { before: after + 1, limit: CATCH_UP })) {
+            if (m.replyCount > 0 && !sent.has(m.id)) changed.push(m);
+          }
+        }
         catchUp = [
           ...changed.map((m) => ({ type: 'update' as const, message: m })),
           ...readMessages(room.dir, { after, limit: CATCH_UP }).map((m) => ({ type: 'message' as const, message: m })),

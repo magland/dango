@@ -6,7 +6,7 @@ import { AuthResult } from '../../mochiforge/src/vault';
 import { ChannelInfo, listChannels } from './channels';
 import { DmInfo, dmPeople, dmTitle, listDmsFor } from './dms';
 import { MeetingInfo, listMeetingsFor } from './meetings';
-import { Message, readMessages } from './messages';
+import { Message, readMessages, threadRoomDir } from './messages';
 import { canSeeChannel } from './perms';
 import { channelDir, dmDir, isGuestName, meetingDir, userDir } from './workspace';
 
@@ -57,6 +57,15 @@ const cache = fileCache<Record<string, number>>({
 
 export function readMarkers(root: string, username: string): Record<string, number> {
   return cache.get(readFile(root, username));
+}
+
+/** When a user's read markers last changed, in ms since the epoch; 0 when they have none. */
+export function readChangedAt(root: string, username: string): number {
+  try {
+    return fs.statSync(readFile(root, username)).mtimeMs;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -141,6 +150,20 @@ export function unreadIn(root: string, username: string, roomUrl: string, roomDi
     if (mentionsUser(m.body, username)) mentions++;
   }
   return { count, mentions };
+}
+
+/**
+ * How many replies in a message's thread a user has not read, for the mark on
+ * its reply link. Counted only in a thread the user has a marker for (they
+ * opened it or replied in it) or whose message they wrote: a thread they never
+ * looked into is not news to them, and counting every such thread would mark
+ * old history all over the workspace.
+ */
+export function newReplies(root: string, username: string, roomUrl: string, roomDir: string, anchor: Message): number {
+  if (anchor.replyCount === 0 || isGuestName(username)) return 0;
+  const url = `${roomUrl}/t/${anchor.id}`;
+  if (readMarkers(root, username)[readKey(url)] === undefined && anchor.author !== username) return 0;
+  return unreadIn(root, username, url, threadRoomDir(roomDir, anchor.id)).count;
 }
 
 /** Whether one message counts as unread news for a user, for a live update. */

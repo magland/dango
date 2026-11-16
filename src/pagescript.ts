@@ -1273,6 +1273,16 @@ document.addEventListener('keydown', function (e) {
 document.addEventListener('click', function (e) {
   if (e.target.matches && e.target.matches('.composer textarea') && mentionState.open) mentionInput(e.target);
 });
+// Opening a thread reads it, so its link stops saying there is something new
+// before the page goes: a room brought back from the back-forward cache would
+// otherwise still show it.
+document.addEventListener('click', function (e) {
+  var a = closestOf(e.target, '.thread-link.has-new');
+  if (!a) return;
+  a.classList.remove('has-new');
+  var mark = a.querySelector('.thread-new');
+  if (mark) mark.remove();
+});
 document.addEventListener('focusout', function (e) {
   if (e.target.matches && e.target.matches('.composer textarea')) closeMentions(e.target);
 });
